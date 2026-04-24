@@ -1,0 +1,21 @@
+{
+  "name": "armoriq",
+  "interface": {
+    "displayName": "ArmorIQ"
+  },
+  "plugins": [
+    {
+      "name": "armorcodex",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/armoriq/armorCodex.git",
+        "ref": "main"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Security"
+    }
+  ]
+}

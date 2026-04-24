@@ -1,0 +1,57 @@
+{
+  "name": "armorcodex",
+  "version": "0.2.0",
+  "description": "ArmorIQ intent-based security enforcement for Codex: policy-based tool access control, intent verification, CSRG cryptographic proofs, and audit logging.",
+  "author": { "name": "ArmorIQ", "email": "license@armoriq.io" },
+  "homepage": "https://armoriq.ai",
+  "repository": "https://github.com/armoriq/armorCodex",
+  "license": "MIT",
+  "keywords": ["security", "policy", "audit", "intent", "armoriq", "mcp"],
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "ArmorCodex",
+    "shortDescription": "Intent and policy enforcement for Codex Bash actions.",
+    "longDescription": "ArmorIQ intent-based security enforcement for OpenAI Codex, with policy rules, signed intent verification, optional CSRG cryptographic proofs, and audit logging for Codex hook events.",
+    "developerName": "ArmorIQ",
+    "category": "Security",
+    "capabilities": ["MCP", "Hooks"],
+    "websiteURL": "https://armoriq.ai",
+    "brandColor": "#00E5CC",
+    "defaultPrompt": [
+      "Use ArmorCodex to register an intent plan before running shell commands.",
+      "Use ArmorCodex policy tools to list or update allowed Codex command policy."
+    ]
+  },
+  "userConfig": {
+    "api_key": {
+      "type": "string",
+      "title": "ArmorIQ API Key",
+      "description": "Your ArmorIQ API key (get one at https://armoriq.ai). Leave blank to run in local-only mode without backend audit/intent.",
+      "sensitive": true
+    },
+    "mode": {
+      "type": "string",
+      "title": "Enforcement Mode",
+      "description": "enforce = block on policy/intent failures (recommended). monitor = log only, never block.",
+      "sensitive": false
+    },
+    "intent_required": {
+      "type": "boolean",
+      "title": "Require Intent Plan",
+      "description": "When true, every tool call must be backed by a registered intent plan. Disable for advisory-only use.",
+      "sensitive": false
+    },
+    "crypto_policy_enabled": {
+      "type": "boolean",
+      "title": "Enable Crypto Policy Binding",
+      "description": "Bind policy rules to a Merkle tree so post-issuance tampering is detected.",
+      "sensitive": false
+    },
+    "use_production": {
+      "type": "boolean",
+      "title": "Use Production Endpoints",
+      "description": "When true, talks to ArmorIQ production. When false, expects a local backend on 127.0.0.1.",
+      "sensitive": false
+    }
+  }
+}
