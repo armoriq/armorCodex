@@ -13,6 +13,8 @@ ArmorCodex is built for the current Codex hook harness documented by OpenAI:
 
 Treat ArmorCodex as a strong Bash guardrail and audit layer, not a complete boundary for every Codex capability.
 
+See [Codex harness limitations](CODEX_HARNESS_LIMITATIONS.md) for the harness gaps that need to be addressed before ArmorCodex can claim broader tool coverage.
+
 Sources: OpenAI Codex hooks docs and plugin build docs:
 https://developers.openai.com/codex/hooks
 https://developers.openai.com/codex/plugins/build

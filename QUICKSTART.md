@@ -41,3 +41,5 @@ Without an API key, ArmorCodex still performs local policy and local plan enforc
 ## Current Limitation
 
 Codex hooks currently intercept Bash for `PreToolUse`, `PermissionRequest`, and `PostToolUse`. Other Codex tools are not directly gated by ArmorCodex hooks yet.
+
+For the full list of OpenAI Codex harness limitations ArmorCodex depends on, see [Codex harness limitations](CODEX_HARNESS_LIMITATIONS.md).
