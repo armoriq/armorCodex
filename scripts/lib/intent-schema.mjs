@@ -1,8 +1,10 @@
 /**
  * Shared intent plan schema — single source of truth used by:
  *  - register_intent_plan MCP tool (validates Codex's input)
- *  - ExitPlanMode plan-file parser (validates extracted JSON block)
- *  - UserPromptSubmit directive (format string injected into Codex's context)
+ *  - register_intent_plan inputSchema (model sees this when invoking the tool)
+ *
+ * Codex has no ExitPlanMode-equivalent event, so unlike ArmorClaude there is
+ * no plan-file extraction path on Codex.
  */
 
 import { z } from "zod";

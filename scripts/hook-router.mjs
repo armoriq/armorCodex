@@ -4,6 +4,8 @@ import {
   handlePermissionRequest,
   handlePreToolUse,
   handlePostToolUse,
+  handlePostToolUseFailure,
+  handleSessionEnd,
   handleSessionStart,
   handleStop,
   handleUserPromptSubmit
@@ -70,8 +72,14 @@ async function main() {
     case "PostToolUse":
       output = await handlePostToolUse(input, config);
       break;
+    case "PostToolUseFailure":
+      output = await handlePostToolUseFailure(input, config);
+      break;
     case "Stop":
       output = await handleStop(input, config);
+      break;
+    case "SessionEnd":
+      output = await handleSessionEnd(input, config);
       break;
     default:
       debugLog(config, `unhandled hook event: ${event}`);

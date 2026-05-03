@@ -1,5 +1,13 @@
 import { createHash } from "node:crypto";
-import { isPlainObject, isSubsetValue, normalizeToolName } from "./common.mjs";
+import {
+  isMatcherSpec,
+  isPlainObject,
+  isSubsetValue,
+  matchParams,
+  matchesAnyStringField,
+  matchesScalar,
+  normalizeToolName
+} from "./common.mjs";
 import { readJson, writeJson } from "./fs-store.mjs";
 
 const POLICY_ACTIONS = new Set(["allow", "deny", "require_approval"]);
@@ -25,6 +33,15 @@ function normalizeRule(rule) {
   }
   if (isPlainObject(rule.params)) {
     normalized.params = rule.params;
+  }
+  // anyParam: matcher applied across any string field in the tool input.
+  // Useful for free-text intents like "deny ~/.ssh" where we don't know
+  // which key the tool will store the path under.
+  if (isMatcherSpec(rule.anyParam) || typeof rule.anyParam === "string") {
+    normalized.anyParam =
+      typeof rule.anyParam === "string"
+        ? { $contains: rule.anyParam }
+        : rule.anyParam;
   }
   return normalized;
 }
@@ -153,6 +170,7 @@ export function detectDataClasses(toolName, toolParams) {
 export function evaluatePolicy({ policy, toolName, toolParams }) {
   const rules = normalizePolicy(policy).rules;
   const dataClasses = detectDataClasses(toolName, toolParams);
+  const warnings = [];
 
   for (const rule of rules) {
     if (!toolMatches(rule.tool, toolName)) {
@@ -161,18 +179,42 @@ export function evaluatePolicy({ policy, toolName, toolParams }) {
     if (rule.dataClass && !dataClasses.has(rule.dataClass)) {
       continue;
     }
-    if (rule.params && !isSubsetValue(rule.params, toolParams || {})) {
+    let paramsMatched = true;
+    if (rule.params) {
+      const result = matchParams(rule.params, toolParams || {});
+      paramsMatched = result.matched;
+      // Surface "rule probably won't fire": rule references keys absent from
+      // this tool's input, which usually means the user's intent isn't
+      // expressible as-is.
+      if (!result.matched && result.missingKeys.length > 0) {
+        warnings.push({
+          ruleId: rule.id,
+          tool: rule.tool,
+          missingKeys: result.missingKeys,
+          message: `Rule ${rule.id} references keys absent from ${toolName} input: ${result.missingKeys.join(", ")}. Consider using anyParam or operator-based matchers.`
+        });
+      }
+    }
+    if (!paramsMatched) {
       continue;
     }
+    // anyParam matches if ANY string field in the tool input satisfies the
+    // matcher. Useful when the user doesn't know which key holds the path.
+    if (rule.anyParam) {
+      if (!matchesAnyStringField(rule.anyParam, toolParams || {})) {
+        continue;
+      }
+    }
     if (rule.action === "allow") {
-      return { allowed: true, matchedRule: rule, dataClasses: Array.from(dataClasses) };
+      return { allowed: true, matchedRule: rule, dataClasses: Array.from(dataClasses), warnings };
     }
     if (rule.action === "deny") {
       return {
         allowed: false,
         reason: `ArmorCodex policy deny: ${rule.id}`,
         matchedRule: rule,
-        dataClasses: Array.from(dataClasses)
+        dataClasses: Array.from(dataClasses),
+        warnings
       };
     }
     if (rule.action === "require_approval") {
@@ -180,12 +222,13 @@ export function evaluatePolicy({ policy, toolName, toolParams }) {
         allowed: false,
         reason: `ArmorCodex policy requires approval: ${rule.id}`,
         matchedRule: rule,
-        dataClasses: Array.from(dataClasses)
+        dataClasses: Array.from(dataClasses),
+        warnings
       };
     }
   }
 
-  return { allowed: true, dataClasses: Array.from(dataClasses) };
+  return { allowed: true, dataClasses: Array.from(dataClasses), warnings };
 }
 
 function truncateReason(text, max = 160) {
@@ -200,6 +243,14 @@ function formatRule(rule) {
   const parts = [`id=${rule.id}`, `action=${rule.action}`, `tool=${rule.tool}`];
   if (rule.dataClass) {
     parts.push(`dataClass=${rule.dataClass}`);
+  }
+  if (rule.anyParam) {
+    const op = Object.keys(rule.anyParam)[0];
+    const val = rule.anyParam[op];
+    parts.push(`match=${op}:${val}`);
+  }
+  if (rule.params) {
+    parts.push(`params=${JSON.stringify(rule.params)}`);
   }
   return parts.join(" ");
 }
@@ -259,6 +310,50 @@ function sanitizeToolName(candidate) {
   return VALID_TOOL_NAME.test(trimmed) ? trimmed : null;
 }
 
+// Detect a path or substring the user wants to block. Looks for things like
+// ~/.ssh, /etc/passwd, or quoted/backticked snippets after "block"/"deny".
+function inferAnyParamMatcher(text) {
+  // Quoted snippets first: most explicit.
+  const quoted =
+    text.match(/"([^"\n]{2,80})"/) ||
+    text.match(/'([^'\n]{2,80})'/);
+  if (quoted && quoted[1]) {
+    return inferMatcherForPhrase(quoted[1]);
+  }
+  // Path-like tokens: ~/..., /xxx/yyy, $HOME/...
+  const pathMatch = text.match(/((?:~|\$\{?HOME\}?|\/)[\w./@\-+~]{2,120})/);
+  if (pathMatch && pathMatch[1]) {
+    const candidate = pathMatch[1].replace(/[.,;:)\]}]+$/, "");
+    if (candidate.length >= 2) {
+      return { $pathContains: candidate };
+    }
+  }
+  return null;
+}
+
+function inferMatcherForPhrase(phrase) {
+  const trimmed = phrase.trim();
+  if (!trimmed) return null;
+  if (/^(?:~|\$\{?HOME\}?|\/)/.test(trimmed)) {
+    return { $pathContains: trimmed };
+  }
+  // Looks like a regex: leave operator-based match.
+  if (/[\\^$+?(){}[\]|]/.test(trimmed)) {
+    return { $matches: trimmed };
+  }
+  return { $contains: trimmed };
+}
+
+// Real Codex tools we recognize. Used to disambiguate "block X for Y" where X
+// may or may not be a tool name. Falls back to "*" when X isn't here.
+const KNOWN_CODEX_TOOLS = new Set([
+  "*",
+  "bash", "apply_patch", "list_dir", "view_image", "mcp_resource",
+  "update_plan", "create_goal", "update_goal", "get_goal",
+  "spawn_agents_on_csv", "tool_search", "tool_suggest",
+  "register_intent_plan", "policy_read", "policy_update"
+]);
+
 function inferPolicyTool(text) {
   const lower = text.toLowerCase();
   if (/(all\s+tools|any\s+tool|\*\b)/i.test(lower)) {
@@ -286,17 +381,34 @@ function buildPolicyUpdateFromText(text, state, forceNewId = false) {
   const explicitIdMatch = text.match(/\bpolicy[-_]?(\d+)\b/i);
   const explicitId = explicitIdMatch && explicitIdMatch[1] ? `policy${explicitIdMatch[1]}` : "";
   const id = forceNewId ? nextPolicyId(state) : explicitId || nextPolicyId(state);
+  const inferredTool = inferPolicyTool(text);
+  const anyParam = inferAnyParamMatcher(text);
+
+  // If we found a path/phrase to match AND the inferred tool is a verb like
+  // "access" or any unknown name, the user means "block this content across
+  // all tools": promote tool to "*". A real tool name (Bash, apply_patch...)
+  // stays as-is so users can scope rules to a specific tool when they want.
+  let tool = inferredTool;
+  if (anyParam && tool !== "*") {
+    const normalized = tool.toLowerCase();
+    if (!KNOWN_CODEX_TOOLS.has(normalized)) {
+      tool = "*";
+    }
+  }
+
+  const rule = {
+    id,
+    action: inferPolicyAction(text),
+    tool,
+    dataClass: inferPolicyDataClass(text)
+  };
+  if (anyParam) {
+    rule.anyParam = anyParam;
+  }
   return {
     reason: truncateReason(`User policy update: ${text}`),
     mode: /replace/i.test(text) ? "replace" : "merge",
-    rules: [
-      {
-        id,
-        action: inferPolicyAction(text),
-        tool: inferPolicyTool(text),
-        dataClass: inferPolicyDataClass(text)
-      }
-    ]
+    rules: [rule]
   };
 }
 
@@ -308,10 +420,13 @@ export function parsePolicyTextCommand(text, state) {
     return { kind: "none" };
   }
 
-  if (/\b(help|commands)\b/i.test(lower)) {
+  // Only the bare "Policy help" / "Policy commands" form triggers help.
+  // Otherwise "Bash commands containing curl" inside a rule body would
+  // wrongly route here.
+  if (/^\s*policy\s+(help|commands)\s*$/i.test(trimmed)) {
     return { kind: "help" };
   }
-  if (/\b(list|show|view)\b/i.test(lower)) {
+  if (/^\s*policy\s+(list|show|view)\s*$/i.test(trimmed)) {
     return { kind: "list" };
   }
   if (/\breset|clear\s+all|wipe\b/i.test(lower)) {
@@ -478,10 +593,14 @@ export async function applyPolicyCommand({ policyFilePath, state, command, actor
     const updates = Array.isArray(command.update.rules)
       ? command.update.rules.map((rule) => normalizeRule(rule)).filter(Boolean)
       : [];
-    if (!updates.length) {
+    // Allow empty rules in `replace` mode: this is how callers clear all
+    // policy rules atomically. Reject only when merge-mode update has nothing
+    // to add, since that would be a no-op.
+    if (!updates.length && mode !== "replace") {
       return { state, message: "Policy update rejected: no valid rules." };
     }
     const nextRules = mode === "replace" ? updates : mergeRules(state.policy.rules, updates);
+    const action = mode === "replace" && updates.length === 0 ? "cleared" : "updated";
     const nextState = await persistNextState(
       policyFilePath,
       state,
@@ -489,7 +608,7 @@ export async function applyPolicyCommand({ policyFilePath, state, command, actor
       actor,
       command.update.reason || "Policy update"
     );
-    return { state: nextState, message: `Policy updated. Version ${nextState.version}.` };
+    return { state: nextState, message: `Policy ${action}. Version ${nextState.version}.` };
   }
   return { state, message: "No policy changes applied." };
 }

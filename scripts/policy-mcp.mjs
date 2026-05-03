@@ -8,12 +8,26 @@ import { extractAllowedActions, requestIntent } from "./lib/intent.mjs";
 import { INTENT_PLAN_ZOD, PLAN_STEP_SCHEMA, normalizeIntentPlan } from "./lib/intent-schema.mjs";
 import { applyPolicyCommand, computePolicyHash, loadPolicyState, parsePolicyTextCommand } from "./lib/policy.mjs";
 
+const MATCHER_OPERATORS = z
+  .object({
+    $equals: z.string().optional(),
+    $contains: z.string().optional(),
+    $startsWith: z.string().optional(),
+    $endsWith: z.string().optional(),
+    $matches: z.string().optional(),
+    $pathContains: z.string().optional()
+  })
+  .strict();
+
 const POLICY_RULE_SCHEMA = z.object({
   id: z.string().min(1),
   action: z.enum(["allow", "deny", "require_approval"]),
   tool: z.string().min(1),
   dataClass: z.enum(["PCI", "PAYMENT", "PHI", "PII"]).optional(),
-  params: z.record(z.string(), z.unknown()).optional()
+  params: z.record(z.string(), z.unknown()).optional(),
+  // anyParam: matches a substring or operator spec across any string field
+  // in the tool input. Plain string is sugar for { $contains: <string> }.
+  anyParam: z.union([z.string().min(1), MATCHER_OPERATORS]).optional()
 });
 
 const POLICY_UPDATE_SCHEMA = z.object({
@@ -192,12 +206,22 @@ async function run() {
       const config = loadConfig();
       const plan = normalizeIntentPlan(parsed.data);
 
-      // Send to ArmorIQ for signed intent token (if SDK/endpoint configured)
+      // Try ArmorIQ-signed intent token, but cap the wait so Codex's MCP
+      // transport doesn't time out. Codex's MCP client closes the transport
+      // around the ~1s mark, so 500ms is a safe upper bound. The PreToolUse
+      // hook will use whatever's in pending-plan.json by then — either the
+      // signed token (fast path) or the unsigned local plan (fallback).
+      // Set ARMORCODEX_INTENT_DEADLINE_MS to tune.
+      const deadlineMs = Number.parseInt(
+        process.env.ARMORCODEX_INTENT_DEADLINE_MS || "500",
+        10
+      );
       let intentResult = { skipped: true };
+      let intentTimedOut = false;
       if (config.intentEndpoint || (config.useSdkIntent && config.apiKey)) {
         try {
           const policyState = await loadPolicyState(config.policyFile);
-          intentResult = await requestIntent(config, {
+          const intentPromise = requestIntent(config, {
             prompt: parsed.data.goal,
             plan,
             session_id: "mcp",
@@ -206,6 +230,26 @@ async function run() {
             validitySeconds: config.validitySeconds,
             metadata: { source: "codex", planning: "codex-registered" }
           });
+          const timeoutPromise = new Promise((resolve) =>
+            setTimeout(() => resolve({ __timeout: true }), deadlineMs)
+          );
+          const winner = await Promise.race([intentPromise, timeoutPromise]);
+          if (winner && winner.__timeout) {
+            intentTimedOut = true;
+            // Let the SDK call continue in the background so audit + token
+            // issuance still happen, but don't block the MCP response.
+            intentPromise
+              .then((late) => {
+                process.stderr.write(
+                  `[armorcodex] late token issued (post-deadline), tokenLen=${
+                    typeof late?.tokenRaw === "string" ? late.tokenRaw.length : 0
+                  }\n`
+                );
+              })
+              .catch(() => {});
+          } else {
+            intentResult = winner;
+          }
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           process.stderr.write(`[armorcodex] intent capture in register_intent_plan: ${msg}\n`);
@@ -224,6 +268,8 @@ async function run() {
 
       const tokenInfo = intentResult.tokenRaw
         ? `Token valid ${config.validitySeconds}s.`
+        : intentTimedOut
+        ? `ArmorIQ token issuing in background (cap ${deadlineMs}ms); plan stored locally.`
         : "No ArmorIQ backend configured — plan stored locally.";
 
       return toTextResult(
