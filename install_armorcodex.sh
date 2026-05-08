@@ -332,7 +332,7 @@ register_marketplace_optional() {
     if codex plugin marketplace add "${MARKETPLACE_REPO}" >/dev/null 2>&1; then
       ok "marketplace registered"
     else
-      codex plugin marketplace upgrade armoriq >/dev/null 2>&1 || true
+      codex plugin marketplace upgrade armorcodex >/dev/null 2>&1 || true
       info "marketplace add skipped (already added or unreachable)"
     fi
   fi
@@ -468,8 +468,8 @@ uninstall() {
     rm -f "${GLOBAL_HOOKS}"
     ok "removed ${GLOBAL_HOOKS}"
   fi
-  ok "uninstalled. ArmorIQ marketplace registration (if any) left in place."
-  info "to remove that too: codex plugin marketplace remove armoriq"
+  ok "uninstalled. ArmorCodex marketplace registration (if any) left in place."
+  info "to remove that too: codex plugin marketplace remove armorcodex"
 }
 
 # ---------------------------------------------------------------------------
