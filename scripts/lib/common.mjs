@@ -70,6 +70,187 @@ export function isSubsetValue(candidate, target) {
   return candidate === target;
 }
 
+// ---------------------------------------------------------------------------
+// Operator-based matcher: supports $contains, $startsWith, $endsWith,
+// $matches (regex), $pathContains (path-canonicalized substring), $equals.
+//
+// Rule fragments may use either a plain literal (exact match, same as
+// isSubsetValue behaviour) or an operator object: { $contains: "..." }.
+// ---------------------------------------------------------------------------
+
+const OPERATOR_KEYS = new Set([
+  "$equals",
+  "$contains",
+  "$startsWith",
+  "$endsWith",
+  "$matches",
+  "$pathContains"
+]);
+
+export function isMatcherSpec(value) {
+  if (!isPlainObject(value)) return false;
+  const keys = Object.keys(value);
+  if (keys.length === 0) return false;
+  return keys.every((k) => OPERATOR_KEYS.has(k));
+}
+
+// Canonicalize a path/string for $pathContains matching. Operates on free
+// text: the rule needle and the tool input may be a path like /etc/passwd,
+// a path-with-prefix like "ls -la ~/.ssh", or a tool param like file_path.
+// Rule: keep enough structure so substring match Just Works.
+function canonicalizePath(input) {
+  if (typeof input !== "string") return "";
+  let p = input.trim();
+  // ~ becomes $HOME (only at a path boundary so we don't mangle shell tokens
+  // like "echo ~hi").
+  p = p.replace(/(^|[\s"'`(=:])~(?=\/)/g, "$1$HOME");
+  // $HOME or ${HOME} becomes <HOME> sentinel.
+  p = p.replace(/\$\{?HOME\}?/g, "<HOME>");
+  // Real home prefixes (Linux + macOS) become <HOME> sentinel so a rule
+  // mentioning ~/.ssh matches actual paths like /Users/foo/.ssh and
+  // /home/bar/.ssh.
+  p = p.replace(/\/(?:home|Users)\/[^/\s'"`)]+/gi, "<HOME>");
+  // Collapse repeated slashes, lowercase for case-insensitive substring.
+  p = p.replace(/\\/g, "/").replace(/\/+/g, "/");
+  return p.toLowerCase();
+}
+
+export function matchesScalar(spec, actual) {
+  // Plain literal: exact match (preserves existing behaviour).
+  if (!isMatcherSpec(spec)) {
+    return spec === actual;
+  }
+  if (typeof actual !== "string" && typeof actual !== "number") {
+    return false;
+  }
+  const haystack = String(actual);
+  const haystackLower = haystack.toLowerCase();
+  for (const [op, raw] of Object.entries(spec)) {
+    const needle = typeof raw === "string" ? raw : String(raw);
+    const needleLower = needle.toLowerCase();
+    switch (op) {
+      case "$equals":
+        if (haystack !== needle) return false;
+        break;
+      case "$contains":
+        if (!haystackLower.includes(needleLower)) return false;
+        break;
+      case "$startsWith":
+        if (!haystackLower.startsWith(needleLower)) return false;
+        break;
+      case "$endsWith":
+        if (!haystackLower.endsWith(needleLower)) return false;
+        break;
+      case "$matches":
+        try {
+          const re = new RegExp(needle, "i");
+          if (!re.test(haystack)) return false;
+        } catch {
+          return false;
+        }
+        break;
+      case "$pathContains": {
+        const actualPath = canonicalizePath(haystack);
+        const needlePath = canonicalizePath(needle);
+        const homeStripped = needlePath.replace(/^<home>\/?/, "");
+        if (
+          actualPath.includes(needlePath) ||
+          (homeStripped && actualPath.includes(homeStripped))
+        ) {
+          break;
+        }
+        return false;
+      }
+      default:
+        return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Recursive matcher for rule.params against actual tool input.
+ * Returns { matched, missingKeys }. missingKeys lists rule keys that have no
+ * counterpart in the tool input, so callers can surface "rule probably won't
+ * fire" warnings.
+ */
+export function matchParams(ruleParams, toolInput) {
+  if (ruleParams === undefined || ruleParams === null) {
+    return { matched: true, missingKeys: [] };
+  }
+  if (!isPlainObject(ruleParams)) {
+    return { matched: false, missingKeys: [] };
+  }
+  const target = isPlainObject(toolInput) ? toolInput : {};
+  const missingKeys = [];
+  for (const [key, value] of Object.entries(ruleParams)) {
+    const actualValue = target[key];
+    if (actualValue === undefined && !isMatcherSpec(value)) {
+      missingKeys.push(key);
+      continue;
+    }
+    if (isMatcherSpec(value)) {
+      if (actualValue === undefined) {
+        missingKeys.push(key);
+        continue;
+      }
+      if (!matchesScalar(value, actualValue)) {
+        return { matched: false, missingKeys };
+      }
+      continue;
+    }
+    if (isPlainObject(value)) {
+      const sub = matchParams(value, actualValue);
+      missingKeys.push(...sub.missingKeys.map((k) => `${key}.${k}`));
+      if (!sub.matched) {
+        return { matched: false, missingKeys };
+      }
+      continue;
+    }
+    if (Array.isArray(value)) {
+      if (!Array.isArray(actualValue)) {
+        return { matched: false, missingKeys };
+      }
+      const allFound = value.every((needle) =>
+        actualValue.some((item) => matchesScalar(needle, item) || isSubsetValue(needle, item))
+      );
+      if (!allFound) {
+        return { matched: false, missingKeys };
+      }
+      continue;
+    }
+    if (value !== actualValue) {
+      return { matched: false, missingKeys };
+    }
+  }
+  if (missingKeys.length > 0) {
+    return { matched: false, missingKeys };
+  }
+  return { matched: true, missingKeys: [] };
+}
+
+/**
+ * Apply a single matcher spec across ANY string field in a tool input.
+ * Used for rules like "deny anything mentioning ~/.ssh" where the user
+ * doesn't know which parameter key the tool uses.
+ */
+export function matchesAnyStringField(spec, toolInput, depth = 0) {
+  if (depth > 4) return false;
+  if (toolInput === null || toolInput === undefined) return false;
+  if (typeof toolInput === "string") {
+    return matchesScalar(spec, toolInput);
+  }
+  if (Array.isArray(toolInput)) {
+    return toolInput.some((entry) => matchesAnyStringField(spec, entry, depth + 1));
+  }
+  if (isPlainObject(toolInput)) {
+    for (const value of Object.values(toolInput)) {
+      if (matchesAnyStringField(spec, value, depth + 1)) return true;
+    }
+  }
+  return false;
+}
+
 function sanitizeValue(value, limits, depth) {
   if (depth > limits.maxDepth) {
     return "<max-depth>";

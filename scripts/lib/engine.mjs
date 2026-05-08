@@ -20,12 +20,10 @@ import {
   loadPolicyState,
   parsePolicyTextCommand
 } from "./policy.mjs";
-import { INTENT_PLAN_FORMAT } from "./intent-schema.mjs";
 import { readJson } from "./fs-store.mjs";
 import { unlink } from "node:fs/promises";
 import path from "node:path";
 import {
-  getDiscoveredTools,
   getSession,
   loadRuntimeState,
   saveRuntimeState,
@@ -42,12 +40,7 @@ function shouldDeny(config) {
 }
 
 function buildPolicyContextHints() {
-  return [
-    "ArmorCodex policy instructions:",
-    "- If the user explicitly asks to change policy, call `policy_update` immediately.",
-    "- Supported text commands: Policy list/get/delete/reset/update/new/prioritize.",
-    "- Do not invent extra policy mechanisms outside `policy_update`."
-  ].join("\n");
+  return "For any policy intent, call `policy_update` (see its inputSchema). Use `mode: \"replace\"` with surviving rules to delete a specific rule. Empty `rules` in replace mode clears all policy.";
 }
 
 function actorCandidates(input) {
@@ -208,20 +201,16 @@ export async function handleUserPromptSubmit(input, config) {
   await saveRuntimeState(config.runtimeFile, runtimeState);
 
   // --- Inject directive: tell Codex to register its intent plan ---
-  // Codex will call the `register_intent_plan` MCP tool (or include a JSON
-  // block in its plan file) as its first action. This uses the session's own
-  // LLM — no separate API key or extra LLM call needed.
+  // Codex will call the `register_intent_plan` MCP tool as its first action.
+  // The MCP tool's inputSchema already describes the JSON shape, so we don't
+  // duplicate it here — keeps the visible prompt context short.
   const parts = [];
   if (config.planningEnabled) {
     parts.push(
-      "ArmorCodex intent enforcement is active. Before running Bash, " +
-      "declare your plan in this exact JSON shape:\n\n" +
-      INTENT_PLAN_FORMAT + "\n\n" +
-      "Call `register_intent_plan` with the JSON as the argument BEFORE " +
-      "the first Bash command. Codex hooks currently enforce Bash only, " +
-      "so plan steps should declare `Bash` and constrain command inputs " +
-      "in step metadata when possible. Bash commands without a registered " +
-      "plan will be blocked."
+      "ArmorCodex active. Call `register_intent_plan` before any tool call. " +
+      "Set step `action` to the tool name (Bash, apply_patch, or MCP tool name); " +
+      "leave `metadata.inputs` as `{}` to match by tool name only. " +
+      "Unplanned tool calls will be blocked."
     );
   }
   if (config.contextHintsEnabled && config.policyUpdateEnabled) {
@@ -254,10 +243,18 @@ export async function handlePreToolUse(input, config) {
   //     previously have been whitelisted. ---
   const norm = normalizeToolName(toolName);
   const armorTools = ["register_intent_plan", "policy_read", "policy_update"];
-  const armorMcpPrefix = "mcp__armorcodex-policy__";
+  // Codex MCP namespace is `mcp__<server>__` and the underlying MCP server name
+  // can carry hyphens (`armorcodex-policy`) or be sanitized to underscores
+  // (`armorcodex_policy`). Codex's TUI display also surfaces `<server>.<tool>`
+  // in user-facing strings. Match all reasonable forms — but only accept names
+  // anchored to our own server identifier so this can't whitelist a malicious
+  // MCP server that happens to expose a same-named tool.
+  const ARMOR_SERVER_RE = /(mcp__armorcodex[-_]policy__|armorcodex[-_]policy[._])/;
   if (
     armorTools.some(
-      (t) => norm === t || norm === `${armorMcpPrefix}${t}`
+      (t) =>
+        norm === t ||
+        (norm.endsWith(t) && ARMOR_SERVER_RE.test(norm))
     )
   ) {
     return null;
