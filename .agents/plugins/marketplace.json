@@ -16,9 +16,8 @@
     {
       "name": "armorcodex",
       "source": {
-        "source": "url",
-        "url": "https://github.com/armoriq/armorCodex.git",
-        "ref": "main"
+        "source": "local",
+        "path": "."
       },
       "description": "Intent-based security enforcement for OpenAI Codex: declared plans, policy rules, intent-drift blocking, optional CSRG cryptographic proofs, and audit logging.",
       "version": "0.2.0",
