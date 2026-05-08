@@ -1,16 +1,16 @@
 {
-  "name": "armoriq-local",
+  "name": "armorcodex",
   "owner": {
     "name": "ArmorIQ",
     "email": "license@armoriq.io",
     "url": "https://armoriq.ai"
   },
   "metadata": {
-    "description": "ArmorIQ marketplace (local alias) for Codex security plugins.",
-    "version": "0.1.0"
+    "description": "ArmorCodex marketplace: intent-based security enforcement for OpenAI Codex.",
+    "version": "0.2.0"
   },
   "interface": {
-    "displayName": "ArmorIQ Local"
+    "displayName": "ArmorCodex"
   },
   "plugins": [
     {

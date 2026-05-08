@@ -1,16 +1,16 @@
 {
-  "name": "armoriq",
+  "name": "armorcodex",
   "owner": {
     "name": "ArmorIQ",
     "email": "license@armoriq.io",
     "url": "https://armoriq.ai"
   },
   "metadata": {
-    "description": "Official ArmorIQ marketplace for Codex security plugins.",
-    "version": "0.1.0"
+    "description": "ArmorCodex marketplace: intent-based security enforcement for OpenAI Codex.",
+    "version": "0.2.0"
   },
   "interface": {
-    "displayName": "ArmorIQ"
+    "displayName": "ArmorCodex"
   },
   "plugins": [
     {
