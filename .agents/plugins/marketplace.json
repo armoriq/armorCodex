@@ -17,7 +17,7 @@
       "name": "armorcodex",
       "source": {
         "source": "local",
-        "path": "."
+        "path": "./plugins/armorcodex"
       },
       "description": "Intent-based security enforcement for OpenAI Codex: declared plans, policy rules, intent-drift blocking, optional CSRG cryptographic proofs, and audit logging.",
       "version": "0.2.0",
