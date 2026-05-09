@@ -40,7 +40,7 @@ function shouldDeny(config) {
 }
 
 function buildPolicyContextHints() {
-  return "For any policy intent, call `policy_update` (see its inputSchema). Use `mode: \"replace\"` with surviving rules to delete a specific rule. Empty `rules` in replace mode clears all policy.";
+  return "For policy changes call `policy_update` (mode: replace rewrites the full ruleset; empty rules clears policy).";
 }
 
 function actorCandidates(input) {
@@ -207,10 +207,7 @@ export async function handleUserPromptSubmit(input, config) {
   const parts = [];
   if (config.planningEnabled) {
     parts.push(
-      "ArmorCodex active. Call `register_intent_plan` before any tool call. " +
-      "Set step `action` to the tool name (Bash, apply_patch, or MCP tool name); " +
-      "leave `metadata.inputs` as `{}` to match by tool name only. " +
-      "Unplanned tool calls will be blocked."
+      "ArmorCodex active. Call `register_intent_plan` first; step `action` = tool name, `metadata.inputs` = `{}` matches by name only."
     );
   }
   if (config.contextHintsEnabled && config.policyUpdateEnabled) {
