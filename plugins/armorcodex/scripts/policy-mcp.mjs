@@ -206,71 +206,65 @@ async function run() {
       const config = loadConfig();
       const plan = normalizeIntentPlan(parsed.data);
 
-      // Try ArmorIQ-signed intent token, but cap the wait so Codex's MCP
-      // transport doesn't time out. Codex's MCP client closes the transport
-      // around the ~1s mark, so 500ms is a safe upper bound. The PreToolUse
-      // hook will use whatever's in pending-plan.json by then — either the
-      // signed token (fast path) or the unsigned local plan (fallback).
-      // Set ARMORCODEX_INTENT_DEADLINE_MS to tune.
-      const deadlineMs = Number.parseInt(
-        process.env.ARMORCODEX_INTENT_DEADLINE_MS || "500",
-        10
-      );
-      let intentResult = { skipped: true };
-      let intentTimedOut = false;
-      if (config.intentEndpoint || (config.useSdkIntent && config.apiKey)) {
-        try {
-          const policyState = await loadPolicyState(config.policyFile);
-          const intentPromise = requestIntent(config, {
-            prompt: parsed.data.goal,
-            plan,
-            session_id: "mcp",
-            policy_hash: computePolicyHash(policyState.policy),
-            policy: policyState.policy,
-            validitySeconds: config.validitySeconds,
-            metadata: { source: "codex", planning: "codex-registered" }
-          });
-          const timeoutPromise = new Promise((resolve) =>
-            setTimeout(() => resolve({ __timeout: true }), deadlineMs)
-          );
-          const winner = await Promise.race([intentPromise, timeoutPromise]);
-          if (winner && winner.__timeout) {
-            intentTimedOut = true;
-            // Let the SDK call continue in the background so audit + token
-            // issuance still happen, but don't block the MCP response.
-            intentPromise
-              .then((late) => {
-                process.stderr.write(
-                  `[armorcodex] late token issued (post-deadline), tokenLen=${
-                    typeof late?.tokenRaw === "string" ? late.tokenRaw.length : 0
-                  }\n`
-                );
-              })
-              .catch(() => {});
-          } else {
-            intentResult = winner;
-          }
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          process.stderr.write(`[armorcodex] intent capture in register_intent_plan: ${msg}\n`);
-        }
-      }
-
-      // Write to pending-plan.json — PreToolUse hook will pick it up
+      // Write the local plan to pending-plan.json IMMEDIATELY so PreToolUse
+      // has something to enforce against. The SDK call (if any) runs entirely
+      // in the background and updates pending-plan.json with the signed
+      // token when it resolves.
+      //
+      // Why fire-and-forget: Codex's MCP transport closes its stdio pipe
+      // around the ~1s mark. Any await we do here (loadPolicyState, the
+      // SDK round-trip, even cold-start latency) eats into that budget.
+      // Awaiting nothing on the network path keeps the MCP response under
+      // ~100ms regardless of backend conditions.
       const pendingPath = path.join(config.dataDir, "pending-plan.json");
       await writeJson(pendingPath, {
-        plan: intentResult.plan || plan,
-        tokenRaw: intentResult.tokenRaw || "",
-        allowedActions: Array.from(extractAllowedActions(intentResult.plan || plan)),
-        expiresAt: intentResult.expiresAt,
+        plan,
+        tokenRaw: "",
+        allowedActions: Array.from(extractAllowedActions(plan)),
+        expiresAt: undefined,
         registeredAt: Date.now()
       });
 
-      const tokenInfo = intentResult.tokenRaw
-        ? `Token valid ${config.validitySeconds}s.`
-        : intentTimedOut
-        ? `ArmorIQ token issuing in background (cap ${deadlineMs}ms); plan stored locally.`
-        : "No ArmorIQ backend configured — plan stored locally.";
+      let backendWillIssue = false;
+      if (config.intentEndpoint || (config.useSdkIntent && config.apiKey)) {
+        backendWillIssue = true;
+        // Kick off the SDK call. When it resolves with a signed token, update
+        // pending-plan.json so PreToolUse picks up the token on subsequent
+        // calls. Errors are logged to stderr and otherwise swallowed.
+        (async () => {
+          try {
+            const policyState = await loadPolicyState(config.policyFile);
+            const result = await requestIntent(config, {
+              prompt: parsed.data.goal,
+              plan,
+              session_id: "mcp",
+              policy_hash: computePolicyHash(policyState.policy),
+              policy: policyState.policy,
+              validitySeconds: config.validitySeconds,
+              metadata: { source: "codex", planning: "codex-registered" }
+            });
+            if (result?.tokenRaw) {
+              await writeJson(pendingPath, {
+                plan: result.plan || plan,
+                tokenRaw: result.tokenRaw,
+                allowedActions: Array.from(extractAllowedActions(result.plan || plan)),
+                expiresAt: result.expiresAt,
+                registeredAt: Date.now()
+              });
+              process.stderr.write(
+                `[armorcodex] backend token issued, tokenLen=${result.tokenRaw.length}\n`
+              );
+            }
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            process.stderr.write(`[armorcodex] intent capture failed: ${msg}\n`);
+          }
+        })();
+      }
+
+      const tokenInfo = backendWillIssue
+        ? `Plan registered; ArmorIQ token issuing in background.`
+        : "Plan stored locally (no ArmorIQ backend configured).";
 
       return toTextResult(
         `Intent registered: ${plan.steps.length} steps. ${tokenInfo}`,
