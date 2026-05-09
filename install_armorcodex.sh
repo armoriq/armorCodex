@@ -79,7 +79,7 @@ for arg in "$@"; do
     --force-hooks) FORCE_HOOKS=1 ;;
     --uninstall) DO_UNINSTALL=1 ;;
     -h|--help)
-      sed -n '4,32p' "${BASH_SOURCE[0]}"
+      sed -n '4,32p' "${SCRIPT_PATH:-$0}" 2>/dev/null || true
       exit 0
       ;;
   esac
@@ -444,8 +444,8 @@ EOF
   section "Manage anytime"
   cat <<EOF
 
-  ${D}bash $(realpath "${BASH_SOURCE[0]}" 2>/dev/null || echo install_armorcodex.sh) --uninstall${N}
-  ${D}bash $(realpath "${BASH_SOURCE[0]}" 2>/dev/null || echo install_armorcodex.sh) --force-hooks${N}
+  ${D}bash $(realpath "${SCRIPT_PATH}" 2>/dev/null || echo install_armorcodex.sh) --uninstall${N}
+  ${D}bash $(realpath "${SCRIPT_PATH}" 2>/dev/null || echo install_armorcodex.sh) --force-hooks${N}
 
   Hooks: ${C}${GLOBAL_HOOKS}${N}
   Config: ${C}${CONFIG_TOML}${N}
