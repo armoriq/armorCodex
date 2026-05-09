@@ -57,17 +57,23 @@ else
   SCRIPT_DIR=""
 fi
 
-# If the script lives next to scripts/bootstrap.mjs, we're inside a checkout.
-# Otherwise we'll clone into INSTALL_HOME below.
-if [[ -n "${SCRIPT_DIR}" && -f "${SCRIPT_DIR}/scripts/bootstrap.mjs" ]]; then
+# Plugin sources live under plugins/<name>/ per the Codex marketplace spec.
+# Older checkouts kept everything at repo root, so accept both layouts.
+PLUGIN_SUBDIR="plugins/armorcodex"
+if [[ -n "${SCRIPT_DIR}" && -f "${SCRIPT_DIR}/${PLUGIN_SUBDIR}/scripts/bootstrap.mjs" ]]; then
   PLUGIN_ROOT="${SCRIPT_DIR}"
+elif [[ -n "${SCRIPT_DIR}" && -f "${SCRIPT_DIR}/scripts/bootstrap.mjs" ]]; then
+  # Legacy flat-layout fallback so existing checkouts keep working.
+  PLUGIN_ROOT="${SCRIPT_DIR}"
+  PLUGIN_SUBDIR="."
 else
   PLUGIN_ROOT="${INSTALL_HOME}"
 fi
 
 CONFIG_TOML="${HOME}/.codex/config.toml"
 GLOBAL_HOOKS="${HOME}/.codex/hooks.json"
-BOOTSTRAP_PATH="${PLUGIN_ROOT}/scripts/bootstrap.mjs"
+PLUGIN_PATH="${PLUGIN_ROOT}/${PLUGIN_SUBDIR}"
+BOOTSTRAP_PATH="${PLUGIN_PATH}/scripts/bootstrap.mjs"
 
 MARK_BEGIN="# >>> ArmorCodex managed block (do not edit manually) >>>"
 MARK_END="# <<< ArmorCodex managed block <<<"
@@ -210,12 +216,16 @@ fetch_plugin_source() {
   fi
 
   PLUGIN_ROOT="${INSTALL_HOME}"
-  BOOTSTRAP_PATH="${PLUGIN_ROOT}/scripts/bootstrap.mjs"
-
-  if [[ ! -f "${BOOTSTRAP_PATH}" ]]; then
+  if [[ -f "${PLUGIN_ROOT}/${PLUGIN_SUBDIR}/scripts/bootstrap.mjs" ]]; then
+    PLUGIN_PATH="${PLUGIN_ROOT}/${PLUGIN_SUBDIR}"
+  elif [[ -f "${PLUGIN_ROOT}/scripts/bootstrap.mjs" ]]; then
+    PLUGIN_SUBDIR="."
+    PLUGIN_PATH="${PLUGIN_ROOT}"
+  else
     err "fetched repo is missing scripts/bootstrap.mjs, refusing to continue"
     exit 1
   fi
+  BOOTSTRAP_PATH="${PLUGIN_PATH}/scripts/bootstrap.mjs"
 }
 
 ensure_config_toml() {
@@ -306,7 +316,7 @@ EOF
 }
 
 install_npm_deps() {
-  pushd "${PLUGIN_ROOT}" >/dev/null
+  pushd "${PLUGIN_PATH}" >/dev/null
   if [[ -d node_modules/@armoriq/sdk && -d node_modules/zod && -d node_modules/@modelcontextprotocol/sdk ]]; then
     info "npm dependencies already present"
   else
