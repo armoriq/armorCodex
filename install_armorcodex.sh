@@ -323,11 +323,11 @@ install_npm_deps() {
 }
 
 install_armoriq_cli() {
-  info "installing ArmorIQ CLI ${B}(@armoriq/sdk-dev)${N}"
-  if npm install -g @armoriq/sdk-dev@latest --silent --no-audit --no-fund >/dev/null 2>&1; then
+  info "installing ArmorIQ CLI ${B}(@armoriq/sdk)${N}"
+  if npm install -g @armoriq/sdk@latest --silent --no-audit --no-fund >/dev/null 2>&1; then
     ok "armoriq CLI ready"
   else
-    warn "couldn't install globally, use ${B}npx @armoriq/sdk-dev${N} instead"
+    warn "couldn't install globally, use ${B}npx @armoriq/sdk${N} instead"
   fi
 }
 
@@ -405,13 +405,13 @@ EOF
       ARMORIQ_PRODUCT="${product}" armoriq login
     fi
   elif command -v npx >/dev/null 2>&1; then
-    if npx @armoriq/sdk-dev login --help 2>&1 | grep -q -- '--product'; then
-      npx @armoriq/sdk-dev login --product "${product}"
+    if npx @armoriq/sdk login --help 2>&1 | grep -q -- '--product'; then
+      npx @armoriq/sdk login --product "${product}"
     else
-      ARMORIQ_PRODUCT="${product}" npx @armoriq/sdk-dev login
+      ARMORIQ_PRODUCT="${product}" npx @armoriq/sdk login
     fi
   else
-    warn "armoriq CLI not found. Run ${B}npx @armoriq/sdk-dev login${N} manually."
+    warn "armoriq CLI not found. Run ${B}npx @armoriq/sdk login${N} manually."
     return 0
   fi
 
