@@ -39,11 +39,14 @@ export function loadConfig(env = process.env) {
 
   const timeoutMs = parseInteger(env.ARMORCODEX_TIMEOUT_MS, 8000);
 
+  // dev branch — points at staging-api for pre-release testing.
+  // main branch keeps "https://api.armoriq.ai" (prod). When promoting a
+  // feature from dev → main, resolve the URL conflict in favor of main.
   const backendEndpoint =
     env.ARMORCODEX_BACKEND_ENDPOINT?.trim() ||
     env.BACKEND_ENDPOINT?.trim() ||
     (useProduction
-      ? "https://api.armoriq.ai"
+      ? "https://staging-api.armoriq.ai"
       : "http://127.0.0.1:3000");
 
   const iapEndpoint =
