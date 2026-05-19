@@ -264,7 +264,13 @@ export async function handlePreToolUse(input, config) {
   const safeInternalTools = new Set([
     "toolsearch",
     "todowrite",
-    "listmcpresourcestool"
+    "listmcpresourcestool",
+    "readmcpresourcetool",
+    "read",
+    "grep",
+    "glob",
+    "websearch",
+    "webfetch"
   ]);
   if (safeInternalTools.has(norm)) {
     return null;
@@ -277,8 +283,19 @@ export async function handlePreToolUse(input, config) {
   // This load is reused for the rest of the PreToolUse handler instead of
   // reloading from disk below (fewer disk reads on the hot path).
   const runtimeState = await loadRuntimeState(config.runtimeFile);
-  const pendingPath = path.join(config.dataDir, "pending-plan.json");
-  const pending = await readJson(pendingPath, null);
+  // Per-session plan file so concurrent Codex windows don't clobber each
+  // other. Fall back to the legacy global path for installs that still have
+  // a write from a pre-upgrade MCP server.
+  const sessionPendingPath = sessionId
+    ? path.join(config.dataDir, `pending-plan.${sessionId}.json`)
+    : null;
+  const legacyPendingPath = path.join(config.dataDir, "pending-plan.json");
+  let pendingPath = sessionPendingPath;
+  let pending = sessionPendingPath ? await readJson(sessionPendingPath, null) : null;
+  if (!pending) {
+    pending = await readJson(legacyPendingPath, null);
+    if (pending) pendingPath = legacyPendingPath;
+  }
   if (pending && (pending.tokenRaw || pending.plan)) {
     upsertSession(runtimeState, sessionId, {
       intentTokenRaw: pending.tokenRaw || "",
@@ -289,7 +306,7 @@ export async function handlePreToolUse(input, config) {
       intentExecution: undefined
     });
     await saveRuntimeState(config.runtimeFile, runtimeState);
-    await unlink(pendingPath).catch(() => {});
+    if (pendingPath) await unlink(pendingPath).catch(() => {});
     debugLog(config, "consumed pending plan from register_intent_plan");
   }
 
@@ -610,8 +627,10 @@ export async function handlePostToolUse(input, config) {
       duration_ms: 0
     };
 
-    await iapService.createAuditLog(dto);
-    debugLog(config, `audit log sent for ${toolName} step=${stepIdx}`);
+    iapService.enqueueAudit(dto).catch((error) => {
+      debugLog(config, `audit enqueue failed: ${error}`);
+    });
+    debugLog(config, `audit log enqueued for ${toolName} step=${stepIdx}`);
   } catch (error) {
     // Audit is best-effort — don't block
     debugLog(config, `audit log failed: ${error}`);
@@ -662,8 +681,10 @@ export async function handlePostToolUseFailure(input, config) {
       duration_ms: 0
     };
 
-    await iapService.createAuditLog(dto);
-    debugLog(config, `audit log (failure) sent for ${toolName}`);
+    iapService.enqueueAudit(dto).catch((error) => {
+      debugLog(config, `audit enqueue (failure) failed: ${error}`);
+    });
+    debugLog(config, `audit log (failure) enqueued for ${toolName}`);
   } catch (error) {
     debugLog(config, `audit log (failure) failed: ${error}`);
   }
