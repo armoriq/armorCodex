@@ -42,7 +42,7 @@ MARKETPLACE_REPO="${ARMORCODEX_MARKETPLACE_REPO:-armoriq/armorCodex}"
 PLUGIN_GIT_URL="${ARMORCODEX_GIT_URL:-https://github.com/armoriq/armorCodex.git}"
 PLUGIN_GIT_REF="${ARMORCODEX_GIT_REF:-main}"
 INSTALL_HOME="${ARMORCODEX_INSTALL_HOME:-${HOME}/.armoriq/armorCodex}"
-DASHBOARD_URL="https://dev.armoriq.ai"
+DASHBOARD_URL="https://platform.armoriq.ai"
 
 # Recover if the caller is running this from a deleted directory (common when
 # piping curl into bash from /tmp).
@@ -323,11 +323,11 @@ install_npm_deps() {
 }
 
 install_armoriq_cli() {
-  info "installing ArmorIQ CLI ${B}(@armoriq/sdk-dev)${N}"
-  if npm install -g @armoriq/sdk-dev@latest --silent --no-audit --no-fund >/dev/null 2>&1; then
+  info "installing ArmorIQ CLI ${B}(@armoriq/sdk)${N}"
+  if npm install -g @armoriq/sdk@latest --silent --no-audit --no-fund >/dev/null 2>&1; then
     ok "armoriq CLI ready"
   else
-    warn "couldn't install globally, use ${B}npx @armoriq/sdk-dev${N} instead"
+    warn "couldn't install globally, use ${B}npx @armoriq/sdk${N} instead"
   fi
 }
 
@@ -405,13 +405,13 @@ EOF
       ARMORIQ_PRODUCT="${product}" armoriq login
     fi
   elif command -v npx >/dev/null 2>&1; then
-    if npx @armoriq/sdk-dev login --help 2>&1 | grep -q -- '--product'; then
-      npx @armoriq/sdk-dev login --product "${product}"
+    if npx @armoriq/sdk login --help 2>&1 | grep -q -- '--product'; then
+      npx @armoriq/sdk login --product "${product}"
     else
-      ARMORIQ_PRODUCT="${product}" npx @armoriq/sdk-dev login
+      ARMORIQ_PRODUCT="${product}" npx @armoriq/sdk login
     fi
   else
-    warn "armoriq CLI not found. Run ${B}npx @armoriq/sdk-dev login${N} manually."
+    warn "armoriq CLI not found. Run ${B}npx @armoriq/sdk login${N} manually."
     return 0
   fi
 
