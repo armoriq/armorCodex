@@ -627,9 +627,16 @@ export async function handlePostToolUse(input, config) {
       duration_ms: 0
     };
 
-    iapService.enqueueAudit(dto).catch((error) => {
+    // Await the WAL disk write (~1-2ms) so the row is durable before the
+    // hook returns. Without the await a crash between read and write loses
+    // the audit row even though the WAL exists for exactly this reason.
+    // The slow HTTP ship to /iap/audit/batch still happens async via the
+    // embedded flusher in policy-mcp.mjs. Mirrors armorClaude#46 fix #5.
+    try {
+      await iapService.enqueueAudit(dto);
+    } catch (error) {
       debugLog(config, `audit enqueue failed: ${error}`);
-    });
+    }
     debugLog(config, `audit log enqueued for ${toolName} step=${stepIdx}`);
   } catch (error) {
     // Audit is best-effort — don't block
@@ -681,9 +688,12 @@ export async function handlePostToolUseFailure(input, config) {
       duration_ms: 0
     };
 
-    iapService.enqueueAudit(dto).catch((error) => {
+    // Same await rationale as the success path above — see armorClaude#46 fix #5.
+    try {
+      await iapService.enqueueAudit(dto);
+    } catch (error) {
       debugLog(config, `audit enqueue (failure) failed: ${error}`);
-    });
+    }
     debugLog(config, `audit log (failure) enqueued for ${toolName}`);
   } catch (error) {
     debugLog(config, `audit log (failure) failed: ${error}`);
