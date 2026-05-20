@@ -527,7 +527,7 @@ EOF
 
   Hooks: ${C}${GLOBAL_HOOKS}${N}
   Config: ${C}${CONFIG_TOML}${N}
-  Docs: ${C}https://armorcodex-docs.armoriq.ai/docs${N}
+  Docs: ${C}https://docs.armoriq.ai/armorcodex${N}
 
 EOF
 }
