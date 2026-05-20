@@ -115,12 +115,13 @@ test("handlePreToolUse denies when policy blocks tool", async () => {
 test("handlePreToolUse denies missing intent when strict", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorcodex-test-"));
   const config = buildConfig(tmp, { intentRequired: true });
+  // `Bash` is not in the safe-tools whitelist, so intent enforcement runs.
   const output = await handlePreToolUse(
     {
       hook_event_name: "PreToolUse",
       session_id: "session-3",
-      tool_name: "read",
-      tool_input: { file_path: "a.txt" }
+      tool_name: "Bash",
+      tool_input: { command: "echo hi" }
     },
     config
   );

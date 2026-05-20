@@ -16,6 +16,21 @@ import {
   postJson,
   readString
 } from "./common.mjs";
+import { createAuditWal } from "./audit-wal.mjs";
+
+// Shared WAL instance per dataDir. The MCP server, hook handlers, and any
+// fire-and-forget background flusher all enqueue to the same on-disk JSONL
+// so the audit pipeline is crash-safe and concurrent-safe.
+const walCache = new Map();
+function getAuditWal(config) {
+  const key = config.dataDir;
+  let wal = walCache.get(key);
+  if (!wal) {
+    wal = createAuditWal({ dataDir: config.dataDir });
+    walCache.set(key, wal);
+  }
+  return wal;
+}
 
 /**
  * Create an IAP service instance from config.
@@ -159,6 +174,45 @@ export function createIapService(config) {
         throw new Error(message);
       }
 
+      return response.data;
+    },
+
+    /**
+     * Enqueue an audit DTO to the local WAL. Returns immediately after the
+     * disk append (~1-2ms). A background flusher in policy-mcp.mjs drains
+     * the WAL in batches and POSTs to /iap/audit. Fire-and-forget callers
+     * use this to keep hook latency low.
+     */
+    async enqueueAudit(dto) {
+      const wal = getAuditWal(config);
+      await wal.appendLine(dto);
+    },
+
+    /**
+     * Ship a batch of audit rows via POST /iap/audit/batch (one HTTP call
+     * for N rows, ~N× faster than per-row POSTs). Matches armorClaude's
+     * createAuditLogBatch — same backend endpoint, same payload shape.
+     *
+     * Failures throw — caller should NOT advance the WAL offset on failure
+     * so the next tick retries the same rows. Backend idempotency
+     * (planId, to_hash unique) keeps retries safe.
+     */
+    async shipAuditBatch(rows) {
+      if (!Array.isArray(rows) || rows.length === 0) {
+        return { written: 0, failures: [] };
+      }
+      const response = await postJson(
+        `${backendEndpoint}/iap/audit/batch`,
+        { rows },
+        headers,
+        timeoutMs
+      );
+      if (!response.ok || !response.data) {
+        const message = response.text
+          ? `IAP audit batch failed: ${response.text}`
+          : `IAP audit batch failed with status ${response.status}`;
+        throw new Error(message);
+      }
       return response.data;
     },
 

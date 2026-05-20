@@ -32,11 +32,18 @@ export function upsertSession(runtimeState, sessionId, patch) {
   return runtimeState.sessions[sessionId];
 }
 
+const POST_EXPIRY_GRACE_SECONDS = 60 * 60;
+
 export function pruneSessions(runtimeState) {
   const now = nowEpochSeconds();
   for (const [sessionId, session] of Object.entries(runtimeState.sessions)) {
     const updatedAt = Number.isFinite(session.updatedAt) ? session.updatedAt : 0;
     if (now - updatedAt > MAX_SESSION_AGE_SECONDS) {
+      delete runtimeState.sessions[sessionId];
+      continue;
+    }
+    const expiresAt = Number.isFinite(session.expiresAt) ? session.expiresAt : 0;
+    if (expiresAt > 0 && now - expiresAt > POST_EXPIRY_GRACE_SECONDS) {
       delete runtimeState.sessions[sessionId];
     }
   }

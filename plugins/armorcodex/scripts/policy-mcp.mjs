@@ -7,6 +7,8 @@ import { writeJson } from "./lib/fs-store.mjs";
 import { extractAllowedActions, requestIntent } from "./lib/intent.mjs";
 import { INTENT_PLAN_ZOD, PLAN_STEP_SCHEMA, normalizeIntentPlan } from "./lib/intent-schema.mjs";
 import { applyPolicyCommand, computePolicyHash, loadPolicyState, parsePolicyTextCommand } from "./lib/policy.mjs";
+import { createAuditWal } from "./lib/audit-wal.mjs";
+import { createIapService } from "./lib/iap-service.mjs";
 
 const MATCHER_OPERATORS = z
   .object({
@@ -272,6 +274,38 @@ async function run() {
       );
     }
   );
+
+  // Background WAL flusher — drains queued audit rows in batches and ships
+  // to /iap/audit. Embedded here because the MCP server is already a
+  // long-lived stdio process; no need for a separate daemon binary the way
+  // armorClaude needs one (Claude Code spawns a fresh node per hook).
+  //
+  // Tuning mirrors armorClaude#44 daemon for cross-product parity:
+  //   - 5s interval  (AUDIT_FLUSH_INTERVAL_MS)
+  //   - 100-row batch (AUDIT_FLUSH_THRESHOLD)
+  // Errors are logged + retried on the next tick (offset isn't advanced
+  // on failure).
+  const flusher = setInterval(async () => {
+    try {
+      const config = loadConfig();
+      if (!config.apiKey) return; // no backend configured; WAL just accumulates locally
+      const wal = createAuditWal({ dataDir: config.dataDir });
+      const { rows, endOffset } = await wal.readBatch(100);
+      if (rows.length === 0) return;
+      const iapService = createIapService(config);
+      await iapService.shipAuditBatch(rows);
+      await wal.advanceOffset(endOffset);
+      process.stderr.write(
+        `[armorcodex-policy] flushed ${rows.length} audit rows -> offset=${endOffset}\n`
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`[armorcodex-policy] flusher: ${msg}\n`);
+    }
+  }, 5000);
+  flusher.unref?.();
+  process.on("SIGTERM", () => clearInterval(flusher));
+  process.on("SIGINT", () => clearInterval(flusher));
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
