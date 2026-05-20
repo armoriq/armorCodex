@@ -280,14 +280,17 @@ async function run() {
   // long-lived stdio process; no need for a separate daemon binary the way
   // armorClaude needs one (Claude Code spawns a fresh node per hook).
   //
-  // Interval: 5s. Batch cap: 50 rows. Errors are logged + retried on the
-  // next tick (offset isn't advanced on failure).
+  // Tuning mirrors armorClaude#44 daemon for cross-product parity:
+  //   - 5s interval  (AUDIT_FLUSH_INTERVAL_MS)
+  //   - 100-row batch (AUDIT_FLUSH_THRESHOLD)
+  // Errors are logged + retried on the next tick (offset isn't advanced
+  // on failure).
   const flusher = setInterval(async () => {
     try {
       const config = loadConfig();
       if (!config.apiKey) return; // no backend configured; WAL just accumulates locally
       const wal = createAuditWal({ dataDir: config.dataDir });
-      const { rows, endOffset } = await wal.readBatch(50);
+      const { rows, endOffset } = await wal.readBatch(100);
       if (rows.length === 0) return;
       const iapService = createIapService(config);
       await iapService.shipAuditBatch(rows);
