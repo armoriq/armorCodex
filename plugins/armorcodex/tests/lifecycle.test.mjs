@@ -122,7 +122,21 @@ test("handlePostToolUse returns null when audit disabled", async () => {
   assert.equal(output, null);
 });
 
-test("handlePostToolUse sends audit when enabled", async () => {
+// Audit is fire-and-forget: enqueueAudit writes to a JSONL WAL under
+// <dataDir>/audit/current.jsonl, and a background flusher in policy-mcp.mjs
+// ships batches to /iap/audit. The tests below read the WAL directly to
+// verify the queued row instead of stubbing fetch.
+async function readWalRows(dataDir) {
+  const { readFile } = await import("node:fs/promises");
+  const walPath = path.join(dataDir, "audit", "current.jsonl");
+  const raw = await readFile(walPath, "utf8");
+  return raw
+    .split("\n")
+    .filter((line) => line.length > 0)
+    .map((line) => JSON.parse(line));
+}
+
+test("handlePostToolUse enqueues audit row to WAL when enabled", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorcodex-test-"));
   const config = buildConfig(tmp, { auditEnabled: true, apiKey: "test-key" });
   await handleSessionStart(
@@ -130,36 +144,30 @@ test("handlePostToolUse sends audit when enabled", async () => {
     config
   );
 
-  const originalFetch = globalThis.fetch;
-  let capturedPayload;
-  globalThis.fetch = async (_url, options) => {
-    capturedPayload = JSON.parse(options.body);
-    return new Response(
-      JSON.stringify({ audit_id: "a1", iap_sync_status: "ok" }),
-      { status: 200, headers: { "content-type": "application/json" } }
-    );
-  };
+  const output = await handlePostToolUse(
+    {
+      hook_event_name: "PostToolUse",
+      session_id: "sess-5",
+      tool_name: "Read",
+      tool_input: { file_path: "test.txt" },
+      tool_response: { content: "hello" }
+    },
+    config
+  );
+  // Give the fire-and-forget enqueue a microtask to flush to disk.
+  // Wait for the fire-and-forget enqueue's async fs writes (mkdir + appendFile)
+  // to land on disk. The handler returns synchronously after starting the
+  // promise; ~50ms is comfortable for the I/O on macOS/Linux.
+  await new Promise((resolve) => setTimeout(resolve, 50));
 
-  try {
-    const output = await handlePostToolUse(
-      {
-        hook_event_name: "PostToolUse",
-        session_id: "sess-5",
-        tool_name: "Read",
-        tool_input: { file_path: "test.txt" },
-        tool_response: { content: "hello" }
-      },
-      config
-    );
-    assert.equal(output, null);
-    assert.equal(capturedPayload.action, "Read");
-    assert.equal(capturedPayload.status, "success");
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+  assert.equal(output, null);
+  const rows = await readWalRows(config.dataDir);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].action, "Read");
+  assert.equal(rows[0].status, "success");
 });
 
-test("handlePostToolUseFailure logs failed status", async () => {
+test("handlePostToolUseFailure enqueues failed-status row to WAL", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorcodex-test-"));
   const config = buildConfig(tmp, { auditEnabled: true, apiKey: "test-key" });
   await handleSessionStart(
@@ -167,30 +175,23 @@ test("handlePostToolUseFailure logs failed status", async () => {
     config
   );
 
-  const originalFetch = globalThis.fetch;
-  let capturedPayload;
-  globalThis.fetch = async (_url, options) => {
-    capturedPayload = JSON.parse(options.body);
-    return new Response(
-      JSON.stringify({ audit_id: "a2", iap_sync_status: "ok" }),
-      { status: 200, headers: { "content-type": "application/json" } }
-    );
-  };
+  await handlePostToolUseFailure(
+    {
+      hook_event_name: "PostToolUseFailure",
+      session_id: "sess-6",
+      tool_name: "Bash",
+      tool_input: { command: "exit 1" },
+      error: "Command failed with exit code 1"
+    },
+    config
+  );
+  // Wait for the fire-and-forget enqueue's async fs writes (mkdir + appendFile)
+  // to land on disk. The handler returns synchronously after starting the
+  // promise; ~50ms is comfortable for the I/O on macOS/Linux.
+  await new Promise((resolve) => setTimeout(resolve, 50));
 
-  try {
-    await handlePostToolUseFailure(
-      {
-        hook_event_name: "PostToolUseFailure",
-        session_id: "sess-6",
-        tool_name: "Bash",
-        tool_input: { command: "exit 1" },
-        error: "Command failed with exit code 1"
-      },
-      config
-    );
-    assert.equal(capturedPayload.status, "failed");
-    assert.equal(capturedPayload.error_message, "Command failed with exit code 1");
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+  const rows = await readWalRows(config.dataDir);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].status, "failed");
+  assert.equal(rows[0].error_message, "Command failed with exit code 1");
 });
