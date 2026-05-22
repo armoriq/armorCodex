@@ -6,11 +6,11 @@
     "url": "https://armoriq.ai"
   },
   "metadata": {
-    "description": "ArmorCodex marketplace: intent-based security enforcement for OpenAI Codex.",
+    "description": "ArmorIQ marketplace: intent-based security enforcement for OpenAI Codex (ArmorCodex) and other agentic harnesses.",
     "version": "0.2.0"
   },
   "interface": {
-    "displayName": "ArmorCodex"
+    "displayName": "ArmorIQ"
   },
   "plugins": [
     {
