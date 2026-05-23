@@ -29,15 +29,15 @@
     "category": "Security",
     "capabilities": ["MCP", "Hooks"],
     "websiteURL": "https://armoriq.ai",
-    "privacyPolicyURL": "https://armoriq.ai/privacy",
-    "termsOfServiceURL": "https://armoriq.ai/terms",
+    "privacyPolicyURL": "https://armoriq.ai/privacy-policy",
+    "termsOfServiceURL": "https://armoriq.ai/terms-of-service",
     "brandColor": "#00E5CC",
     "composerIcon": "./assets/armoriq-logo.png",
     "logo": "./assets/armoriq-logo.png",
     "defaultPrompt": [
-      "Register an intent plan, then run my Bash commands.",
-      "Show the current ArmorCodex security policies.",
-      "Block Bash commands that contain curl or wget."
+      "Show me what security rules are protecting this project.",
+      "Block any commands that fetch URLs or exfiltrate data.",
+      "Walk me through your plan before running anything."
     ]
   },
   "userConfig": {
