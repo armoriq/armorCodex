@@ -446,6 +446,25 @@ verify_install() {
   fi
 }
 
+abort_install() {
+  echo
+  err "ArmorCodex requires an ArmorIQ account. Install aborted."
+  echo
+  info "rolling back..."
+  if [[ -f "${CONFIG_TOML}" ]]; then
+    strip_managed_block "${CONFIG_TOML}" 2>/dev/null && info "removed managed block from ${CONFIG_TOML}" || true
+  fi
+  if [[ -f "${GLOBAL_HOOKS}" ]] && grep -q "ArmorCodex" "${GLOBAL_HOOKS}" 2>/dev/null; then
+    rm -f "${GLOBAL_HOOKS}" && info "removed ${GLOBAL_HOOKS}" || true
+  fi
+  if [[ -d "${INSTALL_HOME}" ]]; then
+    rm -rf "${INSTALL_HOME}" && info "removed plugin source ${INSTALL_HOME}" || true
+  fi
+  echo
+  printf "  Get an account at ${C}${B}https://armoriq.ai${N} and re-run when ready.\n\n"
+  exit 1
+}
+
 connect_to_armoriq() {
   section "Connect to ArmorIQ"
   cat <<EOF
@@ -455,15 +474,19 @@ connect_to_armoriq() {
 
 EOF
 
-  if ! is_promptable; then
-    printf "  Run ${G}${B}armoriq login${N} to connect later.\n\n"
+  if [[ -n "${ARMORIQ_API_KEY:-}" ]] || [[ -f "$HOME/.armoriq/credentials.json" ]]; then
+    ok "ArmorIQ credentials already present"
     return 0
   fi
 
+  if ! is_promptable; then
+    err "No TTY available for interactive login."
+    printf "  Set ${B}ARMORIQ_API_KEY${N} or run interactively.\n"
+    abort_install
+  fi
+
   if ! prompt_yes_no "Connect your ArmorIQ account now?" "Y"; then
-    echo
-    printf "  No problem. Run ${G}${B}armoriq login${N} anytime to connect.\n\n"
-    return 0
+    abort_install
   fi
 
   echo
@@ -471,28 +494,37 @@ EOF
   # Older CLIs without --product fall back to ARMORIQ_PRODUCT env var, which
   # newer CLIs also honor — older ones simply ignore it.
   local product="armorcodex"
-  if command -v armoriq >/dev/null 2>&1; then
-    if armoriq login --help 2>&1 | grep -q -- '--product'; then
-      armoriq login --product "${product}"
+  local login_ok=0
+  if command -v armoriq-dev >/dev/null 2>&1; then
+    if armoriq-dev login --help 2>&1 | grep -q -- '--product'; then
+      armoriq-dev login --product "${product}" && login_ok=1
     else
-      ARMORIQ_PRODUCT="${product}" armoriq login
+      ARMORIQ_PRODUCT="${product}" armoriq-dev login && login_ok=1
+    fi
+  elif command -v armoriq >/dev/null 2>&1; then
+    if armoriq login --help 2>&1 | grep -q -- '--product'; then
+      armoriq login --product "${product}" && login_ok=1
+    else
+      ARMORIQ_PRODUCT="${product}" armoriq login && login_ok=1
     fi
   elif command -v npx >/dev/null 2>&1; then
     if npx @armoriq/sdk login --help 2>&1 | grep -q -- '--product'; then
-      npx @armoriq/sdk login --product "${product}"
+      npx @armoriq/sdk login --product "${product}" && login_ok=1
     else
-      ARMORIQ_PRODUCT="${product}" npx @armoriq/sdk login
+      ARMORIQ_PRODUCT="${product}" npx @armoriq/sdk login && login_ok=1
     fi
   else
-    warn "armoriq CLI not found. Run ${B}npx @armoriq/sdk login${N} manually."
-    return 0
+    err "armoriq CLI not found."
+    abort_install
   fi
 
-  local login_status=$?
-  if [[ $login_status -eq 0 ]] && [[ -f "$HOME/.armoriq/credentials.json" ]]; then
-    echo
-    ok "ArmorIQ connected. Codex will auto-load the key."
+  if [[ "${login_ok}" -ne 1 ]] || [[ ! -f "$HOME/.armoriq/credentials.json" ]]; then
+    err "ArmorIQ login did not complete."
+    abort_install
   fi
+
+  echo
+  ok "ArmorIQ connected. Codex will auto-load the key."
 }
 
 finale() {
