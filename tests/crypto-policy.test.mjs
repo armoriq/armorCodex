@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   computePolicyDigest,
   createCryptoPolicyService
-} from "../scripts/lib/crypto-policy.mjs";
+} from "../plugins/armorcodex/scripts/lib/crypto-policy.mjs";
 import { mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
