@@ -5,8 +5,8 @@ import {
   matchesScalar,
   matchParams,
   matchesAnyStringField
-} from "../scripts/lib/common.mjs";
-import { evaluatePolicy, parsePolicyTextCommand } from "../scripts/lib/policy.mjs";
+} from "../plugins/armorcodex/scripts/lib/common.mjs";
+import { evaluatePolicy, parsePolicyTextCommand } from "../plugins/armorcodex/scripts/lib/policy.mjs";
 
 // ---------------------------------------------------------------------------
 // matchesScalar — operator coverage

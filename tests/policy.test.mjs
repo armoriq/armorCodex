@@ -3,9 +3,9 @@ import assert from "node:assert/strict";
 import { mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { handlePreToolUse, handleUserPromptSubmit } from "../scripts/lib/engine.mjs";
-import { checkToolAgainstPlan } from "../scripts/lib/intent.mjs";
-import { evaluatePolicy } from "../scripts/lib/policy.mjs";
+import { handlePreToolUse, handleUserPromptSubmit } from "../plugins/armorcodex/scripts/lib/engine.mjs";
+import { checkToolAgainstPlan } from "../plugins/armorcodex/scripts/lib/intent.mjs";
+import { evaluatePolicy } from "../plugins/armorcodex/scripts/lib/policy.mjs";
 
 function buildConfig(tmpDir, overrides = {}) {
   return {
