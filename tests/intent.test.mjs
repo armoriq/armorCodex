@@ -3,13 +3,13 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import os from "node:os";
 import { mkdtemp, writeFile } from "node:fs/promises";
-import { handlePreToolUse } from "../scripts/lib/engine.mjs";
+import { handlePreToolUse } from "../plugins/armorcodex/scripts/lib/engine.mjs";
 import {
   checkIntentTokenPlan,
   parseCsrgProofHeaders,
   resolveCsrgProofsFromToken
-} from "../scripts/lib/intent.mjs";
-import { createIapService } from "../scripts/lib/iap-service.mjs";
+} from "../plugins/armorcodex/scripts/lib/intent.mjs";
+import { createIapService } from "../plugins/armorcodex/scripts/lib/iap-service.mjs";
 
 function buildConfig(tmpDir, overrides = {}) {
   return {
@@ -22,7 +22,7 @@ function buildConfig(tmpDir, overrides = {}) {
     iapEndpoint: "http://127.0.0.1:8000",
     proxyEndpoint: "http://127.0.0.1:3001",
     csrgEndpoint: "http://127.0.0.1:8000",
-    apiKey: "ak_test_12345678",
+    apiKey: process.env.TEST_API_KEY || "",
     useSdkIntent: false,
     intentEndpoint: "",
     verifyStepEndpoint: "",

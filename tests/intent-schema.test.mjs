@@ -4,7 +4,7 @@ import {
   INTENT_PLAN_ZOD,
   INTENT_PLAN_FORMAT,
   normalizeIntentPlan
-} from "../scripts/lib/intent-schema.mjs";
+} from "../plugins/armorcodex/scripts/lib/intent-schema.mjs";
 
 test("INTENT_PLAN_ZOD accepts valid plan", () => {
   const result = INTENT_PLAN_ZOD.safeParse({
