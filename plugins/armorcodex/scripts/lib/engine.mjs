@@ -1,3 +1,4 @@
+import armoriqSdk from "@armoriq/sdk";
 import { isPlainObject, normalizeToolName, nowEpochSeconds, redactSecrets, sanitizeParams } from "./common.mjs";
 import { addPromptContext, blockPrompt, denyPermissionRequest, denyPreTool } from "./hook-output.mjs";
 import {
@@ -5,6 +6,7 @@ import {
   checkToolAgainstPlan,
   extractAllowedActions,
   findPlanStepIndices,
+  getSdkClient,
   getSessionTokenUsedStepIndices,
   parseCsrgProofHeaders,
   recordSessionTokenUsedStepIndices,
@@ -714,13 +716,42 @@ export async function handleStop(input, config) {
   const session = getSession(runtimeState, sessionId);
   if (!session) return null;
 
+  // --- Capture token usage via the SDK (single cross-tool path shared by
+  // ArmorClaude/Codex/Copilot). Best-effort; requires apiKey. Codex fires Stop
+  // every turn, so debounce: parse the cumulative transcript total and POST only
+  // when it changed since the last Stop. The backend upsert keeps it idempotent.
+  if (config.apiKey) {
+    try {
+      const entries = armoriqSdk.summarizeTranscriptUsage(input.transcript_path);
+      const total = entries.reduce(
+        (s, e) => s + e.inputTokens + e.outputTokens + e.cacheReadTokens + e.cacheWriteTokens,
+        0
+      );
+      if (total > 0 && total !== session.lastTokenTotal) {
+        const result = await getSdkClient(config).recordTokenUsage({
+          product: "armorcodex",
+          sessionId,
+          entries
+        });
+        if (result.ok) session.lastTokenTotal = total;
+        debugLog(
+          config,
+          `token usage: ${entries.length} model(s) total=${total} ${result.ok ? "ok" : "failed:" + (result.reason || "")}`
+        );
+      }
+    } catch (err) {
+      debugLog(config, `token usage capture failed: ${err?.message ?? err}`);
+    }
+  }
+
   // Check if token expired mid-turn
   if (Number.isFinite(session.expiresAt) && nowEpochSeconds() > session.expiresAt) {
     debugLog(config, "intent token expired during turn");
   }
 
   upsertSession(runtimeState, sessionId, {
-    lastStopAt: nowEpochSeconds()
+    lastStopAt: nowEpochSeconds(),
+    lastTokenTotal: session.lastTokenTotal
   });
   await saveRuntimeState(config.runtimeFile, runtimeState);
   return null;
