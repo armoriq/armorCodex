@@ -1,3 +1,4 @@
+import armoriqSdk from "@armoriq/sdk";
 import { isPlainObject, normalizeToolName, nowEpochSeconds, redactSecrets, sanitizeParams } from "./common.mjs";
 import { addPromptContext, blockPrompt, denyPermissionRequest, denyPreTool } from "./hook-output.mjs";
 import {
@@ -711,29 +712,37 @@ export async function handleStop(input, config) {
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   if (!sessionId) return null;
 
+  const runtimeState = await loadRuntimeState(config.runtimeFile);
+  const session = getSession(runtimeState, sessionId);
+  if (!session) return null;
+
   // --- Capture token usage via the SDK (single cross-tool path shared by
   // ArmorClaude/Codex/Copilot). Best-effort; requires apiKey. Codex fires Stop
-  // (not SessionEnd); the post is idempotent (upsert by org/product/session/model),
-  // so reporting cumulative transcript totals each turn converges to the right value.
+  // every turn, so debounce: parse the cumulative transcript total and POST only
+  // when it changed since the last Stop. The backend upsert keeps it idempotent.
   if (config.apiKey) {
     try {
-      const result = await getSdkClient(config).captureTranscriptTokens({
-        transcriptPath: input.transcript_path,
-        product: "armorcodex",
-        sessionId
-      });
-      debugLog(
-        config,
-        `token usage: ${result.recorded} model(s) ${result.ok ? "ok" : "failed:" + (result.reason || "")}`
+      const entries = armoriqSdk.summarizeTranscriptUsage(input.transcript_path);
+      const total = entries.reduce(
+        (s, e) => s + e.inputTokens + e.outputTokens + e.cacheReadTokens + e.cacheWriteTokens,
+        0
       );
+      if (total > 0 && total !== session.lastTokenTotal) {
+        const result = await getSdkClient(config).recordTokenUsage({
+          product: "armorcodex",
+          sessionId,
+          entries
+        });
+        if (result.ok) session.lastTokenTotal = total;
+        debugLog(
+          config,
+          `token usage: ${entries.length} model(s) total=${total} ${result.ok ? "ok" : "failed:" + (result.reason || "")}`
+        );
+      }
     } catch (err) {
       debugLog(config, `token usage capture failed: ${err?.message ?? err}`);
     }
   }
-
-  const runtimeState = await loadRuntimeState(config.runtimeFile);
-  const session = getSession(runtimeState, sessionId);
-  if (!session) return null;
 
   // Check if token expired mid-turn
   if (Number.isFinite(session.expiresAt) && nowEpochSeconds() > session.expiresAt) {
@@ -741,7 +750,8 @@ export async function handleStop(input, config) {
   }
 
   upsertSession(runtimeState, sessionId, {
-    lastStopAt: nowEpochSeconds()
+    lastStopAt: nowEpochSeconds(),
+    lastTokenTotal: session.lastTokenTotal
   });
   await saveRuntimeState(config.runtimeFile, runtimeState);
   return null;
