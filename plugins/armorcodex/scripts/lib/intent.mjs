@@ -26,7 +26,7 @@ function buildSdkClientKey(config) {
   ].join("|");
 }
 
-function getSdkClient(config) {
+export function getSdkClient(config) {
   const key = buildSdkClientKey(config);
   const cached = sdkClientCache.get(key);
   if (cached) {

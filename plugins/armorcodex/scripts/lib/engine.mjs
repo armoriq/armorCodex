@@ -5,6 +5,7 @@ import {
   checkToolAgainstPlan,
   extractAllowedActions,
   findPlanStepIndices,
+  getSdkClient,
   getSessionTokenUsedStepIndices,
   parseCsrgProofHeaders,
   recordSessionTokenUsedStepIndices,
@@ -709,6 +710,26 @@ export async function handlePostToolUseFailure(input, config) {
 export async function handleStop(input, config) {
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   if (!sessionId) return null;
+
+  // --- Capture token usage via the SDK (single cross-tool path shared by
+  // ArmorClaude/Codex/Copilot). Best-effort; requires apiKey. Codex fires Stop
+  // (not SessionEnd); the post is idempotent (upsert by org/product/session/model),
+  // so reporting cumulative transcript totals each turn converges to the right value.
+  if (config.apiKey) {
+    try {
+      const result = await getSdkClient(config).captureTranscriptTokens({
+        transcriptPath: input.transcript_path,
+        product: "armorcodex",
+        sessionId
+      });
+      debugLog(
+        config,
+        `token usage: ${result.recorded} model(s) ${result.ok ? "ok" : "failed:" + (result.reason || "")}`
+      );
+    } catch (err) {
+      debugLog(config, `token usage capture failed: ${err?.message ?? err}`);
+    }
+  }
 
   const runtimeState = await loadRuntimeState(config.runtimeFile);
   const session = getSession(runtimeState, sessionId);
