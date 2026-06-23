@@ -99,6 +99,12 @@ async function run() {
       inputSchema: {
         text: z.string().optional(),
         update: POLICY_UPDATE_SCHEMA.optional()
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false
       }
     },
     async (args) => {
@@ -151,6 +157,12 @@ async function run() {
       description: "Read current ArmorCodex policy state",
       inputSchema: {
         id: z.string().optional()
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false
       }
     },
     async (args) => {
@@ -194,6 +206,12 @@ async function run() {
           .describe("Ordered list of tool calls (array, or JSON-stringified array)"),
         plan: z.union([INTENT_PLAN_ZOD, z.string().min(1)]).optional()
           .describe("Alternative: pass the whole plan as an object or JSON string")
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false
       }
     },
     async (args) => {
