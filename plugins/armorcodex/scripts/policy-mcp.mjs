@@ -322,8 +322,32 @@ async function run() {
     }
   }, 5000);
   flusher.unref?.();
-  process.on("SIGTERM", () => clearInterval(flusher));
-  process.on("SIGINT", () => clearInterval(flusher));
+
+  async function flushAndExit(signal) {
+    clearInterval(flusher);
+    try {
+      const config = loadConfig();
+      if (config.apiKey) {
+        const wal = createAuditWal({ dataDir: config.dataDir });
+        const { rows, endOffset } = await wal.readBatch(500);
+        if (rows.length > 0) {
+          const iapService = createIapService(config);
+          await iapService.shipAuditBatch(rows);
+          await wal.advanceOffset(endOffset);
+          process.stderr.write(
+            `[armorcodex-policy] ${signal}: flushed ${rows.length} remaining audit rows\n`
+          );
+        }
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`[armorcodex-policy] ${signal} flush error: ${msg}\n`);
+    }
+    process.exit(0);
+  }
+
+  process.on("SIGTERM", () => flushAndExit("SIGTERM"));
+  process.on("SIGINT", () => flushAndExit("SIGINT"));
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
