@@ -1,0 +1,19 @@
+{
+  "name": "armorcodex-hosted-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Hosted HTTPS MCP server for ArmorCodex (OpenAI Apps SDK submission)",
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node --watch server.mjs"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "express": "^4.21.2",
+    "zod": "^3.25.76"
+  }
+}
