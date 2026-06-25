@@ -175,7 +175,7 @@ app.get("/health", (_req, res) => {
   res.json({ ok: true, service: "armorcodex-hosted-mcp", version: "0.3.0" });
 });
 
-app.get("/.well-known/openai-mcp-domain-verification", (_req, res) => {
+app.get("/.well-known/openai-apps-challenge", (_req, res) => {
   if (!DOMAIN_VERIFICATION_TOKEN) {
     res.status(503).type("text/plain").send("verification token not configured");
     return;

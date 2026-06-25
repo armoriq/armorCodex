@@ -21,7 +21,7 @@ gcloud run deploy "$SERVICE" \
   --min-instances 0 \
   --max-instances 5 \
   --timeout 300 \
-  --set-env-vars "NODE_ENV=production"
+  --update-env-vars "NODE_ENV=production"
 
 echo "[deploy] service deployed. To set the domain verification token:"
 echo "  gcloud run services update $SERVICE --region $REGION --update-env-vars OPENAI_DOMAIN_VERIFICATION_TOKEN=<token>"
