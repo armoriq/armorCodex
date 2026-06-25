@@ -11,7 +11,7 @@ This document describes what ArmorCodex captures, how long ArmorIQ keeps it, and
 |---|---|---|---|
 | Intent plans | ArmorIQ backend (per org) | **90 days** | `armoriq delete-history --plans` |
 | Audit log entries (tool calls) | ArmorIQ backend (per org) | **90 days** | `armoriq delete-history --audit` |
-| Policy rules + version history | ArmorIQ backend (per org) | **Indefinite while account active**, 30 days after account deletion | Account deletion via `support@armoriq.ai` |
+| Policy rules + version history | ArmorIQ backend (per org) | **Indefinite while account active**, 30 days after account deletion | Account deletion via `developers@armoriq.io` |
 | API keys | ArmorIQ backend (per user, per org) | Until revoked + 30 days | `armoriq keys revoke <id>` |
 | OAuth credentials (when applicable) | ArmorIQ backend | Until token revocation + 30 days | OAuth revoke flow |
 | Local audit WAL | Customer machine, `~/.codex/armorcodex/audit/` | Cleared on plugin uninstall or by user | `rm -rf ~/.codex/armorcodex/` |
@@ -55,7 +55,7 @@ Revoked API keys are kept in a "revoked" state for 30 days so audit rows that re
 
 ### Full account deletion
 
-Email **support@armoriq.ai** with the subject `[Account deletion]` and your org ID. We respond within 2 business days, complete the deletion within 30 days, and confirm by email when done. After deletion:
+Email **developers@armoriq.io** with the subject `[Account deletion]` and your org ID. We respond within 2 business days, complete the deletion within 30 days, and confirm by email when done. After deletion:
 
 - All policy rules, audit rows, intent plans, API keys, OAuth tokens, and user/org metadata associated with your account are removed from the ArmorIQ backend
 - Aggregated metrics (counts only, no row-level data) are retained indefinitely for billing reconciliation
@@ -72,13 +72,13 @@ ArmorIQ is the data controller for data captured by ArmorCodex. EU and Californi
 - Portability (machine-readable export)
 - Objection (object to processing)
 
-Email **privacy@armoriq.ai** to exercise any of these rights. We respond within 30 days.
+Email **license@armoriq.io** to exercise any of these rights. We respond within 30 days.
 
 ## Contact
 
-- General support: `support@armoriq.ai`
-- Privacy + data requests: `privacy@armoriq.ai`
-- Security disclosure: `security@armoriq.ai`
+- General support: `developers@armoriq.io`
+- Privacy + data requests: `license@armoriq.io`
+- Security disclosure: `developers@armoriq.io`
 - Policy questions: refer to https://armoriq.ai/privacy-policy
 
 ## Changes to this policy
