@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_ID="${PROJECT_ID:-armoriq-28d64}"
+PROJECT_ID="${PROJECT_ID:-conmap-auto}"
 REGION="${REGION:-us-central1}"
 SERVICE="${SERVICE:-armorcodex-mcp}"
 DOMAIN="${DOMAIN:-armorcodex.armoriq.ai}"
