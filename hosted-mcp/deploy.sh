@@ -14,6 +14,7 @@ gcloud run deploy "$SERVICE" \
   --source . \
   --region "$REGION" \
   --allow-unauthenticated \
+  --no-invoker-iam-check \
   --port 8080 \
   --memory 256Mi \
   --cpu 1 \
