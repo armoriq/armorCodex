@@ -79,7 +79,7 @@ function buildServer() {
     "policy_update",
     {
       title: "Policy Update",
-      description: "Manage ArmorCodex policy rules (replace or merge).",
+      description: "Updates the ArmorCodex policy rule set held in this server's in-memory store. Supports two modes: `merge` (default) upserts the submitted rules into the existing set, and `replace` overwrites the entire rule set with the submitted payload. The previous rules are not snapshotted, so `replace` cannot be undone from this tool. Annotations: readOnlyHint=false because the tool mutates server state; destructiveHint=true because replace mode irreversibly drops the prior rule set; openWorldHint=false because all state lives in this MCP server's memory and no external system is contacted.",
       inputSchema: { update: POLICY_UPDATE_SCHEMA },
       annotations: {
         readOnlyHint: false,
@@ -113,7 +113,7 @@ function buildServer() {
     "policy_read",
     {
       title: "Policy Read",
-      description: "Read current ArmorCodex policy state.",
+      description: "Returns the current ArmorCodex policy rule set held in this server's in-memory store. With no arguments, returns the full policy object including all rules and the current version. With an `id` argument, returns the single rule matching that id. Annotations: readOnlyHint=true because the tool only reads server state without modifying anything; destructiveHint=false because no state changes; idempotentHint=true because repeated calls with the same input return the same result without side effects; openWorldHint=false because all reads come from this MCP server's memory and no external system is contacted.",
       inputSchema: { id: z.string().optional() },
       annotations: {
         readOnlyHint: true,
@@ -139,7 +139,7 @@ function buildServer() {
     "register_intent_plan",
     {
       title: "Register Intent Plan",
-      description: "Declare the tools you intend to use for this task. Required by ArmorCodex before any other tool call.",
+      description: "Records a structured intent plan (goal plus an ordered list of steps describing the tools the agent intends to call) into this server's in-memory plan list and returns the generated plan id. This hosted server stores the plan only; it does not enforce or block subsequent tool calls. The companion local Codex plugin uses these plans to gate tool execution via PreToolUse hooks on the user's machine, but that enforcement is out of scope for this hosted MCP. Annotations: readOnlyHint=false because the tool appends a new record to the in-memory plan list; destructiveHint=false because each call appends a new plan and never modifies or deletes prior plans; idempotentHint=false because calling the tool twice with identical inputs produces two distinct plan ids and two records; openWorldHint=false because all state lives in this MCP server's memory and no external system is contacted.",
       inputSchema: {
         goal: z.string().min(1).describe("One-line summary of what the plan accomplishes"),
         steps: z.array(PLAN_STEP_SCHEMA).min(1).describe("Ordered list of tool calls")
