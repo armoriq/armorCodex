@@ -77,12 +77,23 @@ Core environment variables:
 
 ## Policy Commands
 
-From a Codex prompt:
+Structured `/armor` commands (staged: nothing applies until you confirm):
 
-- `Policy list`
-- `Policy get <id>`
-- `Policy delete <id>`
-- `Policy reset`
+- `/armor policy list` and `/armor policy view`
+- `/armor policy add deny bash` (or `allow`/`hold`; multiple: `add allow bash and apply_patch, deny apply_patch`)
+- `/armor policy remove <id>`
+- `/armor policy reset`
+- `/armor policy default deny|allow|hold` (unmatched-tool default)
+- `/armor policy template <all-allow|lockdown|strict-read-only|balanced>`
+- `/armor profile save|list|switch|delete <name>`
+- `/armor mcp approve|deny <server>` and `/armor mcp list`
+- `/armor yes` / `/armor no` to apply or discard the staged change
+
+Staging a change shows a diff and risk warnings; applying is human-only (the MCP `policy_command` tool can read and stage, but only a terminal `/armor yes` applies). See [POLICY_GUIDE.md](POLICY_GUIDE.md).
+
+Natural-language commands still work for quick edits (applied immediately):
+
+- `Policy list`, `Policy get <id>`, `Policy delete <id>`, `Policy reset`
 - `Policy new: deny Bash for payment data`
 - `Policy update <id>: allow Bash`
 - `Policy prioritize <id> <position>`
