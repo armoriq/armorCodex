@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
+import { isPlainObject } from "./common.mjs";
 import { readJson, writeJson } from "./fs-store.mjs";
 import {
   computePolicyHash,
@@ -47,6 +48,19 @@ const TEMPLATES = {
 
 function pendingPath(config) {
   return path.join(config.dataDir, "policy-pending.json");
+}
+
+function profilesPath(config) {
+  return path.join(config.dataDir, "policy-profiles.json");
+}
+
+async function loadProfiles(config) {
+  const data = await readJson(profilesPath(config), { profiles: {} });
+  return isPlainObject(data) && isPlainObject(data.profiles) ? data : { profiles: {} };
+}
+
+async function saveProfiles(config, data) {
+  await writeJson(profilesPath(config), data);
 }
 
 // --- command surface detection ---------------------------------------------
@@ -144,6 +158,16 @@ export function parseCommand(prompt) {
 
   m = rest.match(/^template\s+(\S+)/i);
   if (m) return { cmd: "template", name: m[1] };
+
+  m = rest.match(/^profile\s+(save|list|switch|load|delete|remove)(?:\s+(\S+))?/i);
+  if (m) {
+    const sub = m[1].toLowerCase();
+    const name = m[2] || "";
+    if (sub === "list") return { cmd: "profile-list" };
+    if (sub === "save") return { cmd: "profile-save", name };
+    if (sub === "switch" || sub === "load") return { cmd: "profile-switch", name };
+    return { cmd: "profile-delete", name };
+  }
 
   if (/^add\b/i.test(rest)) {
     const rules = parseNaturalRules(rest.replace(/^add\b\s*/i, ""));
@@ -290,6 +314,7 @@ function helpText() {
     "  /armor policy reset                - stage clearing all rules",
     "  /armor policy default deny|allow|hold - stage the unmatched-tool default",
     "  /armor policy template <name>      - stage a template",
+    "  /armor profile save|list|switch|delete <name> - manage saved policy profiles",
     "  /armor yes | /armor no             - apply or discard the staged change",
     "",
     `Templates: ${Object.keys(TEMPLATES).join(", ")}`,
@@ -369,6 +394,39 @@ export async function handleArmorPolicyCommand(prompt, config, actor = "unknown"
         return `Unknown template: ${parsed.name}. Available: ${Object.keys(TEMPLATES).join(", ")}.`;
       }
       return stageAndFormat(config, state, proposed, `template ${parsed.name}`, actor);
+    }
+
+    case "profile-list": {
+      const { profiles } = await loadProfiles(config);
+      const names = Object.keys(profiles);
+      if (!names.length) return "No saved profiles. Save one with /armor profile save <name>.";
+      return `Saved profiles:\n${names.map((n) => `  - ${n} (${(profiles[n].rules || []).length} rules)`).join("\n")}`;
+    }
+
+    case "profile-save": {
+      if (!parsed.name) return "Usage: /armor profile save <name>";
+      const data = await loadProfiles(config);
+      data.profiles[parsed.name] = { rules: state.policy.rules };
+      await saveProfiles(config, data);
+      return `Saved current policy (v${state.version}, ${state.policy.rules.length} rules) as profile '${parsed.name}'.`;
+    }
+
+    case "profile-delete": {
+      if (!parsed.name) return "Usage: /armor profile delete <name>";
+      const data = await loadProfiles(config);
+      if (!data.profiles[parsed.name]) return `Profile not found: ${parsed.name}.`;
+      delete data.profiles[parsed.name];
+      await saveProfiles(config, data);
+      return `Deleted profile '${parsed.name}'.`;
+    }
+
+    case "profile-switch": {
+      if (!parsed.name) return "Usage: /armor profile switch <name>";
+      const data = await loadProfiles(config);
+      const prof = data.profiles[parsed.name];
+      if (!prof) return `Profile not found: ${parsed.name}. Use /armor profile list.`;
+      const rules = (prof.rules || []).map((r) => normalizeRule(r)).filter(Boolean);
+      return stageAndFormat(config, state, { rules }, `switch to profile ${parsed.name}`, actor);
     }
 
     default:
