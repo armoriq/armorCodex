@@ -83,7 +83,13 @@ function toolMatches(ruleTool, toolName) {
   if (ruleTool === "*") {
     return true;
   }
-  return normalizeToolName(ruleTool) === normalizeToolName(toolName);
+  const rt = normalizeToolName(ruleTool);
+  // Trailing-`*` glob so a rule can scope a family of tools, e.g.
+  // `mcp__github__*` matches every tool from the `github` MCP server.
+  if (rt.length > 1 && rt.endsWith("*")) {
+    return normalizeToolName(toolName).startsWith(rt.slice(0, -1));
+  }
+  return rt === normalizeToolName(toolName);
 }
 
 function extractStrings(value, depth, texts, keys) {
