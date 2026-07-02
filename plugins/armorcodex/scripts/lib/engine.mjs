@@ -22,6 +22,7 @@ import {
   loadPolicyState,
   parsePolicyTextCommand
 } from "./policy.mjs";
+import { handleArmorPolicyCommand, isArmorPolicyCommand } from "./armor-policy-commands.mjs";
 import { readJson } from "./fs-store.mjs";
 import { unlink } from "node:fs/promises";
 import path from "node:path";
@@ -176,7 +177,20 @@ export async function handleUserPromptSubmit(input, config) {
     return null;
   }
 
-  // --- Policy command handling ---
+  // --- Structured /armor policy commands (staged proposal -> confirm) ---
+  if (isArmorPolicyCommand(prompt)) {
+    const allowed = isPolicyUpdateAllowed(config, input);
+    if (!allowed.allowed) {
+      return blockPrompt(allowed.reason || "ArmorCodex policy update denied");
+    }
+    const actor = actorCandidates(input)[0] || "unknown";
+    const response = await handleArmorPolicyCommand(prompt, config, actor);
+    if (response !== null) {
+      return blockPrompt(response);
+    }
+  }
+
+  // --- Natural-language `Policy ...` commands (immediate; back-compat) ---
   if (policyCommandLooksLikePrompt(prompt)) {
     const allowed = isPolicyUpdateAllowed(config, input);
     if (!allowed.allowed) {
