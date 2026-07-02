@@ -13,7 +13,7 @@ import { readJson, writeJson } from "./fs-store.mjs";
 const POLICY_ACTIONS = new Set(["allow", "deny", "require_approval"]);
 const POLICY_DATA_CLASSES = new Set(["PCI", "PAYMENT", "PHI", "PII"]);
 
-function normalizeRule(rule) {
+export function normalizeRule(rule) {
   if (!isPlainObject(rule)) {
     return null;
   }
@@ -239,7 +239,7 @@ function truncateReason(text, max = 160) {
   return `${trimmed.slice(0, max)}...`;
 }
 
-function formatRule(rule) {
+export function formatRule(rule) {
   const parts = [`id=${rule.id}`, `action=${rule.action}`, `tool=${rule.tool}`];
   if (rule.dataClass) {
     parts.push(`dataClass=${rule.dataClass}`);
@@ -255,7 +255,7 @@ function formatRule(rule) {
   return parts.join(" ");
 }
 
-function nextPolicyId(state) {
+export function nextPolicyId(state) {
   const ids = state.policy.rules
     .map((rule) => rule.id)
     .map((id) => {
@@ -485,7 +485,7 @@ function mergeRules(existing, updates) {
   return [...newRules, ...Array.from(byId.values())];
 }
 
-async function persistNextState(policyFilePath, oldState, nextPolicy, actor, reason) {
+export async function persistNextState(policyFilePath, oldState, nextPolicy, actor, reason) {
   const version = oldState.version + 1;
   const updatedAt = new Date().toISOString();
   const entry = {
