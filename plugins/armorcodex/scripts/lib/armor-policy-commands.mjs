@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import { isPlainObject } from "./common.mjs";
+import { isPlainObject, normalizeToolName } from "./common.mjs";
 import { readJson, writeJson } from "./fs-store.mjs";
 import {
   computePolicyHash,
@@ -169,6 +169,13 @@ export function parseCommand(prompt) {
     return { cmd: "profile-delete", name };
   }
 
+  m = rest.match(/^mcp\s+(approve|allow|deny|block|list)(?:\s+(\S+))?/i);
+  if (m) {
+    const sub = m[1].toLowerCase();
+    if (sub === "list") return { cmd: "mcp-list" };
+    return { cmd: "mcp-trust", server: m[2] || "", action: sub === "deny" || sub === "block" ? "deny" : "allow" };
+  }
+
   if (/^add\b/i.test(rest)) {
     const rules = parseNaturalRules(rest.replace(/^add\b\s*/i, ""));
     return rules.length ? { cmd: "add", rules } : { cmd: "parse-error" };
@@ -207,6 +214,18 @@ function applyDefault(currentRules, decision) {
   const state = { policy: { rules: withoutCatchAll } };
   const id = nextPolicyId(state);
   return { rules: [...withoutCatchAll, { id, action: decision, tool: "*" }] };
+}
+
+// Server-scoped MCP trust: allow/deny every `mcp__<server>__*` tool. The rule
+// is inserted before any catch-all `*` rule so its specificity wins.
+function setMcpTrust(currentRules, server, action) {
+  const glob = `mcp__${server}__*`;
+  const rules = currentRules.filter((r) => normalizeToolName(r.tool) !== glob);
+  const id = nextPolicyId({ policy: { rules } });
+  const rule = { id, action, tool: glob };
+  const catchAllIdx = rules.findIndex((r) => r.tool === "*");
+  if (catchAllIdx === -1) return { rules: [...rules, rule] };
+  return { rules: [...rules.slice(0, catchAllIdx), rule, ...rules.slice(catchAllIdx)] };
 }
 
 function applyTemplate(name, state) {
@@ -315,6 +334,8 @@ function helpText() {
     "  /armor policy default deny|allow|hold - stage the unmatched-tool default",
     "  /armor policy template <name>      - stage a template",
     "  /armor profile save|list|switch|delete <name> - manage saved policy profiles",
+    "  /armor mcp approve|deny <server>   - trust or block an MCP server (mcp__<server>__*)",
+    "  /armor mcp list                    - show MCP trust rules",
     "  /armor yes | /armor no             - apply or discard the staged change",
     "",
     `Templates: ${Object.keys(TEMPLATES).join(", ")}`,
@@ -427,6 +448,17 @@ export async function handleArmorPolicyCommand(prompt, config, actor = "unknown"
       if (!prof) return `Profile not found: ${parsed.name}. Use /armor profile list.`;
       const rules = (prof.rules || []).map((r) => normalizeRule(r)).filter(Boolean);
       return stageAndFormat(config, state, { rules }, `switch to profile ${parsed.name}`, actor);
+    }
+
+    case "mcp-list": {
+      const mcpRules = state.policy.rules.filter((r) => /^mcp__/i.test(r.tool));
+      if (!mcpRules.length) return "No MCP trust rules. Use /armor mcp approve|deny <server>.";
+      return `MCP trust rules:\n${mcpRules.map((r) => `  - ${formatRule(r)}`).join("\n")}`;
+    }
+
+    case "mcp-trust": {
+      if (!parsed.server) return "Usage: /armor mcp approve|deny <server>";
+      return stageAndFormat(config, state, setMcpTrust(state.policy.rules, parsed.server, parsed.action), `mcp ${parsed.action} ${parsed.server}`, actor);
     }
 
     default:
