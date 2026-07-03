@@ -11,7 +11,7 @@ set -euo pipefail
 #   B. From an existing checkout: cd armorCodex && bash install_armorcodex.sh
 #
 # Wires the four things Codex actually reads on CLI 0.125.0+:
-#   1. [features] codex_hooks = true            in ~/.codex/config.toml
+#   1. [features] hooks = true            in ~/.codex/config.toml
 #   2. [mcp_servers.armorcodex-policy]          in ~/.codex/config.toml
 #   3. ~/.codex/hooks.json with absolute paths  (so hooks fire from any folder)
 #   4. plugin npm dependencies                  (so the first hook fire is fast)
@@ -208,8 +208,14 @@ upsert_managed_block() {
 # ---------------------------------------------------------------------------
 
 fetch_plugin_source() {
+  # Local-first: when this script is run from inside a checkout (bootstrap.mjs
+  # already present next to it), install THAT local code and never clone. This
+  # is how local testing wires Codex at your working branch. curl-pipe installs
+  # (no local checkout) still clone from GitHub below.
   if [[ -f "${BOOTSTRAP_PATH}" ]]; then
-    info "using existing checkout at ${PLUGIN_ROOT}"
+    local branch
+    branch="$(git -C "${PLUGIN_ROOT}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo 'no-git')"
+    info "installing LOCAL checkout at ${PLUGIN_ROOT} (${branch})"
     return 0
   fi
 
@@ -246,11 +252,10 @@ ensure_config_toml() {
   # ARMORCODEX_INTENT_DEADLINE_MS (default 500ms) so Codex's ~1s MCP transport
   # timeout is never violated; if the deadline is missed the call continues in
   # the background and the local plan is used as the fallback.
+  # Managed block holds only the ArmorCodex MCP server table (unique to us,
+  # safe to replace idempotently on re-run).
   local snippet
   snippet="$(cat <<EOF
-[features]
-codex_hooks = true
-
 [mcp_servers.armorcodex-policy]
 command = "node"
 args = ["${BOOTSTRAP_PATH}", "mcp"]
@@ -258,7 +263,22 @@ env = { ARMORCODEX_USE_SDK_INTENT = "true", ARMORCODEX_INTENT_DEADLINE_MS = "500
 EOF
   )"
   upsert_managed_block "${CONFIG_TOML}" "${snippet}"
-  ok "wired config.toml: codex_hooks + mcp_servers.armorcodex-policy (backend-aware)"
+
+  # The hooks feature flag lives under [features] (named `hooks` on Codex
+  # 0.142+, formerly `codex_hooks`). Codex itself may already define a
+  # [features] table (e.g. js_repl), and TOML forbids two of the same table,
+  # so merge the flag into the existing table instead of emitting our own
+  # header (a second [features] is what caused "duplicate key [features]").
+  if grep -qE '^[[:space:]]*(hooks|codex_hooks)[[:space:]]*=' "${CONFIG_TOML}"; then
+    :
+  elif grep -qE '^\[features\]' "${CONFIG_TOML}"; then
+    awk 'BEGIN{done=0} !done && /^\[features\][[:space:]]*$/ {print; print "hooks = true"; done=1; next} {print}' \
+      "${CONFIG_TOML}" > "${CONFIG_TOML}.armorcodex.tmp" \
+      && mv "${CONFIG_TOML}.armorcodex.tmp" "${CONFIG_TOML}"
+  else
+    printf '\n[features]\nhooks = true\n' >> "${CONFIG_TOML}"
+  fi
+  ok "wired config.toml: hooks + mcp_servers.armorcodex-policy"
 }
 
 ensure_global_hooks() {
@@ -427,8 +447,8 @@ verify_install() {
     warn "bootstrap.mjs missing at ${BOOTSTRAP_PATH}"
     issues=$((issues+1))
   fi
-  if ! grep -q 'codex_hooks = true' "${CONFIG_TOML}" 2>/dev/null; then
-    warn "codex_hooks feature flag not set in ${CONFIG_TOML}"
+  if ! grep -qE '^[[:space:]]*(hooks|codex_hooks)[[:space:]]*=[[:space:]]*true' "${CONFIG_TOML}" 2>/dev/null; then
+    warn "hooks feature flag not set in ${CONFIG_TOML}"
     issues=$((issues+1))
   fi
   if ! grep -q 'armorcodex-policy' "${CONFIG_TOML}" 2>/dev/null; then
@@ -492,7 +512,7 @@ EOF
   echo
   # Pass --product so the browser approval page renders ArmorCodex branding.
   # Older CLIs without --product fall back to ARMORIQ_PRODUCT env var, which
-  # newer CLIs also honor — older ones simply ignore it.
+  # newer CLIs also honor; older ones simply ignore it.
   local product="armorcodex"
   local login_ok=0
   if command -v armoriq-dev >/dev/null 2>&1; then
