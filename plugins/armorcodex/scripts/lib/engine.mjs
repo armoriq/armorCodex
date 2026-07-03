@@ -223,7 +223,12 @@ export async function handleUserPromptSubmit(input, config) {
   const parts = [];
   if (config.planningEnabled) {
     parts.push(
-      "ArmorCodex active. Call `register_intent_plan` first; step `action` = tool name, `metadata.inputs` = `{}` matches by name only."
+      "ArmorCodex active. Before using any tool, call `register_intent_plan` once, " +
+        "listing every tool you expect to use as a step (register them all up front). " +
+        "For each step set `action` to the canonical tool name: use `Bash` for shell / " +
+        "command execution (not `exec_command`), `apply_patch` for file edits, and the " +
+        "exact MCP tool name for MCP calls. Set `metadata.inputs` to `{}` to match by " +
+        "tool name only."
     );
   }
   if (config.contextHintsEnabled && config.policyUpdateEnabled) {
