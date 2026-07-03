@@ -79,6 +79,8 @@ Core environment variables:
 
 Structured `armor` commands (staged: nothing applies until you confirm):
 
+> Type these as plain prompts with no leading slash: `armor policy list`, not `/armor`. Codex reserves `/` for its own built-in commands, so ArmorCodex intercepts the `armor ...` text in the `UserPromptSubmit` hook.
+
 - `armor policy list` and `armor policy view`
 - `armor policy add deny bash` (or `allow`/`hold`; multiple: `add allow bash and apply_patch, deny apply_patch`)
 - `armor policy remove <id>`
