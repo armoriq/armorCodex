@@ -7,6 +7,7 @@ import { writeJson } from "./lib/fs-store.mjs";
 import { extractAllowedActions, requestIntent } from "./lib/intent.mjs";
 import { INTENT_PLAN_ZOD, PLAN_STEP_SCHEMA, normalizeIntentPlan } from "./lib/intent-schema.mjs";
 import { applyPolicyCommand, computePolicyHash, loadPolicyState, parsePolicyTextCommand } from "./lib/policy.mjs";
+import { handleArmorPolicyCommand } from "./lib/armor-policy-commands.mjs";
 import { createAuditWal } from "./lib/audit-wal.mjs";
 import { createIapService } from "./lib/iap-service.mjs";
 
@@ -147,6 +148,37 @@ async function run() {
       }
 
       return toTextResult("Policy update rejected: missing `text` or `update`.");
+    }
+  );
+
+  server.registerTool(
+    "policy_command",
+    {
+      title: "Policy Command",
+      description:
+        "Run a structured ArmorCodex /armor policy command. Read and stage are allowed (e.g. 'policy list', 'policy view', 'policy add deny bash', 'policy default deny', 'policy template lockdown'). Applying is human-only: 'confirm'/'yes' are rejected here and must be done from the terminal with /armor yes.",
+      inputSchema: {
+        command: z.string().min(1)
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false
+      }
+    },
+    async (args) => {
+      const config = loadConfig();
+      if (!config.policyUpdateEnabled) {
+        return toTextResult("ArmorCodex policy updates are disabled.");
+      }
+      const raw = typeof args.command === "string" ? args.command.trim() : "";
+      if (!raw) {
+        return toTextResult("Provide a command, e.g. 'policy list' or 'policy add deny bash'.");
+      }
+      const prompt = /^\/?armor\b/i.test(raw) ? raw : `/armor ${raw}`;
+      const response = await handleArmorPolicyCommand(prompt, config, "mcp", { allowConfirm: false });
+      return toTextResult(response || "No policy command recognized.");
     }
   );
 

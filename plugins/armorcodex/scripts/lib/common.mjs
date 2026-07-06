@@ -4,8 +4,25 @@ export function isPlainObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+// Codex exposes its shell/command tool under several names depending on the
+// harness (exec_command, shell, local_shell, unified_exec, container.exec) but
+// reports it as "Bash" at the PreToolUse hook. Alias them all to "bash" so an
+// intent plan that declares any of them matches the actual tool call — and so
+// a policy rule written for "bash" covers the whole shell family. Without this,
+// a plan step named "exec_command" drifts against a "Bash" tool call, forcing
+// the agent into a register-and-retry loop.
+const TOOL_ALIASES = {
+  exec_command: "bash",
+  shell: "bash",
+  local_shell: "bash",
+  unified_exec: "bash",
+  "container.exec": "bash",
+};
+
 export function normalizeToolName(name) {
-  return typeof name === "string" ? name.trim().toLowerCase() : "";
+  if (typeof name !== "string") return "";
+  const normalized = name.trim().toLowerCase();
+  return TOOL_ALIASES[normalized] ?? normalized;
 }
 
 export function parseBoolean(value, defaultValue = false) {

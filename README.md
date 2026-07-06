@@ -7,7 +7,7 @@ ArmorIQ intent-based security enforcement for OpenAI Codex. ArmorCodex asks Code
 ArmorCodex is built for the current Codex hook harness documented by OpenAI:
 
 - Hooks are discovered from `~/.codex/hooks.json` and `<repo>/.codex/hooks.json`.
-- Hooks require `[features] codex_hooks = true` in `~/.codex/config.toml`.
+- Hooks require `[features] hooks = true` in `~/.codex/config.toml`.
 - `PreToolUse`, `PermissionRequest`, and `PostToolUse` currently emit `Bash` only.
 - Non-Bash tools such as MCP, file edits, web search, and write/apply-patch are not directly intercepted by Codex hooks today.
 
@@ -41,14 +41,14 @@ chmod +x install_armorcodex.sh
 ./install_armorcodex.sh
 ```
 
-The installer enables `codex_hooks`, installs the Codex plugin through the ArmorIQ marketplace, and can install the repo hook file globally when run from this checkout.
+The installer enables `hooks`, installs the Codex plugin through the ArmorIQ marketplace, and can install the repo hook file globally when run from this checkout.
 
 ### Manual Repo-Local Setup
 
 ```bash
 npm install
 mkdir -p ~/.codex
-printf '\n[features]\ncodex_hooks = true\n' >> ~/.codex/config.toml
+printf '\n[features]\nhooks = true\n' >> ~/.codex/config.toml
 ```
 
 Then run Codex from this repository. The repo-local hook file is already at `.codex/hooks.json`.
@@ -77,12 +77,25 @@ Core environment variables:
 
 ## Policy Commands
 
-From a Codex prompt:
+Structured `armor` commands (staged: nothing applies until you confirm):
 
-- `Policy list`
-- `Policy get <id>`
-- `Policy delete <id>`
-- `Policy reset`
+> Type these as plain prompts with no leading slash: `armor policy list`, not `/armor`. Codex reserves `/` for its own built-in commands, so ArmorCodex intercepts the `armor ...` text in the `UserPromptSubmit` hook.
+
+- `armor policy list` and `armor policy view`
+- `armor policy add deny bash` (or `allow`/`hold`; multiple: `add allow bash and apply_patch, deny apply_patch`)
+- `armor policy remove <id>`
+- `armor policy reset`
+- `armor policy default deny|allow|hold` (unmatched-tool default)
+- `armor policy template <all-allow|lockdown|strict-read-only|balanced>`
+- `armor profile save|list|switch|delete <name>`
+- `armor mcp approve|deny <server>` and `armor mcp list`
+- `armor yes` / `armor no` to apply or discard the staged change
+
+Staging a change shows a diff and risk warnings; applying is human-only (the MCP `policy_command` tool can read and stage, but only a terminal `armor yes` applies). See [POLICY_GUIDE.md](POLICY_GUIDE.md).
+
+Natural-language commands still work for quick edits (applied immediately):
+
+- `Policy list`, `Policy get <id>`, `Policy delete <id>`, `Policy reset`
 - `Policy new: deny Bash for payment data`
 - `Policy update <id>: allow Bash`
 - `Policy prioritize <id> <position>`
