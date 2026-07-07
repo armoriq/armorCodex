@@ -752,7 +752,7 @@ export async function handleStop(input, config) {
       );
       if (total > 0 && total !== session.lastTokenTotal) {
         const result = await getSdkClient(config).recordTokenUsage({
-          product: "armorcodex",
+          product: config.productSlug,
           sessionId,
           entries
         });
