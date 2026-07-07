@@ -23,6 +23,7 @@ import {
   parsePolicyTextCommand
 } from "./policy.mjs";
 import { handleArmorPolicyCommand, isArmorPolicyCommand } from "./armor-policy-commands.mjs";
+import { summarizeCodexTranscriptUsage } from "./token-usage.mjs";
 import { readJson } from "./fs-store.mjs";
 import { unlink } from "node:fs/promises";
 import path from "node:path";
@@ -741,7 +742,10 @@ export async function handleStop(input, config) {
   // when it changed since the last Stop. The backend upsert keeps it idempotent.
   if (config.apiKey) {
     try {
-      const entries = armoriqSdk.summarizeTranscriptUsage(input.transcript_path);
+      // Codex CLI's rollout transcript uses a different shape than Claude Code,
+      // so parse it with the Codex-specific summarizer, then post via the shared
+      // SDK transport (client.recordTokenUsage).
+      const entries = summarizeCodexTranscriptUsage(input.transcript_path);
       const total = entries.reduce(
         (s, e) => s + e.inputTokens + e.outputTokens + e.cacheReadTokens + e.cacheWriteTokens,
         0
