@@ -106,6 +106,9 @@ export function loadConfig(env = process.env) {
     maxRetries: parseInteger(env.ARMORCODEX_MAX_RETRIES, 1),
     verifySsl: parseBoolean(env.ARMORCODEX_VERIFY_SSL, true),
     llmId: env.ARMORCODEX_LLM_ID?.trim() || "openai-codex",
+    // Sent on dashboard telemetry (token usage) and in the intent plan metadata
+    // so attribution works with a single generic API key (no per-product key).
+    productSlug: "armorcodex",
     mcpName: env.ARMORCODEX_MCP_NAME?.trim() || "codex",
     userId: env.ARMORCODEX_USER_ID?.trim() || "codex-user",
     agentId: env.ARMORCODEX_AGENT_ID?.trim() || "codex",
