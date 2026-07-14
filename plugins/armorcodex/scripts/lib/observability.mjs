@@ -21,28 +21,119 @@
  *      all its spans must ship in exactly one POST.
  *
  * So instead of holding a live recorder across hooks, we persist the
- * accumulating trace (id + attributes + spans-so-far) to a small JSON file
- * under `config.dataDir`, one file per active turn:
+ * accumulating turn as an APPEND-ONLY NDJSON LOG under `config.dataDir`, one
+ * file per active turn:
  *
- *   <dataDir>/obs-trace.<sessionId>.json
+ *   <dataDir>/obs-turn.<sessionId>.ndjson
  *
- * - First hook of a turn (UserPromptSubmit, or PreToolUse if no active trace
- *   file exists yet — Codex hook set has no explicit "turn start" event other
- *   than UserPromptSubmit) mints ONE trace id + writes the file.
- * - Every subsequent hook (PreToolUse/PermissionRequest/PostToolUse) appends
- *   pre-minted span objects (with correct parentSpanId linkage) to that file
- *   via the existing atomic fs-store (write-tmp -> rename) — no network I/O.
- * - On `Stop` (the turn boundary Codex fires every turn — there is no
- *   SessionEnd-per-turn signal, and no PostToolUseFailure event at all, so
- *   PostToolUse derives success/error itself from `tool_response`/`error`),
- *   we read the file, feed the complete (trace, spans) into a FRESH
- *   short-lived `ObservabilityRecorder` in this one process, end the trace
- *   (which enqueues it on the recorder's shipper), explicitly `flush()`, and
- *   `await` that flush to completion before deleting the file — because a
- *   short-lived hook process has no background timer that will ever fire.
- * - Codex has no SessionEnd hook at all; GC of stale trace files (e.g. a
- *   session that crashed mid-turn and never fired Stop) happens opportunistically
- *   on the next SessionStart.
+ * WHY APPEND-ONLY NDJSON INSTEAD OF READ-MODIFY-WRITE JSON (race analysis):
+ *
+ * The original design read the whole trace file, pushed one span into the JS
+ * array in memory, and wrote the whole file back out (atomically, via
+ * write-tmp+rename in fs-store.writeJson). The rename step is atomic, but the
+ * READ...MODIFY...WRITE *cycle* is not: two hook processes overlapping in
+ * time (e.g. a fast PreToolUse immediately followed by PostToolUse of a
+ * *previous* tool call, or two tool calls the agent issued back-to-back) can
+ * both read the same on-disk snapshot before either has written back. Each
+ * appends its own span to its own in-memory copy and writes; whichever
+ * rename() lands second silently clobbers the first process's entire write —
+ * including that first process's span. The span is not queued, not retried,
+ * not logged anywhere: it is simply gone, and the shipped trace is missing a
+ * span the dashboard should have shown. There is no lock protecting the
+ * read...write cycle, so nothing prevents this interleaving.
+ *
+ * An append-only log sidesteps the problem entirely by removing the READ
+ * step from the accumulation path. Every hook process, independent of any
+ * other, does exactly one thing: open the turn's log file with O_APPEND and
+ * write one line (one `fs.write()` syscall). POSIX guarantees that a single
+ * `write()` to a file opened O_APPEND is atomic with respect to the file's
+ * end-of-file offset: the kernel serializes concurrent writers' write()
+ * calls, and each write lands as a contiguous, non-interleaved run of bytes
+ * at whatever the current end-of-file is at the moment the kernel services
+ * that call. Two processes racing to append never tear each other's bytes
+ * and never lose a write — there is no "last write wins" because there is no
+ * shared snapshot being overwritten, only monotonic appends. This is the
+ * same guarantee production log shippers rely on for concurrent-writer log
+ * files. To stay safely within the size any single write() will actually
+ * perform as one atomic operation (well under the historical 4KB/PIPE_BUF
+ * ballpark), every span's attributes are capped (see `capAttributes` below)
+ * before being serialized — oversized fields are truncated with a
+ * `<truncated>` marker rather than silently growing a line past the
+ * safe-append boundary. `fs-store.appendNdjsonLine` throws if a line would
+ * exceed that cap even after capping (defense in depth — should not happen
+ * given the cap sizes below), and the caller is wrapped in `safeObsAsync` so
+ * that throw degrades to "this one span didn't record" rather than crashing
+ * the hook.
+ *
+ * Each line is one self-describing JSON record — `{ recordType: "meta", ... }`
+ * for turn-level metadata (trace name/attributes/startTime), written once by
+ * whichever hook starts the turn, or `{ recordType: "span", span: {...} }`
+ * for each span. Because every line is independent, `Stop` reconstructs the
+ * whole trace by reading every line and doesn't need any single writer to
+ * have "won" — every writer's line survives.
+ *
+ * ON `Stop` (turn boundary): rename-before-read. The log is renamed
+ * (`obs-turn.<sessionId>.ndjson` -> `obs-turn.<sessionId>.ndjson.shipping`)
+ * BEFORE it is opened for reading. This one atomic filesystem op is what
+ * fixes the two MEDIUM findings that share the same root cause as the span
+ * race:
+ *
+ *   (a) Stop-vs-last-PostToolUse: without the rename, Stop could read the
+ *       file while a straggling PostToolUse from the same turn is still
+ *       mid-append, ship a trace missing that last span, and then delete the
+ *       file — orphaning nothing (append already landed) but the shipped
+ *       trace is short one span, OR (worse, pre-fix) Stop's delete could race
+ *       a straggler's read-modify-write and resurrect/corrupt state. With the
+ *       rename: the straggling PostToolUse's `open(..., O_APPEND|O_CREAT)`
+ *       against the ORIGINAL path either (i) lands before the rename, in
+ *       which case its bytes are safely inside the file Stop is about to
+ *       process, or (ii) lands after the rename, in which case it
+ *       transparently creates a brand-new empty file at the original path
+ *       (O_CREAT) and appends to that — Stop already claimed and is
+ *       processing the OLD file under its `.shipping` name, so there is no
+ *       interleaving possible between "Stop is reading this exact inode" and
+ *       "a hook is appending to this exact inode". The straggler's span ends
+ *       up orphaned in a fresh same-name file rather than corrupting the
+ *       trace Stop ships — see residual edge case below.
+ *   (b) out-of-order Stop vs next turn's UserPromptSubmit: because the
+ *       rename gives Stop exclusive ownership of the inode it saw, a
+ *       late-arriving Stop from turn N cannot collide with turn N+1's
+ *       UserPromptSubmit, which always starts from "no file at the turn's
+ *       path" (ENOENT) and creates a fresh one. The turn boundary is the
+ *       session-scoped filename plus this rename-claim, not any ordering
+ *       assumption about hook delivery.
+ *
+ * After the rename, Stop reads every line from the `.shipping` file, feeds
+ * the complete (trace, spans) into a FRESH short-lived `ObservabilityRecorder`
+ * in this one process, ends the trace (enqueues it on the shipper), and
+ * `await`s `flush()` to completion before deleting the `.shipping` file —
+ * because a short-lived hook process has no background timer that will ever
+ * fire.
+ *
+ * Codex has no SessionEnd hook at all; GC of stale `.ndjson`/`.shipping`
+ * files left behind by a crashed session (never reached Stop, or crashed
+ * between rename and delete) happens opportunistically on the next
+ * SessionStart.
+ *
+ * RESIDUAL EDGE CASE (documented, not eliminated): if a hook process for
+ * turn N is delayed (e.g. descheduled by the OS) long enough that it appends
+ * to the ORIGINAL path *after* Stop has already renamed-claimed, read, and
+ * shipped that file, that straggler's `open(O_CREAT|O_APPEND)` recreates a
+ * new file at the original path and its span lands in it. That new file is
+ * indistinguishable from "the start of turn N+1", so either: (i) it is
+ * picked up as trace metadata/spans for whatever turn actually starts next
+ * (a stray extra span attributed to the wrong turn), or (ii) if no further
+ * turn happens in this session, it sits until GC'd by SESSION_START's stale
+ * file sweep. We accept this rather than adding cross-process coordination
+ * for an out-of-order-delivery case Codex's hook model does not actually
+ * produce in practice (Stop is emitted after the model turn's tool calls are
+ * done, not concurrently with them) — engineering a fix for it would require
+ * either a lock Stop holds for the file's entire lifetime (defeating the
+ * lock-free append design that fixes the actual, confirmed bug) or a
+ * generation counter in the filename that every hook would need to agree on
+ * out-of-band. Both are disproportionate to a race that requires hook
+ * delivery to be delayed past the NEXT turn's Stop, which nothing in the
+ * Codex hook contract does today.
  *
  * NOTHING here may throw into a hook: every emission goes through
  * safeObsAsync() (everything in this module does disk or network I/O, so
@@ -50,7 +141,11 @@
  */
 import armoriqSdk from "@armoriq/sdk";
 import { sanitizeParams, redactSecrets } from "./common.mjs";
-import { readJson, writeJson } from "./fs-store.mjs";
+import {
+  appendNdjsonLine,
+  readNdjsonLines,
+  renameIfExists,
+} from "./fs-store.mjs";
 import { readdir, unlink, stat } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -70,6 +165,16 @@ const {
 // the dashboard, and the turn it belonged to is long gone.
 const STALE_TRACE_MAX_AGE_MS = 6 * 60 * 60 * 1000; // 6 hours
 
+// Per-line attribute size cap. Obs input/output/tool-args are meant to be
+// concise, non-sensitive summaries (see common.mjs sanitizeParams, which
+// already caps individual string fields at config.sanitize.maxChars, default
+// 2000) — this is a SECOND, coarser cap on the serialized size of the whole
+// attributes object, enforced right before writing an NDJSON line, so one
+// line can never grow past what a single append can still atomically write.
+// Comfortably under fs-store.NDJSON_APPEND_SAFE_BYTES to leave headroom for
+// the envelope (id/kind/timestamps/etc) wrapped around attributes.
+const MAX_ATTRIBUTES_JSON_BYTES = 2800;
+
 async function safeObsAsync(fn) {
   try {
     return await fn();
@@ -85,8 +190,12 @@ export function isObsEnabled(config) {
   return Boolean(config && config.observabilityEnabled);
 }
 
-function tracePath(config, sessionId) {
-  return path.join(config.dataDir, `obs-trace.${sessionId}.json`);
+function turnLogPath(config, sessionId) {
+  return path.join(config.dataDir, `obs-turn.${sessionId}.ndjson`);
+}
+
+function shippingPath(config, sessionId) {
+  return `${turnLogPath(config, sessionId)}.shipping`;
 }
 
 function mintId() {
@@ -97,37 +206,75 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+// Cap the JSON-serialized size of a span's attributes object so the whole
+// NDJSON line stays inside the atomic-append-safe size. Truncates by
+// dropping the largest-serializing keys first (rather than a blunt whole-
+// object cut) so structurally important fields (kind/toolName/decision/etc,
+// which are small) usually survive and only bulky fields (input/output) get
+// clipped or dropped.
+function capAttributes(attributes) {
+  if (!attributes || typeof attributes !== "object") return attributes;
+  let json = JSON.stringify(attributes);
+  if (Buffer.byteLength(json, "utf8") <= MAX_ATTRIBUTES_JSON_BYTES) {
+    return attributes;
+  }
+  // Rank keys by serialized size, descending, and progressively clip/drop
+  // the largest until the object fits.
+  const entries = Object.entries(attributes);
+  const sized = entries
+    .map(([key, value]) => ({ key, value, size: Buffer.byteLength(JSON.stringify(value) ?? "null", "utf8") }))
+    .sort((a, b) => b.size - a.size);
+
+  const out = { ...attributes };
+  for (const { key, value, size } of sized) {
+    json = JSON.stringify(out);
+    if (Buffer.byteLength(json, "utf8") <= MAX_ATTRIBUTES_JSON_BYTES) break;
+    if (size <= 64) continue; // small fields aren't worth clipping further
+    if (typeof value === "string") {
+      out[key] = `${value.slice(0, 200)}<truncated:${value.length}chars>`;
+    } else {
+      out[key] = "<truncated>";
+    }
+  }
+
+  json = JSON.stringify(out);
+  if (Buffer.byteLength(json, "utf8") <= MAX_ATTRIBUTES_JSON_BYTES) {
+    return out;
+  }
+
+  // Still too big (e.g. many mid-sized fields): drop non-essential bulky
+  // fields entirely rather than risk exceeding the atomic-append cap.
+  const essential = new Set(["kind", "toolName", "decision", "status", "reason", "source", "enforcementAction"]);
+  const minimal = {};
+  for (const [key, value] of Object.entries(out)) {
+    if (essential.has(key)) minimal[key] = value;
+  }
+  minimal.truncated = true;
+  return minimal;
+}
+
+function capSpan(span) {
+  return { ...span, attributes: capAttributes(span.attributes) };
+}
+
 // ---------------------------------------------------------------------------
-// Disk trace record shape:
-// {
-//   traceId, sessionId, name, startTime, startTimeMs, attributes,
-//   spans: SpanRecord[], createdAtEpochMs
-// }
+// Disk record shapes (one JSON value per NDJSON line):
+//   { recordType: "meta", traceId, sessionId, name, startTime, startTimeMs,
+//     attributes, createdAtEpochMs }
+//   { recordType: "span", span: SpanRecord }
 // ---------------------------------------------------------------------------
 
-async function loadTraceFile(config, sessionId) {
-  return readJson(tracePath(config, sessionId), null);
-}
-
-async function saveTraceFile(config, sessionId, trace) {
-  await writeJson(tracePath(config, sessionId), trace);
-}
-
-async function deleteTraceFile(config, sessionId) {
-  await unlink(tracePath(config, sessionId)).catch(() => {});
-}
-
-function newTraceRecord(sessionId, attrs) {
+function newMetaRecord(sessionId, attrs) {
   const sid = isValidUuid && isValidUuid(sessionId) ? sessionId : null;
   const startTimeMs = Date.now();
   return {
+    recordType: "meta",
     traceId: mintId(),
     sessionId: sid,
     name: "iap.plan",
     startTime: new Date(startTimeMs).toISOString(),
     startTimeMs,
-    attributes: attrs || {},
-    spans: [],
+    attributes: capAttributes(attrs || {}),
     createdAtEpochMs: startTimeMs,
   };
 }
@@ -142,19 +289,32 @@ function classifyDecision(output) {
 }
 
 // ---------------------------------------------------------------------------
-// Per-hook: ensure/mint the turn's trace file, append span(s), never POST.
+// Per-hook: append-only. Never reads the log, never blocks on any other
+// process — each call is exactly one O_APPEND write (or two, for obsCheck's
+// pair of related spans, appended as two independent lines so no single
+// line risks exceeding the atomic-append size).
 // ---------------------------------------------------------------------------
+
+async function appendMeta(sessionId, config, attrs) {
+  const meta = newMetaRecord(sessionId, attrs);
+  await appendNdjsonLine(turnLogPath(config, sessionId), meta);
+  return meta;
+}
+
+async function appendSpan(sessionId, config, span) {
+  await appendNdjsonLine(turnLogPath(config, sessionId), {
+    recordType: "span",
+    span: capSpan(span),
+  });
+}
 
 async function obsStartPlan(sessionId, config, prompt) {
   const { prompt: sanitizedInput } = sanitizeParams({ prompt }, config.sanitize);
-  const trace = newTraceRecord(sessionId, {
-    source: "codex",
-    input: sanitizedInput ?? null,
-  });
+  await appendMeta(sessionId, config, { source: "codex", input: sanitizedInput ?? null });
   const startSpan = {
     id: mintId(),
     parentSpanId: null,
-    sessionId: trace.sessionId,
+    sessionId: isValidUuid && isValidUuid(sessionId) ? sessionId : null,
     kind: "span",
     name: "iap.plan.start",
     startTime: nowIso(),
@@ -163,33 +323,23 @@ async function obsStartPlan(sessionId, config, prompt) {
     status: "ok",
     attributes: { kind: "span", ...sanitizeParams({ prompt }, config.sanitize) },
   };
-  trace.spans.push(startSpan);
-  await saveTraceFile(config, sessionId, trace);
-}
-
-async function ensureTraceFile(sessionId, config) {
-  let trace = await loadTraceFile(config, sessionId);
-  if (!trace) {
-    trace = newTraceRecord(sessionId, { source: "codex", lazy: true });
-    await saveTraceFile(config, sessionId, trace);
-  }
-  return trace;
+  await appendSpan(sessionId, config, startSpan);
 }
 
 async function obsCheck(sessionId, config, toolName, toolInput, output) {
-  const trace = await ensureTraceFile(sessionId, config);
   const decision = classifyDecision(output);
   const status = decision === "deny" ? "denied" : "ok";
   const reason =
     (output && output.hookSpecificOutput && output.hookSpecificOutput.permissionDecisionReason) ||
     (output && typeof output.reason === "string" ? output.reason : null);
 
+  const sid = isValidUuid && isValidUuid(sessionId) ? sessionId : null;
   const checkSpanId = mintId();
   const checkStart = nowIso();
   const policySpan = {
     id: mintId(),
     parentSpanId: checkSpanId,
-    sessionId: trace.sessionId,
+    sessionId: sid,
     kind: "policy_call",
     name: `armorcodex.${decision}`,
     startTime: checkStart,
@@ -217,7 +367,7 @@ async function obsCheck(sessionId, config, toolName, toolInput, output) {
   const checkSpan = {
     id: checkSpanId,
     parentSpanId: null,
-    sessionId: trace.sessionId,
+    sessionId: sid,
     kind: "span",
     name: "iap.check",
     startTime: checkStart,
@@ -226,16 +376,19 @@ async function obsCheck(sessionId, config, toolName, toolInput, output) {
     status,
     attributes: { kind: "span", toolName: toolName || undefined },
   };
-  trace.spans.push(checkSpan, policySpan);
-  await saveTraceFile(config, sessionId, trace);
+  // Two independent appends (two lines) rather than one combined write —
+  // keeps each line comfortably small and each append is independently
+  // atomic; Stop reassembles both from the log regardless of arrival order.
+  await appendSpan(sessionId, config, checkSpan);
+  await appendSpan(sessionId, config, policySpan);
 }
 
 async function obsReport(sessionId, config, toolName, toolInput, toolResponse, status) {
-  const trace = await ensureTraceFile(sessionId, config);
+  const sid = isValidUuid && isValidUuid(sessionId) ? sessionId : null;
   const span = {
     id: mintId(),
     parentSpanId: null,
-    sessionId: trace.sessionId,
+    sessionId: sid,
     kind: "span",
     name: "tool.report",
     startTime: nowIso(),
@@ -249,17 +402,60 @@ async function obsReport(sessionId, config, toolName, toolInput, toolResponse, s
       output: redactSecrets(sanitizeParams(toolResponse, config.sanitize)),
     },
   };
-  trace.spans.push(span);
-  await saveTraceFile(config, sessionId, trace);
+  await appendSpan(sessionId, config, span);
 }
 
 // ---------------------------------------------------------------------------
-// Stop: assemble + ship the COMPLETE trace exactly once, then delete the file.
+// Stop: rename-claim the log, assemble + ship the COMPLETE trace exactly
+// once, then delete the claimed (.shipping) file.
 // ---------------------------------------------------------------------------
 
 async function obsEndTurnAndShip(sessionId, config) {
-  const trace = await loadTraceFile(config, sessionId);
-  if (!trace) return; // no hooks fired for this turn (e.g. no tool use) — nothing to ship
+  const livePath = turnLogPath(config, sessionId);
+  const claimedPath = shippingPath(config, sessionId);
+
+  // Rename FIRST, before any read. This is the single atomic operation that
+  // gives this Stop invocation exclusive ownership of whatever bytes were on
+  // disk at this instant. Any hook process still mid-append (or one that
+  // starts appending after this instant) is now writing to a brand-new file
+  // at `livePath` (O_CREAT) — it can never write into the inode we are about
+  // to read, so there is no read-vs-append race window at all, unlike the
+  // old read-then-delete sequence.
+  const claimed = await renameIfExists(livePath, claimedPath);
+  if (!claimed) return; // no hooks fired for this turn (e.g. no tool use) — nothing to ship
+
+  const lines = await readNdjsonLines(claimedPath);
+
+  let meta = null;
+  const spans = [];
+  for (const record of lines) {
+    if (!record || typeof record !== "object") continue;
+    if (record.recordType === "meta" && !meta) {
+      // First meta record wins (there should only ever be one per turn —
+      // UserPromptSubmit or the lazy PreToolUse fallback — but if somehow
+      // two landed, e.g. a lazy PreToolUse fallback firing before a
+      // just-barely-late UserPromptSubmit, take the earliest).
+      meta = record;
+    } else if (record.recordType === "span" && record.span) {
+      spans.push(record.span);
+    }
+  }
+
+  if (!meta) {
+    // Spans exist but no meta line ever landed (e.g. the process that would
+    // have written it crashed after claiming to append but before the append
+    // completed — extremely unlikely given O_APPEND atomicity, but degrade
+    // gracefully rather than throw). Synthesize a minimal meta so the spans
+    // still ship instead of being silently dropped.
+    meta = {
+      recordType: "meta",
+      traceId: mintId(),
+      sessionId: isValidUuid && isValidUuid(sessionId) ? sessionId : null,
+      name: "iap.plan",
+      startTime: nowIso(),
+      attributes: { source: "codex", lazy: true, recoveredWithoutMeta: true },
+    };
+  }
 
   // Fresh recorder scoped to this one short-lived process. Its ring buffer
   // and shipper live only as long as this function runs — we start a trace,
@@ -272,7 +468,7 @@ async function obsEndTurnAndShip(sessionId, config) {
     endpoint: config.observabilityEndpoint,
     apiKey: config.apiKey,
     product: config.observabilityProduct,
-    sessionId: trace.sessionId,
+    sessionId: meta.sessionId,
     userId: isValidUuid && isValidUuid(config.userId) ? config.userId : null,
     agentId: config.agentId || null,
     // Disable the periodic timer entirely — we drive flush() explicitly and
@@ -281,14 +477,14 @@ async function obsEndTurnAndShip(sessionId, config) {
   });
 
   // `startTrace` mints a NEW trace id (the recorder is the only place ids are
-  // minted) — the disk-persisted `trace.traceId` was only ever a same-process
+  // minted) — the disk-persisted `meta.traceId` was only ever a same-process
   // correlation handle across the accumulation phase; it never left this
   // machine and was never sent anywhere, so re-minting here (matching the
   // SDK's "recorder owns id minting" invariant) is safe and simpler than
   // trying to force a specific id through the public API.
-  const ctx = startTrace(recorder, trace.name, trace.attributes, trace.sessionId);
+  const ctx = startTrace(recorder, meta.name, meta.attributes, meta.sessionId);
 
-  for (const span of trace.spans) {
+  for (const span of spans) {
     // Re-home each disk-accumulated span under the freshly-minted trace id
     // (parentSpanId links between sibling spans are unaffected — those ids
     // were minted once, up front, when each span was created, and are
@@ -298,12 +494,13 @@ async function obsEndTurnAndShip(sessionId, config) {
 
   endTrace(recorder, ctx, { status: "ok" });
   await flushObservability(recorder);
-  await deleteTraceFile(config, sessionId);
+  await unlink(claimedPath).catch(() => {});
 }
 
 // ---------------------------------------------------------------------------
-// SessionStart: GC stale obs-trace.*.json files left behind by turns that
-// never reached Stop (crash, kill -9, etc). Codex has no per-session
+// SessionStart: GC stale obs-turn.*.ndjson[.shipping] files left behind by
+// turns that never reached Stop (crash, kill -9, etc), or a .shipping file
+// whose process died between rename and delete. Codex has no per-session
 // SessionEnd, so this is the only natural GC point.
 // ---------------------------------------------------------------------------
 
@@ -316,7 +513,11 @@ async function gcStaleTraceFiles(config) {
   }
   const now = Date.now();
   for (const name of names) {
-    if (!name.startsWith("obs-trace.") || !name.endsWith(".json")) continue;
+    const isTurnLog = name.startsWith("obs-turn.") && (name.endsWith(".ndjson") || name.endsWith(".ndjson.shipping"));
+    // Also sweep the pre-fix legacy filename in case an upgrade lands mid-
+    // session with an old file still on disk.
+    const isLegacy = name.startsWith("obs-trace.") && name.endsWith(".json");
+    if (!isTurnLog && !isLegacy) continue;
     const full = path.join(config.dataDir, name);
     try {
       const st = await stat(full);
@@ -385,9 +586,10 @@ export async function observeHook(event, input, output, config) {
         break;
       }
       case "Stop":
-        // Turn boundary: assemble the complete trace from disk and ship it
-        // ONCE. Must be awaited to completion — this process has no
-        // background timer to finish the job after we return.
+        // Turn boundary: rename-claim the log, assemble the complete trace
+        // from it, and ship it ONCE. Must be awaited to completion — this
+        // process has no background timer to finish the job after we
+        // return.
         await obsEndTurnAndShip(sessionId, config);
         break;
       default:
