@@ -2,6 +2,17 @@
 
 All notable changes to ArmorCodex are recorded here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.3.2] — 2026-07-16
+
+### Added
+- Per-turn ArmorCodex observability generation spans with input, output, cached-token, latency, and cost metrics
+- Regression coverage for cumulative Codex token snapshots and multi-turn sessions
+
+### Fixed
+- Prevent cumulative token totals from being counted again on resumed Codex sessions
+- Report non-zero cost for `gpt-5.6-sol` through ArmorIQ SDK 0.6.3 pricing
+- Keep plugin, package, lockfile, and marketplace release versions aligned
+
 ## [0.3.0] — 2026-06-24
 
 OpenAI Apps SDK / Codex Marketplace submission readiness release.
