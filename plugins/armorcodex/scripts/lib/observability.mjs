@@ -24,7 +24,7 @@
  * accumulating turn as an APPEND-ONLY NDJSON LOG under `config.dataDir`, one
  * file per active turn:
  *
- *   <dataDir>/obs-turn.<sessionId>.ndjson
+ *   <dataDir>/obs-turn.<sha256(sessionId)>.ndjson
  *
  * WHY APPEND-ONLY NDJSON INSTEAD OF READ-MODIFY-WRITE JSON (race analysis):
  *
@@ -140,7 +140,8 @@
  * there is no synchronous variant to wrap).
  */
 import armoriqSdk from "@armoriq/sdk";
-import { sanitizeParams, redactSecrets } from "./common.mjs";
+import { sanitizeParams, redactSecrets, sha256Hex } from "./common.mjs";
+import { summarizeCodexTurnUsage } from "./token-usage.mjs";
 import {
   appendNdjsonLine,
   readNdjsonLines,
@@ -154,6 +155,7 @@ const {
   ObservabilityRecorder,
   startTrace,
   recordSpan,
+  recordGeneration,
   endTrace,
   flushObservability,
   isValidUuid,
@@ -191,7 +193,7 @@ export function isObsEnabled(config) {
 }
 
 function turnLogPath(config, sessionId) {
-  return path.join(config.dataDir, `obs-turn.${sessionId}.ndjson`);
+  return path.join(config.dataDir, `obs-turn.${sha256Hex(sessionId)}.ndjson`);
 }
 
 function shippingPath(config, sessionId) {
@@ -204,6 +206,44 @@ function mintId() {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+const SENSITIVE_ATTRIBUTE_KEYS = new Set([
+  "apikey",
+  "authorization",
+  "clientsecret",
+  "password",
+  "passwd",
+  "privatekey",
+  "pwd",
+  "secret",
+  "token",
+]);
+
+function isSensitiveAttributeKey(key) {
+  const normalized = key.replace(/[^a-z0-9]/gi, "").toLowerCase();
+  if (SENSITIVE_ATTRIBUTE_KEYS.has(normalized)) return true;
+  return ["apikey", "authorization", "password", "passwd", "privatekey", "secret", "token"]
+    .some((suffix) => normalized.endsWith(suffix));
+}
+
+function redactSensitiveAttributeFields(value) {
+  if (typeof value === "string") return redactSecrets(value);
+  if (value == null || typeof value !== "object") return value;
+  if (Array.isArray(value)) {
+    return value.map((entry) => redactSensitiveAttributeFields(entry));
+  }
+  const out = {};
+  for (const [key, entry] of Object.entries(value)) {
+    out[key] = isSensitiveAttributeKey(key)
+      ? "<redacted>"
+      : redactSensitiveAttributeFields(entry);
+  }
+  return out;
+}
+
+function redactObservabilitySecrets(value) {
+  return redactSensitiveAttributeFields(value);
 }
 
 // Cap the JSON-serialized size of a span's attributes object so the whole
@@ -282,9 +322,14 @@ function newMetaRecord(sessionId, attrs) {
 function classifyDecision(output) {
   const d = output && output.hookSpecificOutput && output.hookSpecificOutput.permissionDecision;
   if (d === "deny") return "deny";
-  const behaviorDeny =
+  const permissionRequestDecision =
     output && output.hookSpecificOutput && output.hookSpecificOutput.decision;
-  if (behaviorDeny === "deny") return "deny";
+  if (
+    permissionRequestDecision === "deny" ||
+    (permissionRequestDecision && permissionRequestDecision.behavior === "deny")
+  ) {
+    return "deny";
+  }
   return "allow";
 }
 
@@ -309,7 +354,8 @@ async function appendSpan(sessionId, config, span) {
 }
 
 async function obsStartPlan(sessionId, config, prompt) {
-  const { prompt: sanitizedInput } = sanitizeParams({ prompt }, config.sanitize);
+  const sanitizedPrompt = redactObservabilitySecrets(sanitizeParams({ prompt }, config.sanitize));
+  const { prompt: sanitizedInput } = sanitizedPrompt;
   await appendMeta(sessionId, config, { source: "codex", input: sanitizedInput ?? null });
   const startSpan = {
     id: mintId(),
@@ -321,7 +367,7 @@ async function obsStartPlan(sessionId, config, prompt) {
     endTime: nowIso(),
     durationMs: 0,
     status: "ok",
-    attributes: { kind: "span", ...sanitizeParams({ prompt }, config.sanitize) },
+    attributes: { kind: "span", ...sanitizedPrompt },
   };
   await appendSpan(sessionId, config, startSpan);
 }
@@ -331,6 +377,12 @@ async function obsCheck(sessionId, config, toolName, toolInput, output) {
   const status = decision === "deny" ? "denied" : "ok";
   const reason =
     (output && output.hookSpecificOutput && output.hookSpecificOutput.permissionDecisionReason) ||
+    (output &&
+      output.hookSpecificOutput &&
+      output.hookSpecificOutput.decision &&
+      typeof output.hookSpecificOutput.decision.message === "string"
+      ? output.hookSpecificOutput.decision.message
+      : null) ||
     (output && typeof output.reason === "string" ? output.reason : null);
 
   const sid = isValidUuid && isValidUuid(sessionId) ? sessionId : null;
@@ -355,8 +407,8 @@ async function obsCheck(sessionId, config, toolName, toolInput, output) {
       decision,
       matchedRuleId: null,
       dataClasses: [],
-      reason: reason ?? null,
-      input: sanitizeParams(toolInput, config.sanitize),
+      reason: redactObservabilitySecrets(reason ?? null),
+      input: redactObservabilitySecrets(sanitizeParams(toolInput, config.sanitize)),
       output: null,
       source: "sdk",
       enforcementAction: decision === "deny" ? "block" : "allow",
@@ -398,8 +450,8 @@ async function obsReport(sessionId, config, toolName, toolInput, toolResponse, s
     attributes: {
       kind: "span",
       toolName: toolName || undefined,
-      input: sanitizeParams(toolInput, config.sanitize),
-      output: redactSecrets(sanitizeParams(toolResponse, config.sanitize)),
+      input: redactObservabilitySecrets(sanitizeParams(toolInput, config.sanitize)),
+      output: redactObservabilitySecrets(sanitizeParams(toolResponse, config.sanitize)),
     },
   };
   await appendSpan(sessionId, config, span);
@@ -410,7 +462,7 @@ async function obsReport(sessionId, config, toolName, toolInput, toolResponse, s
 // once, then delete the claimed (.shipping) file.
 // ---------------------------------------------------------------------------
 
-async function obsEndTurnAndShip(sessionId, config) {
+async function obsEndTurnAndShip(sessionId, config, transcriptPath) {
   const livePath = turnLogPath(config, sessionId);
   const claimedPath = shippingPath(config, sessionId);
 
@@ -490,6 +542,14 @@ async function obsEndTurnAndShip(sessionId, config) {
     // were minted once, up front, when each span was created, and are
     // preserved verbatim from disk).
     recordSpan(recorder, ctx, { ...span, sessionId: ctx.sessionId });
+  }
+
+  // Observability session totals are incremented from generation spans on each
+  // trace, so emit this turn's delta rather than Codex's cumulative session
+  // snapshot. The legacy /dashboard/token-usage POST remains cumulative and is
+  // intentionally handled separately by engine.handleStop.
+  for (const entry of summarizeCodexTurnUsage(transcriptPath)) {
+    recordGeneration(recorder, ctx, entry);
   }
 
   endTrace(recorder, ctx, { status: "ok" });
@@ -590,7 +650,7 @@ export async function observeHook(event, input, output, config) {
         // from it, and ship it ONCE. Must be awaited to completion — this
         // process has no background timer to finish the job after we
         // return.
-        await obsEndTurnAndShip(sessionId, config);
+        await obsEndTurnAndShip(sessionId, config, input.transcript_path);
         break;
       default:
         break;

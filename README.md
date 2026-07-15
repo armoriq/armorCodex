@@ -103,6 +103,7 @@ Natural-language commands still work for quick edits (applied immediately):
 ## Tests
 
 ```bash
+cd plugins/armorcodex
 npm test
 ```
 

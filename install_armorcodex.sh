@@ -334,6 +334,13 @@ ensure_global_hooks() {
           { "type": "command", "command": "node ${BOOTSTRAP_PATH} router", "statusMessage": "Auditing ArmorCodex command" }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node ${BOOTSTRAP_PATH} router", "timeout": 30 }
+        ]
+      }
     ]
   }
 }
