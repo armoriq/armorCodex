@@ -17,9 +17,10 @@ set -euo pipefail
 #   4. plugin npm dependencies                  (so the first hook fire is fast)
 #
 # Idempotent: re-running won't double-write any block. Will not overwrite a
-# user's existing global hooks file unless --force-hooks is passed. If the
-# plugin and credentials are already in place, the script runs in update mode
-# (refresh checkout + SDK + npm deps, skip the login prompt).
+# user's existing global hooks file unless --force-hooks is passed; updates do
+# repair missing ArmorCodex lifecycle hooks without replacing other entries.
+# If the plugin and credentials are already in place, the script runs in update
+# mode (refresh checkout + SDK + npm deps, skip the login prompt).
 #
 # Flags:
 #   --uninstall       remove ArmorCodex blocks
@@ -47,7 +48,7 @@ MARKETPLACE_REPO="${ARMORCODEX_MARKETPLACE_REPO:-armoriq/armorCodex}"
 PLUGIN_GIT_URL="${ARMORCODEX_GIT_URL:-https://github.com/armoriq/armorCodex.git}"
 PLUGIN_GIT_REF="${ARMORCODEX_GIT_REF:-main}"
 INSTALL_HOME="${ARMORCODEX_INSTALL_HOME:-${HOME}/.armoriq/armorCodex}"
-DASHBOARD_URL="https://platform.armoriq.ai"
+DASHBOARD_URL="${ARMORCODEX_DASHBOARD_URL:-https://tools.armoriq.ai}"
 
 # Recover if the caller is running this from a deleted directory (common when
 # piping curl into bash from /tmp).
@@ -284,7 +285,67 @@ EOF
 ensure_global_hooks() {
   if [[ -f "${GLOBAL_HOOKS}" && "${FORCE_HOOKS}" -eq 0 ]]; then
     if grep -q "ArmorCodex" "${GLOBAL_HOOKS}" 2>/dev/null; then
-      ok "global hooks already reference ArmorCodex"
+      local repair_result
+      if ! repair_result="$(node --input-type=module - "${GLOBAL_HOOKS}" "${BOOTSTRAP_PATH}" <<'NODE'
+import {
+  chmodSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+
+const [hooksPath, bootstrapPath] = process.argv.slice(2);
+const tempPath = `${hooksPath}.armorcodex.tmp-${process.pid}`;
+
+try {
+  const config = JSON.parse(readFileSync(hooksPath, "utf8"));
+  if (!config.hooks || typeof config.hooks !== "object" || Array.isArray(config.hooks)) {
+    throw new Error("top-level hooks must be an object");
+  }
+
+  const stopCommand = `node ${bootstrapPath} router`;
+  if (config.hooks.Stop !== undefined && !Array.isArray(config.hooks.Stop)) {
+    throw new Error("hooks.Stop must be an array");
+  }
+
+  const stopEntries = config.hooks.Stop ?? [];
+  const hasCurrentStopHook = stopEntries.some((entry) =>
+    Array.isArray(entry?.hooks)
+      && entry.hooks.some((hook) => hook?.type === "command" && hook.command === stopCommand),
+  );
+  if (hasCurrentStopHook) {
+    process.stdout.write("present");
+  } else {
+    stopEntries.push({
+      hooks: [
+        { type: "command", command: stopCommand, timeout: 30 },
+      ],
+    });
+    config.hooks.Stop = stopEntries;
+
+    writeFileSync(tempPath, `${JSON.stringify(config, null, 2)}\n`, { flag: "wx" });
+    chmodSync(tempPath, statSync(hooksPath).mode);
+    renameSync(tempPath, hooksPath);
+    process.stdout.write("repaired");
+  }
+} catch (error) {
+  rmSync(tempPath, { force: true });
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exit(1);
+}
+NODE
+      )"; then
+        warn "couldn't safely repair existing ArmorCodex hooks"
+        info "leaving ${GLOBAL_HOOKS} unchanged"
+        return 0
+      fi
+      if [[ "${repair_result}" == "repaired" ]]; then
+        ok "added missing ArmorCodex Stop hook to ${GLOBAL_HOOKS}"
+      else
+        ok "global hooks already reference ArmorCodex"
+      fi
       return 0
     fi
     warn "global ${GLOBAL_HOOKS} exists and is unrelated"
@@ -332,6 +393,13 @@ ensure_global_hooks() {
         "matcher": "*",
         "hooks": [
           { "type": "command", "command": "node ${BOOTSTRAP_PATH} router", "statusMessage": "Auditing ArmorCodex command" }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node ${BOOTSTRAP_PATH} router", "timeout": 30 }
         ]
       }
     ]
@@ -515,13 +583,7 @@ EOF
   # newer CLIs also honor; older ones simply ignore it.
   local product="armorcodex"
   local login_ok=0
-  if command -v armoriq-dev >/dev/null 2>&1; then
-    if armoriq-dev login --help 2>&1 | grep -q -- '--product'; then
-      armoriq-dev login --product "${product}" && login_ok=1
-    else
-      ARMORIQ_PRODUCT="${product}" armoriq-dev login && login_ok=1
-    fi
-  elif command -v armoriq >/dev/null 2>&1; then
+  if command -v armoriq >/dev/null 2>&1; then
     if armoriq login --help 2>&1 | grep -q -- '--product'; then
       armoriq login --product "${product}" && login_ok=1
     else

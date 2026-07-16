@@ -77,6 +77,16 @@ export function loadConfig(env = process.env) {
     }
   }
 
+  // Observability ("Model A" trace export) is ON by default whenever an API
+  // key is configured — opt out via the `disable_observability` plugin
+  // option or the ARMORCODEX_OBSERVABILITY_DISABLED env var. Mirrors
+  // armorClaude's config shape (`observabilityEnabled`/`observabilityEndpoint`/
+  // `observabilityProduct`) so the bridge module is a drop-in sibling.
+  const observabilityDisabled = parseBoolean(
+    pluginOpt(env, "DISABLE_OBSERVABILITY", "ARMORCODEX_OBSERVABILITY_DISABLED") || undefined,
+    false
+  );
+
   return {
     mode: mode === "monitor" ? "monitor" : "enforce",
     dataDir,
@@ -88,6 +98,15 @@ export function loadConfig(env = process.env) {
     proxyEndpoint,
     csrgEndpoint,
     apiKey,
+
+    // Observability ("Model A" trace export, per-plan via disk — see
+    // scripts/lib/observability.mjs). Default ON whenever an API key is
+    // present; opt out via `disable_observability` plugin option or
+    // ARMORCODEX_OBSERVABILITY_DISABLED.
+    observabilityEnabled: !observabilityDisabled && Boolean(apiKey),
+    observabilityEndpoint: backendEndpoint,
+    observabilityProduct: "armorcodex",
+
     useSdkIntent: parseBoolean(env.ARMORCODEX_USE_SDK_INTENT, true),
     intentEndpoint: env.ARMORCODEX_INTENT_URL?.trim() || "",
     verifyStepEndpoint:
