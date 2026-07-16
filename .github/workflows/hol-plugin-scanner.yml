@@ -16,7 +16,9 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: HOL Plugin Scanner
-        uses: hashgraph-online/ai-plugin-scanner-action@v1
+        # v1.2.491 references plugin-scanner 2.0.1092, which is not on PyPI.
+        # Pin the last published scanner bundle until the upstream tag is fixed.
+        uses: hashgraph-online/ai-plugin-scanner-action@b427d0e5c30fa6ac4235aae37960dab0a3449538 # v1.2.490 / scanner 2.0.1091
         with:
           plugin_dir: plugins/armorcodex
           mode: scan
