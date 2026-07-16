@@ -48,7 +48,7 @@ MARKETPLACE_REPO="${ARMORCODEX_MARKETPLACE_REPO:-armoriq/armorCodex}"
 PLUGIN_GIT_URL="${ARMORCODEX_GIT_URL:-https://github.com/armoriq/armorCodex.git}"
 PLUGIN_GIT_REF="${ARMORCODEX_GIT_REF:-main}"
 INSTALL_HOME="${ARMORCODEX_INSTALL_HOME:-${HOME}/.armoriq/armorCodex}"
-DASHBOARD_URL="https://platform.armoriq.ai"
+DASHBOARD_URL="${ARMORCODEX_DASHBOARD_URL:-https://tools.armoriq.ai}"
 
 # Recover if the caller is running this from a deleted directory (common when
 # piping curl into bash from /tmp).
@@ -583,13 +583,7 @@ EOF
   # newer CLIs also honor; older ones simply ignore it.
   local product="armorcodex"
   local login_ok=0
-  if command -v armoriq-dev >/dev/null 2>&1; then
-    if armoriq-dev login --help 2>&1 | grep -q -- '--product'; then
-      armoriq-dev login --product "${product}" && login_ok=1
-    else
-      ARMORIQ_PRODUCT="${product}" armoriq-dev login && login_ok=1
-    fi
-  elif command -v armoriq >/dev/null 2>&1; then
+  if command -v armoriq >/dev/null 2>&1; then
     if armoriq login --help 2>&1 | grep -q -- '--product'; then
       armoriq login --product "${product}" && login_ok=1
     else
