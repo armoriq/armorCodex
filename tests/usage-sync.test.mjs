@@ -1,13 +1,40 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { loadConfig } from "../plugins/armorcodex/scripts/lib/config.mjs";
 import { loadSyncState, syncUsage } from "../plugins/armorcodex/scripts/lib/usage-sync.mjs";
+import {
+  launchUsageSync,
+  requestUsageSync,
+} from "../plugins/armorcodex/scripts/lib/usage-sync-launch.mjs";
+
+const SCRIPTS = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "plugins",
+  "armorcodex",
+  "scripts"
+);
+const SYNC = path.join(SCRIPTS, "usage-sync.mjs");
+const ROUTER = path.join(SCRIPTS, "hook-router.mjs");
 const S1 = "019e0000-0000-7000-8000-000000000001";
 const S2 = "019e0000-0000-7000-8000-000000000002";
 const S3 = "019e0000-0000-7000-8000-000000000003";
 const A1 = "019e0000-0000-7000-8000-0000000000a1";
+const KEY = "ak_test_usage_sync_codex";
 
 const meta = (timestamp, payload) => ({ timestamp, type: "session_meta", payload });
 const model = (timestamp, name) => ({ timestamp, type: "turn_context", payload: { model: name } });
@@ -253,4 +280,219 @@ test("a fork's copied token_usage_records count nothing", async () => {
     [S4, "2026-09-08", "gpt-5.5=77"],
     [S5, "2026-09-09", "gpt-5.5=10"],
   ]);
+});
+
+function fakeBackend() {
+  const posts = [];
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", () => {
+      if (req.method === "POST" && req.url === "/dashboard/token-usage") {
+        posts.push(JSON.parse(body));
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end('{"ok":true}');
+    });
+  });
+  return new Promise((resolve) =>
+    server.listen(0, "127.0.0.1", () => resolve({ server, posts, port: server.address().port }))
+  );
+}
+
+function baseEnv(home, port) {
+  return {
+    PATH: process.env.PATH,
+    HOME: home,
+    CODEX_HOME: path.join(home, ".codex"),
+    ARMORCODEX_DATA_DIR: path.join(home, "data"),
+    ARMORIQ_DEVICE_ID_PATH: path.join(home, "device-id"),
+    ARMORIQ_ENV: "local",
+    ARMORCODEX_USE_PRODUCTION: "false",
+    ...(port ? { ARMORCODEX_BACKEND_ENDPOINT: `http://127.0.0.1:${port}` } : {}),
+  };
+}
+
+function node(args, env, stdin) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, args, { env });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => (stdout += chunk));
+    child.stderr.on("data", (chunk) => (stderr += chunk));
+    child.on("close", (status) => resolve({ status, stdout, stderr }));
+    child.stdin.end(stdin ?? "");
+  });
+}
+
+test("usage-sync --dry-run prints each row, then finds nothing changed", async () => {
+  const home = fixtureHome();
+  const first = await node([SYNC, "--dry-run"], baseEnv(home));
+  assert.equal(first.status, 0, first.stderr);
+  const rows = first.stdout
+    .trim()
+    .split("\n")
+    .map((l) => JSON.parse(l));
+  assert.deepEqual(summary(rows), FIRST_ROWS);
+  for (const row of rows) assert.equal(row.product, "armorcodex");
+  assert.match(first.stderr, /4 rollout\(s\) under .*\(1 other file\(s\)\)/);
+  assert.match(first.stderr, /4 changed, 4 read, 3 session\(s\); would post 4 session-day\(s\) \(192 tokens\)/);
+
+  const second = await node([SYNC, "--dry-run"], baseEnv(home));
+  assert.equal(second.status, 0, second.stderr);
+  assert.equal(second.stdout, "");
+  assert.match(second.stderr, /0 changed, 0 read, 3 session\(s\); would post 0 session-day\(s\)/);
+});
+
+test("usage-sync without an API key posts nothing", async () => {
+  const res = await node([SYNC], baseEnv(fixtureHome()));
+  assert.equal(res.status, 0, res.stderr);
+  assert.match(res.stderr, /no API key, nothing synced/);
+});
+
+const OBS_OFF = { CODEX_PLUGIN_OPTION_DISABLE_OBSERVABILITY: "true" };
+const SYNC_OFF = { CODEX_PLUGIN_OPTION_DISABLE_USAGE_SYNC: "true" };
+const TOGGLES = [
+  ["observability off", OBS_OFF],
+  ["usage sync off", SYNC_OFF],
+  ["both off", { ...OBS_OFF, ...SYNC_OFF }],
+];
+
+test("usageSyncEnabled needs observability on and disable_usage_sync unset", () => {
+  const cases = [
+    [{}, true, true],
+    [
+      {
+        CODEX_PLUGIN_OPTION_DISABLE_OBSERVABILITY: "false",
+        CODEX_PLUGIN_OPTION_DISABLE_USAGE_SYNC: "false",
+      },
+      true,
+      true,
+    ],
+    [OBS_OFF, false, false],
+    [SYNC_OFF, true, false],
+    [{ ...OBS_OFF, ...SYNC_OFF }, false, false],
+    [{ ARMORCODEX_USAGE_SYNC_DISABLED: "1" }, true, false],
+    [{ ARMORCODEX_OBSERVABILITY_DISABLED: "yes" }, false, false],
+  ];
+  for (const [env, observability, usageSync] of cases) {
+    const cfg = loadConfig({ CODEX_PLUGIN_OPTION_API_KEY: KEY, ...env });
+    assert.equal(cfg.observabilityEnabled, observability, JSON.stringify(env));
+    assert.equal(cfg.usageSyncEnabled, usageSync, JSON.stringify(env));
+  }
+});
+
+test("the launcher starts no sync and writes no request while the usage sync is off", () => {
+  for (const [name, toggles] of TOGGLES) {
+    const dataDir = mkdtempSync(path.join(tmpdir(), "acx-sync-off-"));
+    const cfg = loadConfig({
+      CODEX_PLUGIN_OPTION_API_KEY: KEY,
+      ARMORCODEX_DATA_DIR: dataDir,
+      ...toggles,
+    });
+    assert.equal(requestUsageSync(cfg), false, name);
+    assert.equal(launchUsageSync(cfg), false, name);
+    assert.equal(existsSync(path.join(dataDir, "usage-sync-state.json.request")), false, name);
+    assert.equal(existsSync(path.join(dataDir, "usage-sync.log")), false, name);
+  }
+});
+
+test("usage-sync posts nothing while observability or the usage sync is off", async () => {
+  const { server, posts, port } = await fakeBackend();
+  try {
+    for (const [name, toggles] of TOGGLES) {
+      const home = fixtureHome();
+      const res = await node([SYNC], {
+        ...baseEnv(home, port),
+        CODEX_PLUGIN_OPTION_API_KEY: KEY,
+        ...toggles,
+      });
+      assert.equal(res.status, 0, res.stderr);
+      assert.match(res.stderr, /usage sync is off .*nothing synced/, name);
+      assert.equal(existsSync(path.join(home, "data", "usage-sync-state.json")), false, name);
+    }
+    assert.equal(posts.length, 0);
+
+    const res = await node([SYNC], {
+      ...baseEnv(fixtureHome(), port),
+      CODEX_PLUGIN_OPTION_API_KEY: KEY,
+      CODEX_PLUGIN_OPTION_DISABLE_OBSERVABILITY: "false",
+      CODEX_PLUGIN_OPTION_DISABLE_USAGE_SYNC: "false",
+    });
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(posts.length, 4);
+  } finally {
+    server.close();
+  }
+});
+
+async function until(check, what, timeoutMs = 20_000) {
+  const start = Date.now();
+  while (!(await check())) {
+    if (Date.now() - start > timeoutMs) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+const readLastRun = (statePath) => {
+  try {
+    return JSON.parse(readFileSync(statePath, "utf8")).lastRun?.at;
+  } catch {
+    return undefined;
+  }
+};
+
+test("SessionStart and Stop hooks run the sync, which posts each session-day with its date", async () => {
+  const home = fixtureHome();
+  const statePath = path.join(home, "data", "usage-sync-state.json");
+  const { server, posts, port } = await fakeBackend();
+  const env = { ...baseEnv(home, port), CODEX_PLUGIN_OPTION_API_KEY: KEY };
+  const hook = (event, toggles = {}) =>
+    node(
+      [ROUTER],
+      { ...env, ...toggles },
+      JSON.stringify({
+        hook_event_name: event,
+        session_id: S2,
+        cwd: "/work/repo-b",
+        transcript_path: rolloutPath(home, "2026-09-22", S2),
+      })
+    );
+  const settled = (after) => () =>
+    readLastRun(statePath) !== after && !existsSync(`${statePath}.lock`);
+  try {
+    for (const [name, toggles] of TOGGLES) {
+      await hook("SessionStart", toggles);
+      await hook("Stop", toggles);
+      assert.equal(existsSync(`${statePath}.request`), false, name);
+      assert.equal(existsSync(`${statePath}.lock`), false, name);
+    }
+    await new Promise((r) => setTimeout(r, 3000));
+    assert.equal(posts.length, 0);
+    assert.equal(existsSync(statePath), false);
+
+    await hook("SessionStart");
+    await until(settled(undefined), "the SessionStart pass");
+    const rows = (list) =>
+      list.map((p) => [p.sessionId, p.usageDate, p.product, p.repo, p.entries.length]).sort();
+    const expected = [
+      [S1, "2026-09-20", "armorcodex", "/work/repo-a", 2],
+      [S1, "2026-09-21", "armorcodex", "/work/repo-a", 1],
+      [S2, "2026-09-22", "armorcodex", "/work/repo-b", 1],
+      [S3, "2026-09-19", "armorcodex", "/work/repo-c", 1],
+    ];
+    assert.deepEqual(rows(posts), expected);
+
+    const firstRun = readLastRun(statePath);
+    append(rolloutPath(home, "2026-09-22", S2), count("2026-09-22T10:00:00Z", 105, 10));
+    await hook("Stop");
+    await until(settled(firstRun), "the Stop pass");
+    assert.deepEqual(
+      rows(posts),
+      [...expected, [S2, "2026-09-22", "armorcodex", "/work/repo-b", 1]].sort()
+    );
+    assert.equal(posts.at(-1).entries[0].inputTokens, 15);
+  } finally {
+    server.close();
+  }
 });
