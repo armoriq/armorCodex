@@ -4,6 +4,8 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
+  readRollout,
+  rolloutUsageByDay,
   summarizeCodexTranscriptUsage,
   summarizeCodexTurnUsage,
 } from "../plugins/armorcodex/scripts/lib/token-usage.mjs";
@@ -198,4 +200,114 @@ test("skips corrupt lines without aborting the whole file", async () => {
   const entries = summarizeCodexTranscriptUsage(file);
   assert.equal(entries[0].inputTokens, 70);
   assert.equal(entries[0].outputTokens, 8);
+});
+
+const at = (timestamp, line) => ({ timestamp, ...line });
+const byDay = async (lines, copied) => rolloutUsageByDay(readRollout(await writeRollout(lines)).events, copied);
+const entry = (model, inputTokens, outputTokens, cacheReadTokens = 0) => ({
+  model,
+  inputTokens,
+  outputTokens,
+  cacheReadTokens,
+  cacheWriteTokens: 0,
+});
+
+test("readRollout returns the session_meta payload and each token_count with its model", async () => {
+  const file = await writeRollout([
+    at("2026-09-20T09:00:00Z", { type: "session_meta", payload: { id: "s1", cwd: "/repo" } }),
+    at("2026-09-20T09:00:01Z", { type: "turn_context", payload: { model: "gpt-5.5" } }),
+    at("2026-09-20T09:00:02Z", tokenCount({ input_tokens: 10, output_tokens: 1 })),
+  ]);
+  const { meta, events } = readRollout(file);
+  assert.deepEqual(meta, { id: "s1", cwd: "/repo" });
+  assert.equal(events.length, 1);
+  assert.equal(events[0].model, "gpt-5.5");
+  assert.equal(events[0].timestamp, "2026-09-20T09:00:02Z");
+  assert.throws(() => readRollout("/does/not/exist.jsonl"));
+});
+
+test("splits cached tokens out of input_tokens", async () => {
+  const days = await byDay([
+    { type: "turn_context", payload: { model: "gpt-5.5" } },
+    at(
+      "2026-09-20T09:00:00Z",
+      tokenCount({
+        input_tokens: 13223,
+        cached_input_tokens: 9088,
+        output_tokens: 39,
+        reasoning_output_tokens: 19,
+        total_tokens: 13262,
+      }),
+    ),
+  ]);
+  assert.deepEqual(days, { "2026-09-20": { "gpt-5.5": entry("gpt-5.5", 4135, 39, 9088) } });
+});
+
+test("puts each token_count's growth on its own UTC day and counts repeated totals once", async () => {
+  const days = await byDay([
+    { type: "turn_context", payload: { model: "gpt-5.5" } },
+    at("2026-09-20T23:59:00Z", tokenCount({ input_tokens: 100, cached_input_tokens: 20, output_tokens: 10 })),
+    at("2026-09-20T23:59:01Z", tokenCount({ input_tokens: 100, cached_input_tokens: 20, output_tokens: 10 })),
+    at("2026-09-21T00:01:00Z", tokenCount({ input_tokens: 250, cached_input_tokens: 70, output_tokens: 30 })),
+  ]);
+  assert.deepEqual(days, {
+    "2026-09-20": { "gpt-5.5": entry("gpt-5.5", 80, 10, 20) },
+    "2026-09-21": { "gpt-5.5": entry("gpt-5.5", 100, 20, 50) },
+  });
+});
+
+test("gives each model the growth of its own turns", async () => {
+  const days = await byDay([
+    { type: "turn_context", payload: { model: "gpt-5.5" } },
+    at("2026-09-20T09:00:00Z", tokenCount({ input_tokens: 100, output_tokens: 10 })),
+    { type: "turn_context", payload: { model: "gpt-5.5-codex" } },
+    at("2026-09-20T10:00:00Z", tokenCount({ input_tokens: 220, output_tokens: 30 })),
+  ]);
+  assert.deepEqual(days, {
+    "2026-09-20": {
+      "gpt-5.5": entry("gpt-5.5", 100, 10),
+      "gpt-5.5-codex": entry("gpt-5.5-codex", 120, 20),
+    },
+  });
+});
+
+test("a lower total starts a new count from zero", async () => {
+  const days = await byDay([
+    { type: "turn_context", payload: { model: "gpt-5.5" } },
+    at("2026-09-20T09:00:00Z", tokenCount({ input_tokens: 1000, output_tokens: 100 })),
+    at("2026-09-20T10:00:00Z", tokenCount({ input_tokens: 50, output_tokens: 5 })),
+    at("2026-09-20T11:00:00Z", tokenCount({ input_tokens: 80, output_tokens: 8 })),
+  ]);
+  assert.deepEqual(days, { "2026-09-20": { "gpt-5.5": entry("gpt-5.5", 1080, 108) } });
+});
+
+test("copied events set the starting totals and count nothing", async () => {
+  const days = await byDay(
+    [
+      { type: "turn_context", payload: { model: "gpt-5.5" } },
+      at("2026-09-21T09:00:00Z", tokenCount({ input_tokens: 100, output_tokens: 10 })),
+      at("2026-09-21T09:00:00Z", tokenCount({ input_tokens: 300, output_tokens: 30 })),
+      at("2026-09-21T10:00:00Z", tokenCount({ input_tokens: 340, output_tokens: 33 })),
+    ],
+    2,
+  );
+  assert.deepEqual(days, { "2026-09-21": { "gpt-5.5": entry("gpt-5.5", 40, 3) } });
+});
+
+test("uses 'unknown' when no turn_context names a model, and skips corrupt lines", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "codex-rollout-"));
+  const file = path.join(dir, "rollout.jsonl");
+  await writeFile(
+    file,
+    [
+      "{not valid json",
+      JSON.stringify(
+        at("2026-09-20T09:00:00Z", tokenCount({ input_tokens: 80, cached_input_tokens: 10, output_tokens: 8 })),
+      ),
+    ].join("\n"),
+    "utf8",
+  );
+  assert.deepEqual(rolloutUsageByDay(readRollout(file).events), {
+    "2026-09-20": { unknown: entry("unknown", 70, 8, 10) },
+  });
 });

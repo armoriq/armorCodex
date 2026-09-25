@@ -1,47 +1,52 @@
 /**
- * Codex token-usage capture.
+ * Codex token-usage parsing.
  *
  * The shared SDK helper `summarizeTranscriptUsage` only understands the
  * Anthropic/Claude-Code transcript shape (`message.usage.{input_tokens,...}`).
  * Codex CLI writes a different rollout format, so we parse it ourselves and
- * still post through the single shared transport (`client.recordTokenUsage`),
- * exactly as the SDK docs recommend for tools whose transcript differs.
+ * still post through the single shared transport (`client.recordTokenUsage`).
  *
  * Codex rollout JSONL (one object per line) carries, among others:
+ *   { type: "session_meta", payload: { id, session_id, forked_from_id, cwd, ... } }
  *   { type: "turn_context", payload: { model: "gpt-5.5", ... } }
- *   { type: "event_msg", payload: { type: "token_count",
+ *   { type: "event_msg", timestamp, payload: { type: "token_count",
  *       info: { total_token_usage: { input_tokens, cached_input_tokens,
  *                                    output_tokens, reasoning_output_tokens,
  *                                    total_tokens }, ... } } }
  *
- * `total_token_usage` is CUMULATIVE for the session, so we take the last
- * token_count event's totals — matching the idempotent, cumulative contract of
- * the backend upsert (it SETS per-(session,model) counts, never adds).
+ * `total_token_usage` is cumulative for the rollout file. A fork's file starts
+ * with a copy of its original's lines, token_count events included with the
+ * same totals, and its counter continues from there. The counter can restart
+ * from zero inside one file.
  *
  * Codex's `input_tokens` INCLUDES `cached_input_tokens` (input+output=total).
  * To match the Claude convention (input excludes cache reads) we split them:
  *   inputTokens     = input_tokens - cached_input_tokens   (fresh prompt tokens)
  *   cacheReadTokens = cached_input_tokens
  *   outputTokens    = output_tokens                         (incl. reasoning)
- *   cacheWriteTokens = 0                                    (no Codex equivalent)
+ *   cacheWriteTokens = 0
  */
 
 import { readFileSync } from "node:fs";
+
+const COUNT_FIELDS = ["input_tokens", "cached_input_tokens", "output_tokens"];
 
 function readUsageEvents(transcriptPath) {
   if (typeof transcriptPath !== "string" || !transcriptPath) {
     return { events: [], latestTaskSequence: -1 };
   }
-
-  let raw;
   try {
-    raw = readFileSync(transcriptPath, "utf8");
+    return parseRollout(readFileSync(transcriptPath, "utf8"));
   } catch {
     return { events: [], latestTaskSequence: -1 };
   }
+}
 
+function parseRollout(raw) {
+  let meta = null;
   let currentModel = "";
   let taskSequence = -1;
+  let timestamp = "";
   const events = [];
 
   for (const line of raw.split("\n")) {
@@ -57,6 +62,12 @@ function readUsageEvents(transcriptPath) {
 
     const payload = obj && typeof obj === "object" ? obj.payload : null;
     if (!payload || typeof payload !== "object") continue;
+    if (typeof obj.timestamp === "string") timestamp = obj.timestamp;
+
+    if (obj.type === "session_meta") {
+      meta ??= payload;
+      continue;
+    }
 
     if (obj.type === "event_msg" && payload.type === "task_started") {
       taskSequence += 1;
@@ -83,10 +94,61 @@ function readUsageEvents(transcriptPath) {
         info.last_token_usage && typeof info.last_token_usage === "object"
           ? info.last_token_usage
           : null,
+      timestamp,
     });
   }
 
-  return { events, latestTaskSequence: taskSequence };
+  return { meta, events, latestTaskSequence: taskSequence };
+}
+
+/**
+ * Read a Codex rollout: its session_meta payload (null when absent) and every
+ * token_count event, each with the model and timestamp in effect. Throws when
+ * the file cannot be read.
+ */
+export function readRollout(rolloutPath) {
+  const { meta, events } = parseRollout(readFileSync(rolloutPath, "utf8"));
+  return { meta, events };
+}
+
+/** Identity of a token_count event: its cumulative totals. */
+export function usageSignature(totals) {
+  return [...COUNT_FIELDS, "total_tokens"].map((k) => toCount(totals?.[k])).join("/");
+}
+
+export function sumEntries(a, b) {
+  if (!a) return b;
+  return {
+    model: a.model,
+    inputTokens: a.inputTokens + b.inputTokens,
+    outputTokens: a.outputTokens + b.outputTokens,
+    cacheReadTokens: a.cacheReadTokens + b.cacheReadTokens,
+    cacheWriteTokens: a.cacheWriteTokens + b.cacheWriteTokens,
+  };
+}
+
+/**
+ * Per-UTC-day, per-model usage of one rollout, from the growth of its
+ * cumulative totals between token_count events. The first `copied` events are
+ * history copied from another rollout: they set the starting totals and count
+ * nothing. A total lower than the one before starts a new count from zero.
+ * Returns { "YYYY-MM-DD": { model: entry } }.
+ */
+export function rolloutUsageByDay(events, copied = 0) {
+  const days = {};
+  let prev = null;
+  for (const [i, event] of events.entries()) {
+    const reset = prev && COUNT_FIELDS.some((k) => toCount(event.totals[k]) < toCount(prev[k]));
+    const base = prev && !reset ? prev : {};
+    prev = event.totals;
+    if (i < copied) continue;
+    const time = Date.parse(event.timestamp);
+    const [entry] = usageEntry(event.model, subtractTotals(event.totals, base));
+    if (!entry || Number.isNaN(time)) continue;
+    const day = (days[new Date(time).toISOString().slice(0, 10)] ??= {});
+    day[entry.model] = sumEntries(day[entry.model], entry);
+  }
+  return days;
 }
 
 function usageEntry(model, totals) {
