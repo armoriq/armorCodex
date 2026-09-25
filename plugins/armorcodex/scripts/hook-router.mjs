@@ -11,6 +11,7 @@ import {
   handleUserPromptSubmit
 } from "./lib/engine.mjs";
 import { observeHook } from "./lib/observability.mjs";
+import { launchUsageSync, requestUsageSync } from "./lib/usage-sync-launch.mjs";
 
 let currentEvent = "";
 
@@ -90,6 +91,8 @@ async function main() {
   if (output) {
     emitJson(output);
   }
+  if (event === "SessionStart") launchUsageSync(config);
+  if (event === "Stop") requestUsageSync(config);
 
   // armorCodex has no daemon — this IS the only obs path (unlike armorClaude,
   // which has a daemon-resident bridge plus this same in-process fallback).

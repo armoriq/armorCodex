@@ -2,6 +2,19 @@
 
 All notable changes to ArmorCodex are recorded here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.3.3] - Unreleased
+
+### Added
+- `scripts/usage-sync.mjs` uploads token usage for every local Codex session in `~/.codex/sessions` and `~/.codex/archived_sessions`, one row per session, model and day, with the repo path and device name. Sessions that ran without ArmorCodex post `armored: false`.
+- `disable_usage_sync` plugin option and `ARMORCODEX_USAGE_SYNC_DISABLED`; turning off observability also turns the sync off.
+
+### Changed
+- Depends on `@armoriq/sdk-dev` ^0.8.5 instead of `@armoriq/sdk` 0.6. Observability ships each turn over OTLP (`/v1/traces`) instead of `POST /observability/spans`.
+- Usage comes from `token_usage_record` lines (Codex 0.153 and later) and from `token_count` growth before the first record.
+
+### Removed
+- The Stop hook's cumulative `/dashboard/token-usage` post, `scripts/backfill.mjs` and `summarizeCodexTranscriptUsage`.
+
 ## [0.3.2] — 2026-07-16
 
 ### Added
