@@ -10,26 +10,100 @@ import { randomUUID } from "node:crypto";
 import { denyPermissionRequest } from "../plugins/armorcodex/scripts/lib/hook-output.mjs";
 import { observeHook } from "../plugins/armorcodex/scripts/lib/observability.mjs";
 
+function protoFields(buf) {
+  const fields = [];
+  let i = 0;
+  const varint = () => {
+    let value = 0n;
+    for (let shift = 0n; ; shift += 7n) {
+      const byte = buf[i++];
+      value |= BigInt(byte & 0x7f) << shift;
+      if (byte < 0x80) return value;
+    }
+  };
+  while (i < buf.length) {
+    const key = Number(varint());
+    const no = key >> 3;
+    const wire = key & 7;
+    if (wire === 0) fields.push({ no, value: varint() });
+    else if (wire === 1) {
+      fields.push({ no, double: buf.readDoubleLE(i) });
+      i += 8;
+    } else if (wire === 5) i += 4;
+    else if (wire === 2) {
+      const len = Number(varint());
+      fields.push({ no, bytes: buf.subarray(i, i + len) });
+      i += len;
+    } else throw new Error(`unsupported wire type ${wire}`);
+  }
+  return fields;
+}
+
+const field = (buf, no) => protoFields(buf).filter((f) => f.no === no);
+
+// AnyValue: string_value(1), bool_value(2), int_value(3), double_value(4)
+function anyValue(buf) {
+  const [f] = protoFields(buf);
+  if (!f) return undefined;
+  if (f.no === 1) return f.bytes.toString("utf8");
+  if (f.no === 2) return f.value === 1n;
+  if (f.no === 3) return Number(f.value);
+  if (f.no === 4) return f.double;
+  return undefined;
+}
+
+// ExportTraceServiceRequest -> ResourceSpans(1) -> ScopeSpans(2) -> Span(2): name(5), attributes(9)
+function decodeSpans(body) {
+  const spans = [];
+  for (const resourceSpans of field(body, 1)) {
+    for (const scopeSpans of field(resourceSpans.bytes, 2)) {
+      for (const span of field(scopeSpans.bytes, 2)) {
+        const attributes = {};
+        for (const kv of field(span.bytes, 9)) {
+          const key = field(kv.bytes, 1)[0]?.bytes.toString("utf8");
+          const value = field(kv.bytes, 2)[0];
+          if (key && value) attributes[key] = anyValue(value.bytes);
+        }
+        spans.push({ name: field(span.bytes, 5)[0]?.bytes.toString("utf8"), attributes });
+      }
+    }
+  }
+  return spans;
+}
+
 async function startIngestServer() {
-  const requests = [];
+  const exports = [];
   const server = createServer(async (request, response) => {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
-    requests.push({
-      method: request.method,
-      url: request.url,
-      body: JSON.parse(Buffer.concat(chunks).toString("utf8")),
-    });
-    response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify({ accepted: 1, rejected: 0 }));
+    if (request.url === "/observability/policy/lease") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(
+        JSON.stringify({
+          captureMode: "enhanced",
+          revision: 1,
+          expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+          contentCaptureAllowed: true,
+          externalContentCaptureAllowed: true,
+        }),
+      );
+      return;
+    }
+    if (request.method === "POST" && request.url === "/v1/traces") {
+      const body = Buffer.concat(chunks);
+      exports.push({ raw: body.toString("latin1"), spans: decodeSpans(body) });
+    }
+    response.writeHead(200, { "content-type": "application/x-protobuf" });
+    response.end();
   });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
   const address = server.address();
   return {
     endpoint: `http://127.0.0.1:${address.port}`,
-    requests,
+    exports,
     close: async () => {
+      server.closeAllConnections();
       server.close();
       await once(server, "close");
     },
@@ -142,21 +216,22 @@ test("Stop ships exactly one per-turn generation span without cumulative double 
     config,
   );
 
-  assert.equal(ingest.requests.length, 2);
-  const generationSpans = ingest.requests.map((request) => {
-    const spans = request.body.batches.flatMap((batch) => batch.spans);
-    const generations = spans.filter((span) => span.kind === "generation");
-    assert.equal(generations.length, 1);
-    assert.ok(generations[0].attributes.costUsd > 0);
-    return generations[0];
+  const usage = (span) => ({
+    inputTokens: span.attributes["gen_ai.usage.input_tokens"],
+    outputTokens: span.attributes["gen_ai.usage.output_tokens"],
+    cacheReadTokens: span.attributes["gen_ai.usage.cache_read_tokens"],
   });
+  const generationSpans = ingest.exports
+    .flatMap((e) => e.spans)
+    .filter((span) => span.name === "gen_ai.chat");
+  assert.equal(generationSpans.length, 2);
+  for (const span of generationSpans) {
+    assert.ok(span.attributes["gen_ai.usage.cost_usd"] > 0);
+    assert.equal(span.attributes["armoriq.session_id"], sessionId);
+  }
 
   assert.deepEqual(
-    generationSpans.map((span) => ({
-      inputTokens: span.attributes.inputTokens,
-      outputTokens: span.attributes.outputTokens,
-      cacheReadTokens: span.attributes.cacheReadTokens,
-    })),
+    generationSpans.map(usage),
     [
       { inputTokens: 100, outputTokens: 10, cacheReadTokens: 20 },
       { inputTokens: 50, outputTokens: 15, cacheReadTokens: 30 },
@@ -165,9 +240,9 @@ test("Stop ships exactly one per-turn generation span without cumulative double 
 
   const summed = generationSpans.reduce(
     (totals, span) => ({
-      inputTokens: totals.inputTokens + span.attributes.inputTokens,
-      outputTokens: totals.outputTokens + span.attributes.outputTokens,
-      cacheReadTokens: totals.cacheReadTokens + span.attributes.cacheReadTokens,
+      inputTokens: totals.inputTokens + usage(span).inputTokens,
+      outputTokens: totals.outputTokens + usage(span).outputTokens,
+      cacheReadTokens: totals.cacheReadTokens + usage(span).cacheReadTokens,
     }),
     { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 },
   );
@@ -207,17 +282,40 @@ test("PermissionRequest denial ships as a denied policy call with its reason", a
   );
   await observeHook("Stop", { session_id: sessionId }, null, config);
 
-  assert.equal(ingest.requests.length, 1);
-  assert.equal(ingest.requests[0].method, "POST");
-  assert.equal(ingest.requests[0].url, "/observability/spans");
-
-  const [{ spans }] = ingest.requests[0].body.batches;
-  const policyCall = spans.find((span) => span.kind === "policy_call");
+  const spans = ingest.exports.flatMap((e) => e.spans);
+  const policyCall = spans.find((span) => span.name === "armoriq.policy.evaluate");
   assert.ok(policyCall);
-  assert.equal(policyCall.status, "denied");
-  assert.equal(policyCall.attributes.decision, "deny");
-  assert.equal(policyCall.attributes.enforcementAction, "block");
-  assert.equal(policyCall.attributes.reason, "Protected files cannot be removed");
+  assert.equal(policyCall.attributes["armoriq.policy.decision"], "deny");
+  assert.equal(policyCall.attributes["armoriq.intent_plan_item_status"], "blocked");
+  assert.equal(policyCall.attributes["armoriq.policy.tool_name"], "Bash");
+  assert.equal(policyCall.attributes["armoriq.policy.reason_code"], "Protected files cannot be removed");
+  assert.equal(policyCall.attributes["armoriq.session_id"], sessionId);
+});
+
+test("PostToolUse ships a tool span with its outcome under the session", async (t) => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "armorcodex-obs-"));
+  const ingest = await startIngestServer();
+  t.after(async () => {
+    await ingest.close();
+    await rm(dataDir, { recursive: true, force: true });
+  });
+
+  const sessionId = randomUUID();
+  const config = obsConfig(dataDir, ingest.endpoint);
+  const tool = { session_id: sessionId, tool_name: "Bash", tool_input: { command: "ls" } };
+  await observeHook("UserPromptSubmit", { session_id: sessionId, prompt: "List" }, null, config);
+  await observeHook("PostToolUse", { ...tool, tool_response: { stdout: "a" } }, null, config);
+  await observeHook("PostToolUse", { ...tool, error: "exit 1" }, null, config);
+  await observeHook("Stop", { session_id: sessionId }, null, config);
+
+  const tools = ingest.exports.flatMap((e) => e.spans).filter((s) => s.name === "armoriq.tool");
+  assert.deepEqual(
+    tools.map((s) => [s.attributes["armoriq.tool.outcome"], s.attributes["armoriq.session_id"]]),
+    [
+      ["success", sessionId],
+      ["error", sessionId],
+    ],
+  );
 });
 
 test("outbound observability payload redacts prompt and tool-input secrets", async (t) => {
@@ -257,13 +355,13 @@ test("outbound observability payload redacts prompt and tool-input secrets", asy
   );
   await observeHook("Stop", { session_id: sessionId }, null, config);
 
-  assert.equal(ingest.requests.length, 1);
-  const wireJson = JSON.stringify(ingest.requests[0].body);
+  const wireJson = ingest.exports.map((e) => e.raw).join("");
+  assert.ok(wireJson.length > 0);
   assert.doesNotMatch(wireJson, new RegExp(promptSecret));
   assert.doesNotMatch(wireJson, new RegExp(bearerSecret));
   assert.match(wireJson, /Deploy the release with/);
   assert.match(wireJson, /release verification/);
-  assert.match(wireJson, /<redacted>/);
+  assert.match(wireJson, /<redacted>|\[REDACTED:SECRET\]/);
 });
 
 test("outbound observability payload redacts nested secret fields even when values are short and circular", async (t) => {
@@ -325,13 +423,13 @@ test("outbound observability payload redacts nested secret fields even when valu
   );
   await observeHook("Stop", { session_id: deepSessionId }, null, config);
 
-  assert.equal(ingest.requests.length, 2);
-  const wireJson = JSON.stringify(ingest.requests.map((request) => request.body));
+  const wireJson = ingest.exports.map((e) => e.raw).join("");
+  assert.ok(wireJson.length > 0);
   assert.doesNotMatch(wireJson, /p@ssw0rd/);
   assert.doesNotMatch(wireJson, /tiny-key/);
   assert.doesNotMatch(wireJson, /deep-password/);
-  assert.match(wireJson, /<redacted>/);
-  assert.match(wireJson, /<max-depth>/);
+  assert.match(wireJson, /<redacted>|\[REDACTED:SECRET\]/);
+  assert.match(wireJson, /<max-depth>|\[TRUNCATED:MAX_DEPTH\]/);
 });
 
 test("session ids cannot escape the observability data directory", async (t) => {

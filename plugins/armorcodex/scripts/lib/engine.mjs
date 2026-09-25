@@ -1,4 +1,4 @@
-import armoriqSdk from "@armoriq/sdk";
+import armoriqSdk from "@armoriq/sdk-dev";
 import { isPlainObject, normalizeToolName, nowEpochSeconds, redactSecrets, sanitizeParams } from "./common.mjs";
 import { addPromptContext, blockPrompt, denyPermissionRequest, denyPreTool } from "./hook-output.mjs";
 import {

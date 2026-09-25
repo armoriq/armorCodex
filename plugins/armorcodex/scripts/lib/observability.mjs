@@ -3,24 +3,12 @@
  * per-plan via disk).
  *
  * armorCodex has NO daemon: every hook event spawns a fresh short-lived `node
- * scripts/hook-router.mjs` process. Two hard SDK/backend facts rule out the
- * armorClaude daemon-resident approach (module-level Map of live
- * ObservabilityRecorders):
+ * scripts/hook-router.mjs` process. An SDK `OtelSession` and its
+ * `ArmorIQTelemetryRuntime` live inside one process, and the root span a
+ * process opens cannot be continued by the next one. Shipping from every hook
+ * would also make each hook wait on the policy lease and an OTLP export.
  *
- *   1. `ObservabilityRecorder` is an in-memory ring buffer that lives inside
- *      ONE process. `startTrace` always mints a brand-new trace id, and
- *      `recordSpan`/`endTrace` silently no-op for any traceId not already in
- *      that process's buffer (recorder.ts `bufferIndex.get(...)` miss). A
- *      recorder constructed fresh in hook process N+1 has never heard of the
- *      trace hook process N started — there is no way to "resume" it.
- *   2. The backend's `ObservabilityService.recordBatches` does an
- *      `obsTrace.create` (not upsert) inside a transaction. POSTing the same
- *      trace id twice throws a duplicate-key error and rolls back that
- *      batch's spans. So spans for one logical turn/plan can NEVER be shipped
- *      as multiple separate POSTs under the same trace id — the whole trace +
- *      all its spans must ship in exactly one POST.
- *
- * So instead of holding a live recorder across hooks, we persist the
+ * So instead of holding a live session across hooks, we persist the
  * accumulating turn as an APPEND-ONLY NDJSON LOG under `config.dataDir`, one
  * file per active turn:
  *
@@ -103,12 +91,11 @@
  *       session-scoped filename plus this rename-claim, not any ordering
  *       assumption about hook delivery.
  *
- * After the rename, Stop reads every line from the `.shipping` file, feeds
- * the complete (trace, spans) into a FRESH short-lived `ObservabilityRecorder`
- * in this one process, ends the trace (enqueues it on the shipper), and
- * `await`s `flush()` to completion before deleting the `.shipping` file —
- * because a short-lived hook process has no background timer that will ever
- * fire.
+ * After the rename, Stop reads every line from the `.shipping` file, replays
+ * the turn into one fresh `OtelSession` (root with the prompt as input, one
+ * policy or tool span per record, one model span per model the turn used),
+ * and closes it, which exports the whole turn over OTLP, before deleting the
+ * `.shipping` file.
  *
  * Codex has no SessionEnd hook at all; GC of stale `.ndjson`/`.shipping`
  * files left behind by a crashed session (never reached Stop, or crashed
@@ -139,7 +126,7 @@
  * safeObsAsync() (everything in this module does disk or network I/O, so
  * there is no synchronous variant to wrap).
  */
-import armoriqSdk from "@armoriq/sdk";
+import armoriqSdk from "@armoriq/sdk-dev";
 import { sanitizeParams, redactSecrets, sha256Hex } from "./common.mjs";
 import { summarizeCodexTurnUsage } from "./token-usage.mjs";
 import {
@@ -149,17 +136,8 @@ import {
 } from "./fs-store.mjs";
 import { readdir, unlink, stat } from "node:fs/promises";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
 
-const {
-  ObservabilityRecorder,
-  startTrace,
-  recordSpan,
-  recordGeneration,
-  endTrace,
-  flushObservability,
-  isValidUuid,
-} = armoriqSdk;
+const { ArmorIQTelemetryRuntime, OtelSession, computeCostUsd } = armoriqSdk;
 
 // A trace file older than this is considered abandoned (crashed session,
 // missed Stop) and is garbage-collected on the next SessionStart rather than
@@ -198,14 +176,6 @@ function turnLogPath(config, sessionId) {
 
 function shippingPath(config, sessionId) {
   return `${turnLogPath(config, sessionId)}.shipping`;
-}
-
-function mintId() {
-  return randomUUID();
-}
-
-function nowIso() {
-  return new Date().toISOString();
 }
 
 const SENSITIVE_ATTRIBUTE_KEYS = new Set([
@@ -284,7 +254,7 @@ function capAttributes(attributes) {
 
   // Still too big (e.g. many mid-sized fields): drop non-essential bulky
   // fields entirely rather than risk exceeding the atomic-append cap.
-  const essential = new Set(["kind", "toolName", "decision", "status", "reason", "source", "enforcementAction"]);
+  const essential = new Set(["toolName", "decision", "outcome", "reason", "source"]);
   const minimal = {};
   for (const [key, value] of Object.entries(out)) {
     if (essential.has(key)) minimal[key] = value;
@@ -299,24 +269,12 @@ function capSpan(span) {
 
 // ---------------------------------------------------------------------------
 // Disk record shapes (one JSON value per NDJSON line):
-//   { recordType: "meta", traceId, sessionId, name, startTime, startTimeMs,
-//     attributes, createdAtEpochMs }
-//   { recordType: "span", span: SpanRecord }
+//   { recordType: "meta", attributes: { source, input } }
+//   { recordType: "span", span: { kind: "policy" | "tool", attributes } }
 // ---------------------------------------------------------------------------
 
-function newMetaRecord(sessionId, attrs) {
-  const sid = isValidUuid && isValidUuid(sessionId) ? sessionId : null;
-  const startTimeMs = Date.now();
-  return {
-    recordType: "meta",
-    traceId: mintId(),
-    sessionId: sid,
-    name: "iap.plan",
-    startTime: new Date(startTimeMs).toISOString(),
-    startTimeMs,
-    attributes: capAttributes(attrs || {}),
-    createdAtEpochMs: startTimeMs,
-  };
+function newMetaRecord(attrs) {
+  return { recordType: "meta", attributes: capAttributes(attrs || {}) };
 }
 
 function classifyDecision(output) {
@@ -335,13 +293,11 @@ function classifyDecision(output) {
 
 // ---------------------------------------------------------------------------
 // Per-hook: append-only. Never reads the log, never blocks on any other
-// process — each call is exactly one O_APPEND write (or two, for obsCheck's
-// pair of related spans, appended as two independent lines so no single
-// line risks exceeding the atomic-append size).
+// process — each call is exactly one O_APPEND write.
 // ---------------------------------------------------------------------------
 
 async function appendMeta(sessionId, config, attrs) {
-  const meta = newMetaRecord(sessionId, attrs);
+  const meta = newMetaRecord(attrs);
   await appendNdjsonLine(turnLogPath(config, sessionId), meta);
   return meta;
 }
@@ -354,27 +310,13 @@ async function appendSpan(sessionId, config, span) {
 }
 
 async function obsStartPlan(sessionId, config, prompt) {
-  const sanitizedPrompt = redactObservabilitySecrets(sanitizeParams({ prompt }, config.sanitize));
-  const { prompt: sanitizedInput } = sanitizedPrompt;
+  const { prompt: sanitizedInput } = redactObservabilitySecrets(
+    sanitizeParams({ prompt }, config.sanitize)
+  );
   await appendMeta(sessionId, config, { source: "codex", input: sanitizedInput ?? null });
-  const startSpan = {
-    id: mintId(),
-    parentSpanId: null,
-    sessionId: isValidUuid && isValidUuid(sessionId) ? sessionId : null,
-    kind: "span",
-    name: "iap.plan.start",
-    startTime: nowIso(),
-    endTime: nowIso(),
-    durationMs: 0,
-    status: "ok",
-    attributes: { kind: "span", ...sanitizedPrompt },
-  };
-  await appendSpan(sessionId, config, startSpan);
 }
 
 async function obsCheck(sessionId, config, toolName, toolInput, output) {
-  const decision = classifyDecision(output);
-  const status = decision === "deny" ? "denied" : "ok";
   const reason =
     (output && output.hookSpecificOutput && output.hookSpecificOutput.permissionDecisionReason) ||
     (output &&
@@ -384,83 +326,55 @@ async function obsCheck(sessionId, config, toolName, toolInput, output) {
       ? output.hookSpecificOutput.decision.message
       : null) ||
     (output && typeof output.reason === "string" ? output.reason : null);
-
-  const sid = isValidUuid && isValidUuid(sessionId) ? sessionId : null;
-  const checkSpanId = mintId();
-  const checkStart = nowIso();
-  const policySpan = {
-    id: mintId(),
-    parentSpanId: checkSpanId,
-    sessionId: sid,
-    kind: "policy_call",
-    name: `armorcodex.${decision}`,
-    startTime: checkStart,
-    endTime: nowIso(),
-    durationMs: 0,
-    status: decision === "allow" ? "ok" : "denied",
+  await appendSpan(sessionId, config, {
+    kind: "policy",
     attributes: {
-      kind: "policy_call",
-      policyId: null,
-      policyName: null,
-      policyHash: null,
-      policyVersion: null,
-      decision,
-      matchedRuleId: null,
-      dataClasses: [],
+      toolName: toolName || undefined,
+      decision: classifyDecision(output),
       reason: redactObservabilitySecrets(reason ?? null),
       input: redactObservabilitySecrets(sanitizeParams(toolInput, config.sanitize)),
-      output: null,
-      source: "sdk",
-      enforcementAction: decision === "deny" ? "block" : "allow",
-      obligations: null,
-      delegationId: null,
     },
-  };
-  const checkSpan = {
-    id: checkSpanId,
-    parentSpanId: null,
-    sessionId: sid,
-    kind: "span",
-    name: "iap.check",
-    startTime: checkStart,
-    endTime: nowIso(),
-    durationMs: 0,
-    status,
-    attributes: { kind: "span", toolName: toolName || undefined },
-  };
-  // Two independent appends (two lines) rather than one combined write —
-  // keeps each line comfortably small and each append is independently
-  // atomic; Stop reassembles both from the log regardless of arrival order.
-  await appendSpan(sessionId, config, checkSpan);
-  await appendSpan(sessionId, config, policySpan);
+  });
 }
 
 async function obsReport(sessionId, config, toolName, toolInput, toolResponse, status) {
-  const sid = isValidUuid && isValidUuid(sessionId) ? sessionId : null;
-  const span = {
-    id: mintId(),
-    parentSpanId: null,
-    sessionId: sid,
-    kind: "span",
-    name: "tool.report",
-    startTime: nowIso(),
-    endTime: nowIso(),
-    durationMs: 0,
-    status: status || "ok",
+  await appendSpan(sessionId, config, {
+    kind: "tool",
     attributes: {
-      kind: "span",
       toolName: toolName || undefined,
+      outcome: status === "error" ? "error" : "success",
       input: redactObservabilitySecrets(sanitizeParams(toolInput, config.sanitize)),
       output: redactObservabilitySecrets(sanitizeParams(toolResponse, config.sanitize)),
     },
-  };
-  await appendSpan(sessionId, config, span);
+  });
 }
 
 // ---------------------------------------------------------------------------
 // Stop: rename-claim the log, assemble + ship the COMPLETE trace exactly
 // once, then delete the claimed (.shipping) file.
 // ---------------------------------------------------------------------------
+
+const toolCategory = (toolName) =>
+  typeof toolName === "string" && toolName.startsWith("mcp__") ? "mcp" : "tool";
+
+async function replaySpan(session, span) {
+  const attrs = span.attributes || {};
+  const toolName = attrs.toolName || "unknown";
+  if (span.kind === "policy") {
+    await session.recordPolicy(
+      { toolName, arguments: attrs.input },
+      {
+        decision: attrs.decision === "deny" ? "block" : "allow",
+        ...(attrs.reason ? { policyReasonCode: attrs.reason } : {}),
+      }
+    );
+  } else if (span.kind === "tool") {
+    await session.recordTool(
+      { toolName, arguments: attrs.input, operation: { category: toolCategory(toolName) } },
+      { outcome: attrs.outcome === "error" ? "error" : "success", result: attrs.output }
+    );
+  }
+}
 
 async function obsEndTurnAndShip(sessionId, config, transcriptPath) {
   const livePath = turnLogPath(config, sessionId);
@@ -493,67 +407,40 @@ async function obsEndTurnAndShip(sessionId, config, transcriptPath) {
     }
   }
 
-  if (!meta) {
-    // Spans exist but no meta line ever landed (e.g. the process that would
-    // have written it crashed after claiming to append but before the append
-    // completed — extremely unlikely given O_APPEND atomicity, but degrade
-    // gracefully rather than throw). Synthesize a minimal meta so the spans
-    // still ship instead of being silently dropped.
-    meta = {
-      recordType: "meta",
-      traceId: mintId(),
-      sessionId: isValidUuid && isValidUuid(sessionId) ? sessionId : null,
-      name: "iap.plan",
-      startTime: nowIso(),
-      attributes: { source: "codex", lazy: true, recoveredWithoutMeta: true },
-    };
-  }
-
-  // Fresh recorder scoped to this one short-lived process. Its ring buffer
-  // and shipper live only as long as this function runs — we start a trace,
-  // replay every disk-accumulated span into it, end the trace (which enqueues
-  // it on the shipper), and explicitly await flush() before returning. There
-  // is no background 5s timer in a ~50ms hook process, so the flush MUST be
-  // awaited here or the batch is silently lost when the process exits.
-  const recorder = new ObservabilityRecorder({
-    enabled: true,
-    endpoint: config.observabilityEndpoint,
+  const runtime = new ArmorIQTelemetryRuntime({
+    backendEndpoint: config.observabilityEndpoint,
     apiKey: config.apiKey,
-    product: config.observabilityProduct,
-    sessionId: meta.sessionId,
-    userId: isValidUuid && isValidUuid(config.userId) ? config.userId : null,
-    agentId: config.agentId || null,
-    // Disable the periodic timer entirely — we drive flush() explicitly and
-    // don't want an unref'd interval outliving the one flush we need.
-    flushIntervalMs: 24 * 60 * 60 * 1000,
+    sdkVersion: typeof armoriqSdk.VERSION === "string" ? armoriqSdk.VERSION : "unknown",
+    options: { serviceName: config.observabilityProduct || "armorcodex" },
   });
-
-  // `startTrace` mints a NEW trace id (the recorder is the only place ids are
-  // minted) — the disk-persisted `meta.traceId` was only ever a same-process
-  // correlation handle across the accumulation phase; it never left this
-  // machine and was never sent anywhere, so re-minting here (matching the
-  // SDK's "recorder owns id minting" invariant) is safe and simpler than
-  // trying to force a specific id through the public API.
-  const ctx = startTrace(recorder, meta.name, meta.attributes, meta.sessionId);
-
-  for (const span of spans) {
-    // Re-home each disk-accumulated span under the freshly-minted trace id
-    // (parentSpanId links between sibling spans are unaffected — those ids
-    // were minted once, up front, when each span was created, and are
-    // preserved verbatim from disk).
-    recordSpan(recorder, ctx, { ...span, sessionId: ctx.sessionId });
-  }
-
-  // Observability session totals are incremented from generation spans on each
-  // trace, so emit this turn's delta rather than Codex's cumulative session
-  // snapshot. The legacy /dashboard/token-usage POST remains cumulative and is
-  // intentionally handled separately by engine.handleStop.
+  const session = new OtelSession(runtime, {
+    sessionId,
+    agentId: config.agentId || null,
+    userId: config.userId || null,
+  });
+  // A runtime without a lease records nothing, so wait for it (the SDK bounds the wait).
+  await session.refreshPolicy();
+  await session.beginRoot({ input: meta?.attributes?.input ?? null });
+  for (const span of spans) await replaySpan(session, span);
   for (const entry of summarizeCodexTurnUsage(transcriptPath)) {
-    recordGeneration(recorder, ctx, entry);
+    const model = await session.beginModel(entry.model);
+    await session.endModel(model, {
+      "armoriq.timing.provenance": "post_hoc",
+      "armoriq.cost.provenance": "estimated",
+      "gen_ai.usage.input_tokens": entry.inputTokens,
+      "gen_ai.usage.output_tokens": entry.outputTokens,
+      "gen_ai.usage.cache_read_tokens": entry.cacheReadTokens,
+      "gen_ai.usage.cache_write_tokens": entry.cacheWriteTokens,
+      "gen_ai.usage.cost_usd": computeCostUsd(
+        entry.model,
+        entry.inputTokens,
+        entry.outputTokens,
+        entry.cacheReadTokens,
+        entry.cacheWriteTokens
+      ),
+    });
   }
-
-  endTrace(recorder, ctx, { status: "ok" });
-  await flushObservability(recorder);
+  await session.close("ok");
   await unlink(claimedPath).catch(() => {});
 }
 

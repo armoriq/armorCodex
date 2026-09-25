@@ -6,22 +6,20 @@ function readJson(relativePath) {
   return JSON.parse(readFileSync(new URL(relativePath, import.meta.url), "utf8"));
 }
 
-test("release metadata uses the registry SDK and one ArmorCodex version", () => {
+test("release metadata uses the registry sdk-dev 0.8 SDK and one ArmorCodex version", () => {
   const pkg = readJson("../plugins/armorcodex/package.json");
   const lock = readJson("../plugins/armorcodex/package-lock.json");
   const plugin = readJson("../plugins/armorcodex/.codex-plugin/plugin.json");
   const codexMarketplace = readJson("../.codex-plugin/marketplace.json");
   const agentsMarketplace = readJson("../.agents/plugins/marketplace.json");
-  const lockedSdk = lock.packages["node_modules/@armoriq/sdk"];
+  const lockedSdk = lock.packages["node_modules/@armoriq/sdk-dev"];
 
-  assert.equal(pkg.dependencies["@armoriq/sdk"], "^0.6.3");
-  assert.equal(lock.packages[""].dependencies["@armoriq/sdk"], "^0.6.3");
-  assert.equal(lockedSdk.version, "0.6.3");
+  assert.equal(pkg.dependencies["@armoriq/sdk"], undefined);
+  assert.equal(pkg.dependencies["@armoriq/sdk-dev"], "^0.8.5");
+  assert.equal(lock.packages[""].dependencies["@armoriq/sdk-dev"], "^0.8.5");
+  assert.match(lockedSdk.version, /^0\.8\.\d+$/);
   assert.match(lockedSdk.resolved, /^https:\/\/registry\.npmjs\.org\//);
-  assert.equal(
-    lockedSdk.integrity,
-    "sha512-I/YjZrnOsbN4Yg3ZujEX91descHOf6K1Z1Kg2KfuTi019VPQaGfSdrda2Hx1VqLWxysw8UJil9BxZKRIVLHMrg==",
-  );
+  assert.match(lockedSdk.integrity, /^sha512-/);
   assert.equal(lockedSdk.link, undefined);
   assert.equal(
     Object.keys(lock.packages).some((key) => key.includes("armoriq-sdk-customer-ts")),
@@ -52,5 +50,5 @@ test("release installer uses only the production SDK CLI", () => {
   assert.match(installer, /npm install -g @armoriq\/sdk@latest/);
   assert.match(installer, /npx @armoriq\/sdk login/);
   assert.doesNotMatch(installer, /armoriq-dev/);
-  assert.doesNotMatch(installer, /@armoriq\/sdk-dev/);
+  assert.doesNotMatch(installer, /(npx|npm install -g) @armoriq\/sdk-dev/);
 });

@@ -11,7 +11,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const pluginRoot = path.dirname(__dirname);
 const installedMarker = path.join(pluginRoot, "node_modules", ".armorcodex-installed");
 const packageFiles = [
-  path.join(pluginRoot, "node_modules", "@armoriq", "sdk", "package.json"),
+  path.join(pluginRoot, "node_modules", "@armoriq", "sdk-dev", "package.json"),
   path.join(pluginRoot, "node_modules", "zod", "package.json"),
   path.join(pluginRoot, "node_modules", "@modelcontextprotocol", "sdk", "package.json"),
 ];

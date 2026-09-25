@@ -411,7 +411,7 @@ EOF
 
 install_npm_deps() {
   pushd "${PLUGIN_PATH}" >/dev/null
-  if [[ -d node_modules/@armoriq/sdk && -d node_modules/zod && -d node_modules/@modelcontextprotocol/sdk ]]; then
+  if [[ -d node_modules/@armoriq/sdk-dev && -d node_modules/zod && -d node_modules/@modelcontextprotocol/sdk ]]; then
     info "npm dependencies already present"
   else
     info "installing npm dependencies (--omit=dev)"
