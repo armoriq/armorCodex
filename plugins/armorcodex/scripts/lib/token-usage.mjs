@@ -13,23 +13,41 @@
  *       info: { total_token_usage: { input_tokens, cached_input_tokens,
  *                                    output_tokens, reasoning_output_tokens,
  *                                    total_tokens }, ... } } }
+ *   { type: "token_usage_record", timestamp, payload: { response_id,
+ *       usage: { input_tokens, cached_input_tokens, cache_write_input_tokens,
+ *                output_tokens, reasoning_output_tokens, total_tokens } } }
+ *
+ * A token_usage_record (Codex 0.153 and later) is the Responses API usage of
+ * one completed request, compaction requests included. token_count carries a
+ * running total that skips remote compaction requests and is overwritten on a
+ * context-window overflow, so a rollout is counted from token_count growth only
+ * up to its first token_usage_record and from the records after that.
  *
  * `total_token_usage` is cumulative for the rollout file. A fork's file starts
- * with a copy of its original's lines, token_count events included with the
- * same totals, and its counter continues from there. The counter can restart
- * from zero inside one file.
+ * with a copy of its original's lines, token_count events and records included,
+ * and its counter continues from there. The counter can restart from zero
+ * inside one file.
  *
- * Codex's `input_tokens` INCLUDES `cached_input_tokens` (input+output=total).
- * To match the Claude convention (input excludes cache reads) we split them:
- *   inputTokens     = input_tokens - cached_input_tokens   (fresh prompt tokens)
- *   cacheReadTokens = cached_input_tokens
- *   outputTokens    = output_tokens                         (incl. reasoning)
- *   cacheWriteTokens = 0
+ * Codex's `input_tokens` INCLUDES `cached_input_tokens` and
+ * `cache_write_input_tokens`, and `output_tokens` includes
+ * `reasoning_output_tokens`. Entries follow the Claude convention:
+ *   inputTokens          = input_tokens - cached_input_tokens - cache_write_input_tokens
+ *   cacheReadTokens      = cached_input_tokens
+ *   cacheWriteTokens     = cache_write_input_tokens
+ *   outputTokens         = output_tokens
+ *   reasoningOutputTokens = reasoning_output_tokens (part of outputTokens)
  */
 
 import { readFileSync } from "node:fs";
 
 const COUNT_FIELDS = ["input_tokens", "cached_input_tokens", "output_tokens"];
+const USAGE_FIELDS = [
+  "input_tokens",
+  "cached_input_tokens",
+  "cache_write_input_tokens",
+  "output_tokens",
+  "reasoning_output_tokens",
+];
 
 function readUsageEvents(transcriptPath) {
   if (typeof transcriptPath !== "string" || !transcriptPath) {
@@ -48,6 +66,7 @@ function parseRollout(raw) {
   let taskSequence = -1;
   let timestamp = "";
   const events = [];
+  const records = [];
 
   for (const line of raw.split("\n")) {
     const trimmed = line.trim();
@@ -79,6 +98,18 @@ function parseRollout(raw) {
       continue;
     }
 
+    if (obj.type === "token_usage_record") {
+      if (payload.usage && typeof payload.usage === "object") {
+        records.push({
+          model: currentModel,
+          usage: payload.usage,
+          responseId: typeof payload.response_id === "string" ? payload.response_id : "",
+          timestamp,
+        });
+      }
+      continue;
+    }
+
     if (obj.type !== "event_msg" || payload.type !== "token_count") continue;
     const info = payload.info && typeof payload.info === "object" ? payload.info : null;
     const totals = info && typeof info.total_token_usage === "object"
@@ -95,20 +126,21 @@ function parseRollout(raw) {
           ? info.last_token_usage
           : null,
       timestamp,
+      afterRecord: records.length > 0,
     });
   }
 
-  return { meta, events, latestTaskSequence: taskSequence };
+  return { meta, events, records, latestTaskSequence: taskSequence };
 }
 
 /**
- * Read a Codex rollout: its session_meta payload (null when absent) and every
- * token_count event, each with the model and timestamp in effect. Throws when
- * the file cannot be read.
+ * Read a Codex rollout: its session_meta payload (null when absent), every
+ * token_count event and every token_usage_record, each with the model and
+ * timestamp in effect. Throws when the file cannot be read.
  */
 export function readRollout(rolloutPath) {
-  const { meta, events } = parseRollout(readFileSync(rolloutPath, "utf8"));
-  return { meta, events };
+  const { meta, events, records } = parseRollout(readFileSync(rolloutPath, "utf8"));
+  return { meta, events, records };
 }
 
 /** Identity of a token_count event: its cumulative totals. */
@@ -124,29 +156,39 @@ export function sumEntries(a, b) {
     outputTokens: a.outputTokens + b.outputTokens,
     cacheReadTokens: a.cacheReadTokens + b.cacheReadTokens,
     cacheWriteTokens: a.cacheWriteTokens + b.cacheWriteTokens,
+    reasoningOutputTokens: a.reasoningOutputTokens + b.reasoningOutputTokens,
   };
 }
 
 /**
- * Per-UTC-day, per-model usage of one rollout, from the growth of its
- * cumulative totals between token_count events. The first `copied` events are
- * history copied from another rollout: they set the starting totals and count
- * nothing. A total lower than the one before starts a new count from zero.
- * Returns { "YYYY-MM-DD": { model: entry } }.
+ * Per-UTC-day, per-model usage of one rollout. Up to its first
+ * token_usage_record it is the growth of the cumulative totals between
+ * token_count events; a total lower than the one before starts a new count
+ * from zero. From then on it is the sum of the records. The first
+ * `copied.events` token_count events and `copied.records` records are history
+ * copied from another rollout and count nothing; the copied events still set
+ * the starting totals. Returns { "YYYY-MM-DD": { model: entry } }.
  */
-export function rolloutUsageByDay(events, copied = 0) {
+export function rolloutUsageByDay({ events, records }, copied = {}) {
   const days = {};
+  const add = (model, usage, timestamp) => {
+    const time = Date.parse(timestamp);
+    const [entry] = usageEntry(model, usage);
+    if (!entry || Number.isNaN(time)) return;
+    const day = (days[new Date(time).toISOString().slice(0, 10)] ??= {});
+    day[entry.model] = sumEntries(day[entry.model], entry);
+  };
   let prev = null;
   for (const [i, event] of events.entries()) {
+    if (event.afterRecord) break;
     const reset = prev && COUNT_FIELDS.some((k) => toCount(event.totals[k]) < toCount(prev[k]));
     const base = prev && !reset ? prev : {};
     prev = event.totals;
-    if (i < copied) continue;
-    const time = Date.parse(event.timestamp);
-    const [entry] = usageEntry(event.model, subtractTotals(event.totals, base));
-    if (!entry || Number.isNaN(time)) continue;
-    const day = (days[new Date(time).toISOString().slice(0, 10)] ??= {});
-    day[entry.model] = sumEntries(day[entry.model], entry);
+    if (i < (copied.events ?? 0)) continue;
+    add(event.model, subtractTotals(event.totals, base), event.timestamp);
+  }
+  for (const record of records.slice(copied.records ?? 0)) {
+    add(record.model, record.usage, record.timestamp);
   }
   return days;
 }
@@ -154,33 +196,27 @@ export function rolloutUsageByDay(events, copied = 0) {
 function usageEntry(model, totals) {
   const inputTotal = toCount(totals?.input_tokens);
   const cacheRead = toCount(totals?.cached_input_tokens);
+  const cacheWrite = toCount(totals?.cache_write_input_tokens);
   const outputTokens = toCount(totals?.output_tokens);
-  const inputTokens = Math.max(0, inputTotal - cacheRead);
+  const inputTokens = Math.max(0, inputTotal - cacheRead - cacheWrite);
 
-  if (inputTokens + outputTokens + cacheRead === 0) return [];
+  if (inputTokens + outputTokens + cacheRead + cacheWrite === 0) return [];
   return [
     {
       model: model || "unknown",
       inputTokens,
       outputTokens,
       cacheReadTokens: cacheRead,
-      cacheWriteTokens: 0,
+      cacheWriteTokens: cacheWrite,
+      reasoningOutputTokens: Math.min(outputTokens, toCount(totals?.reasoning_output_tokens)),
     },
   ];
 }
 
 function subtractTotals(latest, baseline) {
-  return {
-    input_tokens: Math.max(0, toCount(latest?.input_tokens) - toCount(baseline?.input_tokens)),
-    cached_input_tokens: Math.max(
-      0,
-      toCount(latest?.cached_input_tokens) - toCount(baseline?.cached_input_tokens),
-    ),
-    output_tokens: Math.max(
-      0,
-      toCount(latest?.output_tokens) - toCount(baseline?.output_tokens),
-    ),
-  };
+  return Object.fromEntries(
+    USAGE_FIELDS.map((k) => [k, Math.max(0, toCount(latest?.[k]) - toCount(baseline?.[k]))])
+  );
 }
 
 /**

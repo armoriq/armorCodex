@@ -223,3 +223,34 @@ test("a run past its deadline posts nothing and the next run posts everything", 
   const next = await run(home, state);
   assert.deepEqual(summary(next.rows), FIRST_ROWS);
 });
+
+const usageRecord = (timestamp, responseId, input, output = 0) => ({
+  timestamp,
+  type: "token_usage_record",
+  payload: { response_id: responseId, usage: { input_tokens: input, output_tokens: output } },
+});
+
+test("a fork's copied token_usage_records count nothing", async () => {
+  const home = mkdtempSync(path.join(tmpdir(), "acx-usage-records-"));
+  const S4 = "019e0000-0000-7000-8000-000000000004";
+  const S5 = "019e0000-0000-7000-8000-000000000005";
+  const original = [
+    model("2026-09-08T09:00:01Z", "gpt-5.5"),
+    usageRecord("2026-09-08T09:01:00Z", "resp-1", 50, 5),
+    usageRecord("2026-09-08T09:02:00Z", "resp-2", 20, 2),
+  ];
+  writeRollout(rolloutPath(home, "2026-09-08", S4), [
+    meta("2026-09-08T09:00:00Z", { id: S4, session_id: S4, cwd: "/work/repo-d" }),
+    ...original,
+  ]);
+  writeRollout(rolloutPath(home, "2026-09-09", S5), [
+    meta("2026-09-09T09:00:00Z", { id: S5, session_id: S5, forked_from_id: S4, cwd: "/work/repo-d" }),
+    ...original,
+    usageRecord("2026-09-09T09:05:00Z", "resp-3", 9, 1),
+  ]);
+  const { rows } = await run(home, await emptyState(home));
+  assert.deepEqual(summary(rows), [
+    [S4, "2026-09-08", "gpt-5.5=77"],
+    [S5, "2026-09-09", "gpt-5.5=10"],
+  ]);
+});

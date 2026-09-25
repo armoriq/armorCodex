@@ -53,6 +53,7 @@ test("summarizes only the latest task across multiple token snapshots", async ()
       outputTokens: 20,
       cacheReadTokens: 50,
       cacheWriteTokens: 0,
+      reasoningOutputTokens: 0,
     },
   ]);
 });
@@ -74,6 +75,7 @@ test("uses last_token_usage for an older rollout without task boundaries", async
       outputTokens: 15,
       cacheReadTokens: 30,
       cacheWriteTokens: 0,
+      reasoningOutputTokens: 0,
     },
   ]);
 });
@@ -92,6 +94,7 @@ test("falls back to cumulative delta for an older rollout without last usage", a
       outputTokens: 15,
       cacheReadTokens: 30,
       cacheWriteTokens: 0,
+      reasoningOutputTokens: 0,
     },
   ]);
 });
@@ -129,6 +132,7 @@ test("parses model + splits cached tokens out of input_tokens", async () => {
       outputTokens: 39,
       cacheReadTokens: 9088,
       cacheWriteTokens: 0,
+      reasoningOutputTokens: 19,
     },
   ]);
   // Invariant: split preserves the reported total.
@@ -203,13 +207,19 @@ test("skips corrupt lines without aborting the whole file", async () => {
 });
 
 const at = (timestamp, line) => ({ timestamp, ...line });
-const byDay = async (lines, copied) => rolloutUsageByDay(readRollout(await writeRollout(lines)).events, copied);
-const entry = (model, inputTokens, outputTokens, cacheReadTokens = 0) => ({
+const byDay = async (lines, copied) => rolloutUsageByDay(readRollout(await writeRollout(lines)), copied);
+const entry = (model, inputTokens, outputTokens, cacheReadTokens = 0, extra = {}) => ({
   model,
   inputTokens,
   outputTokens,
   cacheReadTokens,
   cacheWriteTokens: 0,
+  reasoningOutputTokens: 0,
+  ...extra,
+});
+const record = (responseId, usage) => ({
+  type: "token_usage_record",
+  payload: { response_id: responseId, usage },
 });
 
 test("readRollout returns the session_meta payload and each token_count with its model", async () => {
@@ -240,7 +250,9 @@ test("splits cached tokens out of input_tokens", async () => {
       }),
     ),
   ]);
-  assert.deepEqual(days, { "2026-09-20": { "gpt-5.5": entry("gpt-5.5", 4135, 39, 9088) } });
+  assert.deepEqual(days, {
+    "2026-09-20": { "gpt-5.5": entry("gpt-5.5", 4135, 39, 9088, { reasoningOutputTokens: 19 }) },
+  });
 });
 
 test("puts each token_count's growth on its own UTC day and counts repeated totals once", async () => {
@@ -289,7 +301,7 @@ test("copied events set the starting totals and count nothing", async () => {
       at("2026-09-21T09:00:00Z", tokenCount({ input_tokens: 300, output_tokens: 30 })),
       at("2026-09-21T10:00:00Z", tokenCount({ input_tokens: 340, output_tokens: 33 })),
     ],
-    2,
+    { events: 2 },
   );
   assert.deepEqual(days, { "2026-09-21": { "gpt-5.5": entry("gpt-5.5", 40, 3) } });
 });
@@ -307,7 +319,99 @@ test("uses 'unknown' when no turn_context names a model, and skips corrupt lines
     ].join("\n"),
     "utf8",
   );
-  assert.deepEqual(rolloutUsageByDay(readRollout(file).events), {
+  assert.deepEqual(rolloutUsageByDay(readRollout(file)), {
     "2026-09-20": { unknown: entry("unknown", 70, 8, 10) },
   });
+});
+
+// Codex 0.153+ writes one token_usage_record per completed Responses API request
+// (codex-rs/core/src/session/mod.rs record_observed_response_completed).
+test("counts token_usage_record usage, including a compaction request no token_count reports", async () => {
+  const days = await byDay([
+    { type: "turn_context", payload: { model: "gpt-5.5" } },
+    at(
+      "2026-09-07T13:05:00Z",
+      record("resp-1", {
+        input_tokens: 21688,
+        cached_input_tokens: 0,
+        output_tokens: 478,
+        reasoning_output_tokens: 343,
+        total_tokens: 22166,
+      }),
+    ),
+    at("2026-09-07T13:05:01Z", tokenCount({ input_tokens: 21688, output_tokens: 478 })),
+    at(
+      "2026-09-07T13:40:00Z",
+      record("resp-compact", {
+        input_tokens: 230969,
+        cached_input_tokens: 118272,
+        output_tokens: 4520,
+        total_tokens: 235489,
+      }),
+    ),
+    at("2026-09-07T13:40:01Z", tokenCount({ input_tokens: 21688, output_tokens: 478 })),
+  ]);
+  assert.deepEqual(days, {
+    "2026-09-07": {
+      "gpt-5.5": entry("gpt-5.5", 21688 + 112697, 478 + 4520, 118272, { reasoningOutputTokens: 343 }),
+    },
+  });
+});
+
+test("counts token_count growth up to the first token_usage_record, then the records", async () => {
+  const days = await byDay([
+    { type: "turn_context", payload: { model: "gpt-5.5" } },
+    at("2026-09-01T09:00:00Z", tokenCount({ input_tokens: 100, output_tokens: 10 })),
+    at("2026-09-08T09:00:00Z", record("resp-1", { input_tokens: 50, output_tokens: 5 })),
+    at("2026-09-08T09:00:01Z", tokenCount({ input_tokens: 150, output_tokens: 15 })),
+    at("2026-09-08T10:00:00Z", record("resp-2", { input_tokens: 20, output_tokens: 2 })),
+    at("2026-09-08T10:00:01Z", tokenCount({ input_tokens: 170, output_tokens: 17 })),
+  ]);
+  assert.deepEqual(days, {
+    "2026-09-01": { "gpt-5.5": entry("gpt-5.5", 100, 10) },
+    "2026-09-08": { "gpt-5.5": entry("gpt-5.5", 70, 7) },
+  });
+});
+
+test("copied token_usage_records count nothing", async () => {
+  const days = await byDay(
+    [
+      { type: "turn_context", payload: { model: "gpt-5.5" } },
+      at("2026-09-08T09:00:00Z", record("resp-1", { input_tokens: 50, output_tokens: 5 })),
+      at("2026-09-08T09:00:00Z", record("resp-2", { input_tokens: 20, output_tokens: 2 })),
+      at("2026-09-09T09:00:00Z", record("resp-3", { input_tokens: 9, output_tokens: 1 })),
+    ],
+    { records: 2 },
+  );
+  assert.deepEqual(days, { "2026-09-09": { "gpt-5.5": entry("gpt-5.5", 9, 1) } });
+});
+
+test("cache writes come out of input_tokens as cacheWriteTokens", async () => {
+  const days = await byDay([
+    { type: "turn_context", payload: { model: "gpt-5.5" } },
+    at(
+      "2026-09-08T09:00:00Z",
+      record("resp-1", {
+        input_tokens: 100,
+        cached_input_tokens: 20,
+        cache_write_input_tokens: 30,
+        output_tokens: 5,
+      }),
+    ),
+  ]);
+  assert.deepEqual(days, {
+    "2026-09-08": { "gpt-5.5": entry("gpt-5.5", 50, 5, 20, { cacheWriteTokens: 30 }) },
+  });
+});
+
+test("readRollout returns each token_usage_record with its response id and model", async () => {
+  const { records } = readRollout(
+    await writeRollout([
+      { type: "turn_context", payload: { model: "gpt-5.5" } },
+      at("2026-09-08T09:00:00Z", record("resp-1", { input_tokens: 5 })),
+    ]),
+  );
+  assert.deepEqual(records, [
+    { model: "gpt-5.5", usage: { input_tokens: 5 }, responseId: "resp-1", timestamp: "2026-09-08T09:00:00Z" },
+  ]);
 });

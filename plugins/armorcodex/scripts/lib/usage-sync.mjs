@@ -47,20 +47,31 @@ export async function listRollouts(roots) {
 
 const rolloutId = (file) => path.basename(file).match(ROLLOUT_RE)[1];
 
-function copiedPrefix(events, originalPath) {
-  const original = new Set(readRollout(originalPath).events.map((e) => usageSignature(e.totals)));
-  let copied = 0;
-  while (copied < events.length && original.has(usageSignature(events[copied].totals))) copied++;
-  return copied;
+const leading = (items, has) => {
+  let n = 0;
+  while (n < items.length && has(items[n])) n++;
+  return n;
+};
+
+function copiedPrefix({ events, records }, originalPath) {
+  const original = readRollout(originalPath);
+  const totals = new Set(original.events.map((e) => usageSignature(e.totals)));
+  const responses = new Set(original.records.map((r) => r.responseId).filter(Boolean));
+  return {
+    events: leading(events, (e) => totals.has(usageSignature(e.totals))),
+    records: leading(records, (r) => responses.has(r.responseId)),
+  };
 }
 
 /**
  * Parse one rollout into its state entry. A fork's copied history is found
- * once, by matching its leading token_count totals against its original's, and
- * kept as `copied` so later reads of the fork skip reading the original.
+ * once, by matching its leading token_count totals and token_usage_record
+ * response ids against its original's, and kept as `copied` so later reads of
+ * the fork skip reading the original.
  */
 function readFileState(file, [size, mtimeMs], prev, rolloutsById, report) {
-  const { meta, events } = readRollout(file);
+  const rollout = readRollout(file);
+  const { meta } = rollout;
   const id = typeof meta?.id === "string" && meta.id ? meta.id : rolloutId(file);
   const sessionId =
     typeof meta?.session_id === "string" && meta.session_id ? meta.session_id : id;
@@ -68,7 +79,7 @@ function readFileState(file, [size, mtimeMs], prev, rolloutsById, report) {
   const originalPath = rolloutsById.get(meta?.forked_from_id);
   if (meta?.forked_from_id && copied === undefined) {
     try {
-      copied = copiedPrefix(events, originalPath);
+      copied = copiedPrefix(rollout, originalPath);
     } catch {
       report.forksWithoutOriginal++;
     }
@@ -80,7 +91,7 @@ function readFileState(file, [size, mtimeMs], prev, rolloutsById, report) {
     sessionId,
     ...(typeof meta?.cwd === "string" && meta.cwd ? { cwd: meta.cwd } : {}),
     ...(copied !== undefined ? { copied } : {}),
-    days: rolloutUsageByDay(events, copied ?? 0),
+    days: rolloutUsageByDay(rollout, copied),
   };
 }
 
@@ -92,6 +103,7 @@ const zeroEntry = (model) => ({
   outputTokens: 0,
   cacheReadTokens: 0,
   cacheWriteTokens: 0,
+  reasoningOutputTokens: 0,
 });
 
 function sessionDays(fileEntries) {
