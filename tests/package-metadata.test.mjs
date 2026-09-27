@@ -20,7 +20,7 @@ test("release metadata uses the registry SDK and one ArmorCodex version", () => 
   assert.match(lockedSdk.resolved, /^https:\/\/registry\.npmjs\.org\//);
   assert.equal(
     lockedSdk.integrity,
-    "sha512-I/YjZrnOsbN4Yg3ZujEX91descHOf6K1Z1Kg2KfuTi019VPQaGfSdrda2Hx1VqLWxysw8UJil9BxZKRIVLHMrg==",
+    "sha512-m4zVP8TsTsKLXKxwdp9z94xCkJl5jUeqJvJRFdSendcVmlFYWbNbYtdDj+aJYsP1xwX20xtlvGOL1az6QUZsSA==",
   );
   assert.equal(lockedSdk.link, undefined);
   assert.equal(
