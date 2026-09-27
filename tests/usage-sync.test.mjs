@@ -36,7 +36,7 @@ const S3 = "019e0000-0000-7000-8000-000000000003";
 const A1 = "019e0000-0000-7000-8000-0000000000a1";
 const KEY = "ak_test_usage_sync_codex";
 
-const meta = (timestamp, payload) => ({ timestamp, type: "session_meta", payload });
+const meta = (timestamp, payload) => ({ timestamp, type: "session_meta", payload: { timestamp, ...payload } });
 const model = (timestamp, name) => ({ timestamp, type: "turn_context", payload: { model: name } });
 const count = (timestamp, input, output = 0) => ({
   timestamp,
@@ -59,17 +59,38 @@ function append(file, line) {
   appendFileSync(file, "\n" + JSON.stringify(line));
 }
 
-const s1History = [
-  meta("2026-09-20T09:00:00Z", { id: S1, session_id: S1, cwd: "/work/repo-a" }),
-  model("2026-09-20T09:00:01Z", "gpt-5.5"),
+const turnId = (iso, n) => {
+  const hex = Date.parse(iso).toString(16).padStart(12, "0");
+  return `${hex.slice(0, 8)}-${hex.slice(8)}-7000-8000-${String(n).padStart(12, "0")}`;
+};
+const turn = (timestamp, id) => ({
+  timestamp,
+  type: "event_msg",
+  payload: { type: "task_started", turn_id: id, started_at: Math.floor(Date.parse(timestamp) / 1000) },
+});
+const copyOf = (lines, timestamp) => lines.map((l) => ({ ...l, timestamp }));
+
+const T1 = turnId("2026-09-20T09:00:30Z", 1);
+const s1Turn = [
+  turn("2026-09-20T09:00:30Z", T1),
+  model("2026-09-20T09:00:31Z", "gpt-5.5"),
   count("2026-09-20T09:01:00Z", 60, 10),
   count("2026-09-20T09:02:00Z", 90, 10),
 ];
+const s1History = [meta("2026-09-20T09:00:00Z", { id: S1, session_id: S1, cwd: "/work/repo-a" }), ...s1Turn];
+
+const forkOf = (id, original, created, copied, own) => [
+  meta(created, { id, session_id: id, forked_from_id: original, cwd: "/work/repo-b" }),
+  ...copyOf(copied, created),
+  ...own,
+];
+const s2Own = [turn("2026-09-22T09:04:00Z", turnId("2026-09-22T09:04:00Z", 2)), count("2026-09-22T09:05:00Z", 95, 10)];
 
 function fixtureHome() {
   const home = mkdtempSync(path.join(tmpdir(), "acx-usage-sync-"));
   writeRollout(rolloutPath(home, "2026-09-20", S1), [
     ...s1History,
+    turn("2026-09-21T09:59:00Z", turnId("2026-09-21T09:59:00Z", 3)),
     count("2026-09-21T10:00:00Z", 140, 10),
   ]);
   writeRollout(rolloutPath(home, "2026-09-20", A1), [
@@ -82,11 +103,7 @@ function fixtureHome() {
     model("2026-09-20T09:03:01Z", "gpt-5.5-mini"),
     count("2026-09-20T09:04:00Z", 7),
   ]);
-  writeRollout(rolloutPath(home, "2026-09-22", S2), [
-    meta("2026-09-22T09:00:00Z", { id: S2, session_id: S2, forked_from_id: S1, cwd: "/work/repo-b" }),
-    ...s1History.slice(1).map((l) => ({ ...l, timestamp: "2026-09-22T09:00:01Z" })),
-    count("2026-09-22T09:05:00Z", 95, 10),
-  ]);
+  writeRollout(rolloutPath(home, "2026-09-22", S2), forkOf(S2, S1, "2026-09-22T09:00:00Z", s1Turn, s2Own));
   writeRollout(rolloutPath(home, "2026-09-19", S3, "archived_sessions"), [
     meta("2026-09-19T09:00:00Z", { id: S3, session_id: S3, cwd: "/work/repo-c" }),
     model("2026-09-19T09:00:01Z", "gpt-5.5"),
@@ -208,14 +225,96 @@ test("a fork keeps skipping its copied history after its original is gone", asyn
   assert.equal(report.forksWithoutOriginal, 0);
 });
 
-test("a fork whose original was never seen counts all of its history", async () => {
+test("a fork whose original is gone counts the copied turn once, on the day it ran, under the original", async () => {
   const home = fixtureHome();
   rmSync(rolloutPath(home, "2026-09-20", S1));
   const { rows, report } = await run(home, await emptyState(home));
-  assert.deepEqual(
-    summary(rows.filter((r) => r.sessionId === S2)),
-    [[S2, "2026-09-22", "gpt-5.5=105"]]
+  assert.deepEqual(summary(rows), [
+    [S1, "2026-09-20", "gpt-5.5-mini=7", "gpt-5.5=100"],
+    [S2, "2026-09-22", "gpt-5.5=5"],
+    [S3, "2026-09-19", "gpt-5.5=30"],
+  ]);
+  assert.equal(report.copiedTurns, 1);
+  assert.equal(report.forksWithoutOriginal, 0);
+});
+
+test("two forks of a missing original count its copied turn once, from the longest copy", async () => {
+  const home = fixtureHome();
+  const S4 = "019e0000-0000-7000-8000-000000000004";
+  rmSync(rolloutPath(home, "2026-09-20", S1));
+  rmSync(rolloutPath(home, "2026-09-20", A1));
+  writeRollout(rolloutPath(home, "2026-09-23", S4), forkOf(S4, S1, "2026-09-23T09:00:00Z", s1Turn.slice(0, 3), []));
+  const { rows, report } = await run(home, await emptyState(home));
+  assert.deepEqual(summary(rows), [
+    [S1, "2026-09-20", "gpt-5.5=100"],
+    [S2, "2026-09-22", "gpt-5.5=5"],
+    [S3, "2026-09-19", "gpt-5.5=30"],
+  ]);
+  assert.equal(report.copiedTurns, 1);
+});
+
+test("a fork of a missing fork counts each copied turn under the session that ran it", async () => {
+  const home = fixtureHome();
+  const S4 = "019e0000-0000-7000-8000-000000000004";
+  rmSync(rolloutPath(home, "2026-09-22", S2));
+  writeRollout(
+    rolloutPath(home, "2026-09-24", S4),
+    forkOf(S4, S2, "2026-09-24T09:00:00Z", [...s1Turn, ...s2Own], [
+      turn("2026-09-24T09:10:00Z", turnId("2026-09-24T09:10:00Z", 4)),
+      count("2026-09-24T09:11:00Z", 125, 11),
+    ])
   );
+  const { rows, report } = await run(home, await emptyState(home));
+  assert.deepEqual(summary(rows), [
+    [S1, "2026-09-20", "gpt-5.5=100", "gpt-5.5-mini=7"],
+    [S1, "2026-09-21", "gpt-5.5=50"],
+    [S2, "2026-09-22", "gpt-5.5=5"],
+    [S3, "2026-09-19", "gpt-5.5=30"],
+    [S4, "2026-09-24", "gpt-5.5=31"],
+  ]);
+  assert.equal(report.copiedTurns, 1);
+});
+
+test("copies that name different originals count the turn under the oldest one", async () => {
+  const home = fixtureHome();
+  const S4 = "019e0000-0000-7000-8000-000000000004";
+  rmSync(rolloutPath(home, "2026-09-20", S1));
+  rmSync(rolloutPath(home, "2026-09-20", A1));
+  writeRollout(
+    rolloutPath(home, "2026-09-24", S4),
+    forkOf(S4, S2, "2026-09-24T09:00:00Z", [...s1Turn, ...s2Own], [])
+  );
+  const { rows, report } = await run(home, await emptyState(home));
+  assert.deepEqual(summary(rows), [
+    [S1, "2026-09-20", "gpt-5.5=100"],
+    [S2, "2026-09-22", "gpt-5.5=5"],
+    [S3, "2026-09-19", "gpt-5.5=30"],
+  ]);
+  assert.equal(report.copiedTurns, 1);
+});
+
+test("an original that turns up later takes its turn back from the copy", async () => {
+  const home = fixtureHome();
+  const original = readFileSync(rolloutPath(home, "2026-09-20", S1), "utf8");
+  rmSync(rolloutPath(home, "2026-09-20", S1));
+  const state = await emptyState(home);
+  await run(home, state);
+  writeFileSync(rolloutPath(home, "2026-09-20", S1), original);
+  const { rows, report } = await run(home, state);
+  assert.deepEqual(summary(rows), [[S1, "2026-09-21", "gpt-5.5=50"]]);
+  assert.equal(report.copiedTurns, 0);
+});
+
+test("a fork without turn ids counts all of its history when its original was never seen", async () => {
+  const home = mkdtempSync(path.join(tmpdir(), "acx-usage-turnless-"));
+  const S4 = "019e0000-0000-7000-8000-000000000004";
+  writeRollout(rolloutPath(home, "2026-09-22", S4), [
+    meta("2026-09-22T09:00:00Z", { id: S4, session_id: S4, forked_from_id: S1, cwd: "/work/repo-b" }),
+    ...copyOf(s1History.slice(2), "2026-09-22T09:00:01Z"),
+    count("2026-09-22T09:05:00Z", 95, 10),
+  ]);
+  const { rows, report } = await run(home, await emptyState(home));
+  assert.deepEqual(summary(rows), [[S4, "2026-09-22", "gpt-5.5=105"]]);
   assert.equal(report.forksWithoutOriginal, 1);
 });
 

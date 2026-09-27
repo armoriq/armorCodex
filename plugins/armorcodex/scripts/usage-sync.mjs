@@ -89,7 +89,8 @@ async function syncPass({ config, statePath, deadline }) {
       `${report.changed} changed, ${report.read} read, ${report.sessions} session(s); ` +
       `${verb} ${report.sessionDays} session-day(s) (${report.tokens} tokens), ` +
       `${report.failed} failed, ${report.left} left for the next run, ` +
-      `${report.forksWithoutOriginal} fork(s) without their original, ${Date.now() - started}ms`
+      `${report.copiedTurns} copied turn(s) whose original is gone, ` +
+      `${report.forksWithoutOriginal} fork(s) without turn ids or their original, ${Date.now() - started}ms`
   );
   if (report.failed) process.exitCode = 1;
 }
