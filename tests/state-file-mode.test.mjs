@@ -1,15 +1,24 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { writeJson } from "../plugins/armorcodex/scripts/lib/fs-store.mjs";
+import { appendNdjsonLine, writeJson } from "../plugins/armorcodex/scripts/lib/fs-store.mjs";
+import { createAuditWal } from "../plugins/armorcodex/scripts/lib/audit-wal.mjs";
 import { handleUserPromptSubmit } from "../plugins/armorcodex/scripts/lib/engine.mjs";
 
 process.umask(0o022);
 
 async function modeOf(file) {
   return (await stat(file)).mode & 0o777;
+}
+
+async function openDataDir() {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorcodex-mode-"));
+  const dataDir = path.join(tmp, "armorcodex");
+  await mkdir(dataDir, { mode: 0o755 });
+  await chmod(dataDir, 0o755);
+  return dataDir;
 }
 
 test("runtime.json holding the prompt is owner-only", async () => {
@@ -43,4 +52,58 @@ test("writeJson replaces a world-readable file with an owner-only one", async ()
   await writeJson(file, { secret: "x" });
   assert.equal(await modeOf(file), 0o600);
   assert.deepEqual(JSON.parse(await readFile(file, "utf8")), { secret: "x" });
+});
+
+test("writeJson creates a missing data dir 0700 and closes an existing 0755 one", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorcodex-mode-"));
+  const fresh = path.join(tmp, "fresh", "armorcodex");
+  await writeJson(path.join(fresh, "runtime.json"), {});
+  assert.equal(await modeOf(fresh), 0o700);
+
+  const dataDir = await openDataDir();
+  await writeJson(path.join(dataDir, "runtime.json"), {});
+  assert.equal(await modeOf(dataDir), 0o700);
+});
+
+test("the audit WAL holding tool inputs is owner-only", async () => {
+  const dataDir = await openDataDir();
+  const wal = createAuditWal({ dataDir });
+  await wal.appendLine({ tool: "Bash", input: { command: "curl -H 'Authorization: Bearer abc123'" } });
+  const { currentPath, offsetPath, archiveDir } = wal._paths;
+  assert.match(await readFile(currentPath, "utf8"), /Bearer abc123/);
+  assert.equal(await modeOf(currentPath), 0o600);
+  assert.equal(await modeOf(path.dirname(currentPath)), 0o700);
+  assert.equal(await modeOf(archiveDir), 0o700);
+
+  const { endOffset } = await wal.readBatch();
+  await wal.advanceOffset(endOffset);
+  assert.equal(await modeOf(offsetPath), 0o600);
+});
+
+test("the audit WAL closes an existing 0644 log in a 0755 dir", async () => {
+  const dataDir = await openDataDir();
+  const auditDir = path.join(dataDir, "audit");
+  await mkdir(path.join(auditDir, "archive"), { recursive: true, mode: 0o755 });
+  await chmod(auditDir, 0o755);
+  await chmod(path.join(auditDir, "archive"), 0o755);
+  const currentPath = path.join(auditDir, "current.jsonl");
+  await writeFile(currentPath, `${JSON.stringify({ tool: "Bash" })}\n`);
+  await chmod(currentPath, 0o644);
+
+  const wal = createAuditWal({ dataDir });
+  await wal.appendLine({ tool: "Read" });
+  assert.equal(await modeOf(currentPath), 0o600);
+  assert.equal(await modeOf(auditDir), 0o700);
+  assert.equal(await modeOf(path.join(auditDir, "archive")), 0o700);
+  assert.equal((await readFile(currentPath, "utf8")).trim().split("\n").length, 2);
+});
+
+test("appendNdjsonLine closes an existing 0644 turn log", async () => {
+  const dataDir = await openDataDir();
+  const file = path.join(dataDir, "obs-turn.x.ndjson");
+  await writeFile(file, "");
+  await chmod(file, 0o644);
+  await appendNdjsonLine(file, { prompt: "deploy with token abc123" });
+  assert.equal(await modeOf(file), 0o600);
+  assert.equal(await modeOf(dataDir), 0o700);
 });
