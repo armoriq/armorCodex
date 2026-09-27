@@ -6,9 +6,14 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { randomUUID } from "node:crypto";
+import { createRequire } from "node:module";
 
 import { denyPermissionRequest } from "../plugins/armorcodex/scripts/lib/hook-output.mjs";
 import { observeHook } from "../plugins/armorcodex/scripts/lib/observability.mjs";
+
+const { OtelSession } = createRequire(new URL("../plugins/armorcodex/package.json", import.meta.url))(
+  "@armoriq/sdk-dev",
+);
 
 function protoFields(buf) {
   const fields = [];
@@ -226,7 +231,8 @@ test("Stop ships exactly one per-turn generation span without cumulative double 
     .filter((span) => span.name === "gen_ai.chat");
   assert.equal(generationSpans.length, 2);
   for (const span of generationSpans) {
-    assert.ok(span.attributes["gen_ai.usage.cost_usd"] > 0);
+    assert.equal(span.attributes["gen_ai.usage.cost_usd"], undefined);
+    assert.equal(span.attributes["armoriq.cost.provenance"], undefined);
     assert.equal(span.attributes["armoriq.session_id"], sessionId);
   }
 
@@ -251,6 +257,52 @@ test("Stop ships exactly one per-turn generation span without cumulative double 
     outputTokens: finalTotals.output_tokens,
     cacheReadTokens: finalTotals.cached_input_tokens,
   });
+});
+
+test("Stop still ships the turn and logs the error when a model span fails", async (t) => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "armorcodex-obs-"));
+  const rolloutPath = path.join(dataDir, "rollout.jsonl");
+  const ingest = await startIngestServer();
+  t.after(async () => {
+    await ingest.close();
+    await rm(dataDir, { recursive: true, force: true });
+  });
+  t.mock.method(OtelSession.prototype, "beginModel", async () => {
+    throw new Error("model span failed");
+  });
+  const stderr = [];
+  t.mock.method(process.stderr, "write", (chunk) => {
+    stderr.push(String(chunk));
+    return true;
+  });
+
+  const sessionId = randomUUID();
+  const config = obsConfig(dataDir, ingest.endpoint);
+  const totals = { input_tokens: 120, cached_input_tokens: 20, output_tokens: 10, total_tokens: 130 };
+  await writeFile(
+    rolloutPath,
+    [
+      { type: "event_msg", payload: { type: "task_started" } },
+      { type: "turn_context", payload: { model: "gpt-4.1" } },
+      tokenCount(totals, totals),
+    ]
+      .map((line) => JSON.stringify(line))
+      .join("\n"),
+    "utf8",
+  );
+  await observeHook("UserPromptSubmit", { session_id: sessionId, prompt: "List" }, null, config);
+  await observeHook(
+    "PreToolUse",
+    { session_id: sessionId, tool_name: "Bash", tool_input: { command: "ls" } },
+    { hookSpecificOutput: { permissionDecision: "allow" } },
+    config,
+  );
+  await observeHook("Stop", { session_id: sessionId, transcript_path: rolloutPath }, null, config);
+
+  const names = ingest.exports.flatMap((e) => e.spans).map((span) => span.name).sort();
+  assert.deepEqual(names, ["armoriq.agent.run", "armoriq.policy.evaluate"]);
+  assert.match(stderr.join(""), /Stop could not replay the turn: model span failed/);
+  assert.deepEqual(await readdir(dataDir), ["rollout.jsonl"]);
 });
 
 test("PermissionRequest denial ships as a denied policy call with its reason", async (t) => {
