@@ -3,11 +3,13 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import {
   appendFileSync,
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { createServer } from "node:http";
@@ -651,6 +653,62 @@ test("SessionStart and Stop hooks run the sync, which posts each session-hour wi
     );
     assert.equal(posts.at(-1).entries[0].inputTokens, 10);
   } finally {
+    server.close();
+  }
+});
+
+test("the hooks leave the usage sync log, request marker, lock and state owner-only (#106)", async () => {
+  process.umask(0o022);
+  const modeOf = (file) => statSync(file).mode & 0o777;
+  const home = fixtureHome();
+  const dataDir = path.join(home, "data");
+  const statePath = path.join(dataDir, "usage-sync-state.json");
+  const logPath = path.join(dataDir, "usage-sync.log");
+  mkdirSync(dataDir, { mode: 0o755 });
+  chmodSync(dataDir, 0o755);
+  for (const file of [logPath, `${statePath}.request`]) {
+    writeFileSync(file, "old");
+    chmodSync(file, 0o644);
+  }
+
+  const posts = [];
+  let release;
+  const held = new Promise((resolve) => (release = resolve));
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", async () => {
+      if (req.method === "POST" && req.url === "/dashboard/token-usage") {
+        posts.push(JSON.parse(body));
+        await held;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end('{"ok":true}');
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const stop = await node(
+      [ROUTER],
+      { ...baseEnv(home, server.address().port), CODEX_PLUGIN_OPTION_API_KEY: KEY },
+      JSON.stringify({
+        hook_event_name: "Stop",
+        session_id: S2,
+        cwd: "/work/repo-b",
+        transcript_path: rolloutPath(home, "2026-09-22", S2),
+      })
+    );
+    assert.equal(stop.status, 0, stop.stderr);
+    await until(() => posts.length > 0, "the first post");
+    assert.equal(modeOf(`${statePath}.lock`), 0o600);
+    release();
+    await until(() => readLastRun(statePath) !== undefined && !existsSync(`${statePath}.lock`), "the pass");
+    assert.equal(modeOf(dataDir), 0o700);
+    for (const file of [statePath, logPath, `${statePath}.request`]) {
+      assert.equal(modeOf(file), 0o600, file);
+    }
+  } finally {
+    release();
     server.close();
   }
 });
