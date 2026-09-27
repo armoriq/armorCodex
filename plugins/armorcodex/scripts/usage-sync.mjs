@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Uploads token usage for every local Codex session, with or without
-// ArmorCodex, one row per session-day to POST {backendEndpoint}/dashboard/token-usage.
+// ArmorCodex, one row per session and UTC hour to POST {backendEndpoint}/dashboard/token-usage.
 // It is the only writer of those rows. The hook router launches it on
 // SessionStart and after each Stop; it can also be run by hand.
 //
@@ -87,7 +87,7 @@ async function syncPass({ config, statePath, deadline }) {
   log(
     `${report.rollouts} rollout(s) under ${ROOTS.join(", ")} (${report.other} other file(s)); ` +
       `${report.changed} changed, ${report.read} read, ${report.sessions} session(s); ` +
-      `${verb} ${report.sessionDays} session-day(s) (${report.tokens} tokens), ` +
+      `${verb} ${report.sessionHours} session-hour(s) (${report.tokens} tokens), ` +
       `${report.failed} failed, ${report.left} left for the next run, ` +
       `${report.copiedTurns} copied turn(s) whose original is gone, ` +
       `${report.forksWithoutOriginal} fork(s) without turn ids or their original, ${Date.now() - started}ms`

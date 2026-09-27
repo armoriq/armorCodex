@@ -5,7 +5,7 @@ All notable changes to ArmorCodex are recorded here. Format follows [Keep a Chan
 ## [0.3.3] - Unreleased
 
 ### Added
-- `scripts/usage-sync.mjs` uploads token usage for every local Codex session in `~/.codex/sessions` and `~/.codex/archived_sessions`, one row per session, model and day, with the repo path and device name. Sessions that ran without ArmorCodex post `armored: false`.
+- `scripts/usage-sync.mjs` uploads token usage for every local Codex session in `~/.codex/sessions` and `~/.codex/archived_sessions`, one row per session, model, UTC date and UTC hour, with the repo path and device name. Each post carries `usageDate` and `usageHour`, which the backend requires. Sessions that ran without ArmorCodex post `armored: false`.
 - `disable_usage_sync` plugin option and `ARMORCODEX_USAGE_SYNC_DISABLED`; turning off observability also turns the sync off.
 
 ### Changed
