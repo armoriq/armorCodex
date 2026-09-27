@@ -16,6 +16,23 @@ function pluginOpt(env, pluginKey, legacyKey) {
   return "";
 }
 
+const PRODUCT = "armorcodex";
+
+function normalizeBackend(url) {
+  if (typeof url !== "string" || !url.trim()) return "";
+  try {
+    const parsed = new URL(url.trim());
+    return `${parsed.origin}${parsed.pathname.replace(/\/+$/, "")}`;
+  } catch {
+    return "";
+  }
+}
+
+function savedLoginMatches(scope, backendEndpoint) {
+  const saved = normalizeBackend(scope.backend);
+  return scope.product === PRODUCT && saved !== "" && saved === normalizeBackend(backendEndpoint);
+}
+
 export function loadConfig(env = process.env) {
   const mode = (pluginOpt(env, "MODE", "ARMORCODEX_MODE") || "enforce").toLowerCase();
   const envMode = (env.ARMORIQ_ENV || "production").trim().toLowerCase();
@@ -65,12 +82,21 @@ export function loadConfig(env = process.env) {
 
   // API key resolution: plugin config → env var → ~/.armoriq/credentials.json
   let apiKey = pluginOpt(env, "API_KEY", "ARMORIQ_API_KEY");
+  let ignoredSavedCredential = null;
   if (!apiKey) {
     try {
       const credPath = path.join(homedir(), ".armoriq", "credentials.json");
       const creds = JSON.parse(readFileSync(credPath, "utf-8"));
       if (creds?.apiKey && typeof creds.apiKey === "string") {
-        apiKey = creds.apiKey;
+        const scope = {
+          product: typeof creds.product === "string" ? creds.product : "",
+          backend: typeof creds.backend === "string" ? creds.backend : ""
+        };
+        if (savedLoginMatches(scope, backendEndpoint)) {
+          apiKey = creds.apiKey;
+        } else {
+          ignoredSavedCredential = scope;
+        }
       }
     } catch {
       // no credentials file — local-only mode
@@ -98,6 +124,7 @@ export function loadConfig(env = process.env) {
     proxyEndpoint,
     csrgEndpoint,
     apiKey,
+    ignoredSavedCredential,
 
     // Observability ("Model A" trace export, per-plan via disk — see
     // scripts/lib/observability.mjs). Default ON whenever an API key is
