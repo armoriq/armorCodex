@@ -27,7 +27,7 @@ export async function writeJson(filePath, value) {
   const tmpPath = `${filePath}.tmp.${process.pid}.${Date.now()}`;
   const payload = JSON.stringify(value, null, 2);
   try {
-    await writeFile(tmpPath, payload, "utf8");
+    await writeFile(tmpPath, payload, { encoding: "utf8", mode: 0o600, flag: "wx" });
     await rename(tmpPath, filePath);
   } catch (error) {
     await unlink(tmpPath).catch(() => {});
