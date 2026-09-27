@@ -1,5 +1,5 @@
-import { mkdir, readFile, rename, unlink, writeFile, open } from "node:fs/promises";
-import { constants as fsConstants } from "node:fs";
+import { chmod, mkdir, open, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { chmodSync, closeSync, constants as fsConstants, fchmodSync, mkdirSync, openSync, statSync, writeSync } from "node:fs";
 import path from "node:path";
 
 export async function readJson(filePath, fallbackValue) {
@@ -19,19 +19,71 @@ export async function readJson(filePath, fallbackValue) {
   }
 }
 
+export const PRIVATE_FILE_MODE = 0o600;
+const PRIVATE_DIR_MODE = 0o700;
+
+function opensDirToOthers(st) {
+  return (st.mode & 0o777) !== PRIVATE_DIR_MODE && st.uid === process.getuid?.();
+}
+
+export async function ensurePrivateDir(dir) {
+  await mkdir(dir, { recursive: true, mode: PRIVATE_DIR_MODE });
+  if (opensDirToOthers(await stat(dir))) await chmod(dir, PRIVATE_DIR_MODE);
+}
+
+export function ensurePrivateDirSync(dir) {
+  mkdirSync(dir, { recursive: true, mode: PRIVATE_DIR_MODE });
+  if (opensDirToOthers(statSync(dir))) chmodSync(dir, PRIVATE_DIR_MODE);
+}
+
+export function openPrivateSync(filePath, flags) {
+  ensurePrivateDirSync(path.dirname(filePath));
+  const fd = openSync(filePath, flags, PRIVATE_FILE_MODE);
+  try {
+    fchmodSync(fd, PRIVATE_FILE_MODE);
+  } catch (error) {
+    closeSync(fd);
+    throw error;
+  }
+  return fd;
+}
+
+export function writePrivateFileSync(filePath, text) {
+  const fd = openPrivateSync(filePath, "w");
+  try {
+    writeSync(fd, text);
+  } finally {
+    closeSync(fd);
+  }
+}
+
 // Atomic write: write to a sibling tmp file then rename into place. Prevents
 // partial/torn JSON when two hooks (PreToolUse + PostToolUse) race or when the
 // process is killed mid-write.
-export async function writeJson(filePath, value) {
-  await mkdir(path.dirname(filePath), { recursive: true });
+export async function writePrivateFile(filePath, text) {
+  await ensurePrivateDir(path.dirname(filePath));
   const tmpPath = `${filePath}.tmp.${process.pid}.${Date.now()}`;
-  const payload = JSON.stringify(value, null, 2);
   try {
-    await writeFile(tmpPath, payload, "utf8");
+    await writeFile(tmpPath, text, { encoding: "utf8", mode: PRIVATE_FILE_MODE, flag: "wx" });
     await rename(tmpPath, filePath);
   } catch (error) {
     await unlink(tmpPath).catch(() => {});
     throw error;
+  }
+}
+
+export async function writeJson(filePath, value) {
+  await writePrivateFile(filePath, JSON.stringify(value, null, 2));
+}
+
+export async function appendPrivateFile(filePath, text) {
+  await ensurePrivateDir(path.dirname(filePath));
+  const handle = await open(filePath, fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_WRONLY, PRIVATE_FILE_MODE);
+  try {
+    await handle.chmod(PRIVATE_FILE_MODE);
+    await handle.write(text, null, "utf8");
+  } finally {
+    await handle.close();
   }
 }
 
@@ -54,7 +106,6 @@ export const NDJSON_APPEND_SAFE_BYTES = 3800;
 // interleaving. This is what makes multi-process accumulation race-free
 // without any lock: unlike read-modify-write, there is no read step to race.
 export async function appendNdjsonLine(filePath, value) {
-  await mkdir(path.dirname(filePath), { recursive: true });
   const line = `${JSON.stringify(value)}\n`;
   const bytes = Buffer.byteLength(line, "utf8");
   if (bytes > NDJSON_APPEND_SAFE_BYTES) {
@@ -65,12 +116,7 @@ export async function appendNdjsonLine(filePath, value) {
       `appendNdjsonLine: line of ${bytes} bytes exceeds atomic-append safe size (${NDJSON_APPEND_SAFE_BYTES})`
     );
   }
-  const handle = await open(filePath, fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_WRONLY, 0o600);
-  try {
-    await handle.write(line, null, "utf8");
-  } finally {
-    await handle.close();
-  }
+  await appendPrivateFile(filePath, line);
 }
 
 // Read an NDJSON file as an array of parsed values. Tolerates a torn last

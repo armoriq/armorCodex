@@ -3,18 +3,23 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import {
   appendFileSync,
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import dns from "node:dns";
+import net from "node:net";
 import { loadConfig } from "../plugins/armorcodex/scripts/lib/config.mjs";
+import { getSdkClient } from "../plugins/armorcodex/scripts/lib/intent.mjs";
 import { loadSyncState, syncUsage } from "../plugins/armorcodex/scripts/lib/usage-sync.mjs";
 import {
   launchUsageSync,
@@ -650,6 +655,133 @@ test("SessionStart and Stop hooks run the sync, which posts each session-hour wi
       [...expected, [S2, "2026-09-22", 10, "armorcodex", "/work/repo-b", 1]].sort()
     );
     assert.equal(posts.at(-1).entries[0].inputTokens, 10);
+  } finally {
+    server.close();
+  }
+});
+
+test("the hooks leave the usage sync log, request marker, lock and state owner-only (#106)", async () => {
+  process.umask(0o022);
+  const modeOf = (file) => statSync(file).mode & 0o777;
+  const home = fixtureHome();
+  const dataDir = path.join(home, "data");
+  const statePath = path.join(dataDir, "usage-sync-state.json");
+  const logPath = path.join(dataDir, "usage-sync.log");
+  mkdirSync(dataDir, { mode: 0o755 });
+  chmodSync(dataDir, 0o755);
+  for (const file of [logPath, `${statePath}.request`]) {
+    writeFileSync(file, "old");
+    chmodSync(file, 0o644);
+  }
+
+  const posts = [];
+  let release;
+  const held = new Promise((resolve) => (release = resolve));
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", async () => {
+      if (req.method === "POST" && req.url === "/dashboard/token-usage") {
+        posts.push(JSON.parse(body));
+        await held;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end('{"ok":true}');
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const stop = await node(
+      [ROUTER],
+      { ...baseEnv(home, server.address().port), CODEX_PLUGIN_OPTION_API_KEY: KEY },
+      JSON.stringify({
+        hook_event_name: "Stop",
+        session_id: S2,
+        cwd: "/work/repo-b",
+        transcript_path: rolloutPath(home, "2026-09-22", S2),
+      })
+    );
+    assert.equal(stop.status, 0, stop.stderr);
+    await until(() => posts.length > 0, "the first post");
+    assert.equal(modeOf(`${statePath}.lock`), 0o600);
+    release();
+    await until(() => readLastRun(statePath) !== undefined && !existsSync(`${statePath}.lock`), "the pass");
+    assert.equal(modeOf(dataDir), 0o700);
+    for (const file of [statePath, logPath, `${statePath}.request`]) {
+      assert.equal(modeOf(file), 0o600, file);
+    }
+  } finally {
+    release();
+    server.close();
+  }
+});
+
+const isLoopback = (host) =>
+  !host || host === "localhost" || host === "::1" || /^127\./.test(host) || /^::ffff:127\./.test(host);
+
+const OFF_BOX_GUARD = (log) => `
+const net = require("net"), dns = require("dns"), fs = require("fs");
+const loop = ${isLoopback.toString()};
+const note = (h) => fs.appendFileSync(${JSON.stringify(log)}, h + "\\n");
+const connect = net.Socket.prototype.connect;
+net.Socket.prototype.connect = function (...args) {
+  const o = Array.isArray(args[0]) ? args[0][0] : args[0];
+  const host = typeof o === "object" && o ? (o.path ? "" : o.host) : typeof args[1] === "string" ? args[1] : "";
+  if (!loop(host)) { note(host); const s = this; process.nextTick(() => s.destroy(new Error("off-box " + host))); return this; }
+  return connect.apply(this, args);
+};
+const lookup = dns.lookup;
+dns.lookup = function (h, ...rest) { if (!loop(h)) note(h); return lookup.call(this, h, ...rest); };
+`;
+
+test("a custom backend with no proxy or IAP still syncs usage, and the first proxy use names PROXY_ENDPOINT (R4-3)", async (t) => {
+  const home = fixtureHome();
+  const offBox = path.join(home, "off-box.log");
+  const guard = path.join(home, "guard.cjs");
+  writeFileSync(guard, OFF_BOX_GUARD(offBox));
+  const { server, posts, port } = await fakeBackend();
+  const env = { ...baseEnv(home, port), CODEX_PLUGIN_OPTION_API_KEY: KEY };
+  try {
+    const config = loadConfig(env);
+    assert.equal(config.backendEndpoint, `http://127.0.0.1:${port}`);
+    assert.equal(config.proxyEndpoint, "");
+    assert.equal(config.iapEndpoint, "");
+
+    const res = await node([SYNC], { ...env, NODE_OPTIONS: `--require ${guard}` });
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(posts.length, 4, res.stderr);
+    assert.ok(posts.every((p) => p.product === "armorcodex" && Number.isInteger(p.usageHour)));
+
+    const attempts = [];
+    t.mock.method(net.Socket.prototype, "connect", function (...args) {
+      const o = Array.isArray(args[0]) ? args[0][0] : args[0];
+      attempts.push(typeof o === "object" && o ? o.host : args[1]);
+      process.nextTick(() => this.destroy(new Error("connect refused in test")));
+      return this;
+    });
+    t.mock.method(dns, "lookup", (host, ...rest) => {
+      attempts.push(host);
+      rest.at(-1)(new Error("lookup refused in test"));
+    });
+    const client = getSdkClient(config);
+    assert.throws(() => client.proxyEndpoint, /PROXY_ENDPOINT/);
+    assert.throws(() => client.iapEndpoint, /IAP_ENDPOINT/);
+    const now = Date.now() / 1000;
+    const token = {
+      tokenId: "t",
+      planHash: "h",
+      signature: "sig",
+      issuedAt: now,
+      expiresAt: now + 3600,
+      policy: {},
+      compositeIdentity: "c",
+      stepProofs: [[]],
+      totalSteps: 1,
+      rawToken: { token: {}, plan: { steps: [{ action: "read_file", mcp: "fs" }] } },
+    };
+    await assert.rejects(client.invoke("fs", "read_file", token, {}), /PROXY_ENDPOINT/);
+    assert.deepEqual(attempts.filter((h) => !isLoopback(h)), []);
+    assert.equal(existsSync(offBox) ? readFileSync(offBox, "utf8") : "", "");
   } finally {
     server.close();
   }

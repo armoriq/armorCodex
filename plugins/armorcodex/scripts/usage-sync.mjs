@@ -12,12 +12,12 @@
 // --state   : state file to read and update.
 
 import { homedir } from "node:os";
-import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { loadConfig } from "./lib/config.mjs";
 import { deviceIdentity } from "./lib/device.mjs";
-import { writeJson } from "./lib/fs-store.mjs";
+import { ensurePrivateDir, PRIVATE_FILE_MODE, writeJson } from "./lib/fs-store.mjs";
 import { getSdkClient } from "./lib/intent.mjs";
 import { loadRuntimeState } from "./lib/runtime-state.mjs";
 import { loadSyncState, syncUsage } from "./lib/usage-sync.mjs";
@@ -38,10 +38,10 @@ function log(message) {
 }
 
 async function acquireLock(lockPath) {
-  await mkdir(path.dirname(lockPath), { recursive: true });
+  await ensurePrivateDir(path.dirname(lockPath));
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      await writeFile(lockPath, String(process.pid), { flag: "wx" });
+      await writeFile(lockPath, String(process.pid), { flag: "wx", mode: PRIVATE_FILE_MODE });
       return () => unlink(lockPath).catch(() => {});
     } catch (err) {
       if (err?.code !== "EEXIST") throw err;

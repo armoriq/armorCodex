@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
-import { closeSync, mkdirSync, openSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { ensurePrivateDirSync, openPrivateSync, writePrivateFileSync } from "./fs-store.mjs";
 
 const LOG_MAX_BYTES = 1024 * 1024;
 const SCRIPT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "usage-sync.mjs");
@@ -64,10 +65,10 @@ function logSize(logPath) {
 export function launchUsageSync(config) {
   if (!config?.usageSyncEnabled) return false;
   try {
-    mkdirSync(config.dataDir, { recursive: true });
+    ensurePrivateDirSync(config.dataDir);
     if (lockHeld(syncPaths(defaultStatePath(config.dataDir)).lock)) return true;
     const logPath = path.join(config.dataDir, "usage-sync.log");
-    const logFd = openSync(logPath, logSize(logPath) > LOG_MAX_BYTES ? "w" : "a");
+    const logFd = openPrivateSync(logPath, logSize(logPath) > LOG_MAX_BYTES ? "w" : "a");
     try {
       const child = spawn(process.execPath, [SCRIPT], {
         detached: true,
@@ -96,8 +97,7 @@ export function launchUsageSync(config) {
 export function requestUsageSync(config) {
   if (!config?.usageSyncEnabled) return false;
   try {
-    mkdirSync(config.dataDir, { recursive: true });
-    writeFileSync(syncPaths(defaultStatePath(config.dataDir)).request, String(Date.now()));
+    writePrivateFileSync(syncPaths(defaultStatePath(config.dataDir)).request, String(Date.now()));
   } catch (err) {
     process.stderr.write(`[armorcodex] usage sync request failed: ${err?.message ?? err}\n`);
     return false;
