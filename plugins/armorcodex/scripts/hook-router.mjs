@@ -1,3 +1,4 @@
+import { emitJson } from "./lib/hook-stdout.mjs";
 import { loadConfig } from "./lib/config.mjs";
 import { denyPermissionRequest, denyPreTool } from "./lib/hook-output.mjs";
 import {
@@ -20,10 +21,6 @@ async function readStdin() {
     chunks.push(chunk);
   }
   return Buffer.concat(chunks).toString("utf8");
-}
-
-function emitJson(value) {
-  process.stdout.write(`${JSON.stringify(value)}\n`);
 }
 
 function debugLog(config, message) {
