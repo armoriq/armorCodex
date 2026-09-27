@@ -46,7 +46,8 @@ test("release installer uses only the production SDK CLI", () => {
     "utf8",
   );
 
-  assert.match(installer, /https:\/\/tools\.armoriq\.ai/);
+  assert.match(installer, /DASHBOARD_URL="\$\{ARMORCODEX_DASHBOARD_URL:-https:\/\/platform\.armoriq\.ai\}"/);
+  assert.doesNotMatch(installer, /tools\.armoriq\.ai/);
   assert.match(installer, /npm install -g @armoriq\/sdk@latest/);
   assert.match(installer, /npx @armoriq\/sdk login/);
   assert.doesNotMatch(installer, /armoriq-dev/);
