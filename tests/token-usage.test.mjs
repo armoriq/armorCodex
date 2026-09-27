@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   readRollout,
-  rolloutUsageByDay,
+  rolloutUsage,
   summarizeCodexTurnUsage,
 } from "../plugins/armorcodex/scripts/lib/token-usage.mjs";
 
@@ -112,7 +112,8 @@ test("does not reuse the previous task when the latest task has no token count",
 });
 
 const at = (timestamp, line) => ({ timestamp, ...line });
-const byDay = async (lines, copied) => rolloutUsageByDay(readRollout(await writeRollout(lines)), copied);
+const usageOf = async (lines, copied) => rolloutUsage(readRollout(await writeRollout(lines)), copied);
+const byDay = async (lines, copied) => (await usageOf(lines, copied)).days;
 const entry = (model, inputTokens, outputTokens, cacheReadTokens = 0, extra = {}) => ({
   model,
   inputTokens,
@@ -224,7 +225,7 @@ test("uses 'unknown' when no turn_context names a model, and skips corrupt lines
     ].join("\n"),
     "utf8",
   );
-  assert.deepEqual(rolloutUsageByDay(readRollout(file)), {
+  assert.deepEqual(rolloutUsage(readRollout(file)).days, {
     "2026-09-20": { unknown: entry("unknown", 70, 8, 10) },
   });
 });
@@ -317,6 +318,81 @@ test("readRollout returns each token_usage_record with its response id and model
     ]),
   );
   assert.deepEqual(records, [
-    { model: "gpt-5.5", usage: { input_tokens: 5 }, responseId: "resp-1", timestamp: "2026-09-08T09:00:00Z" },
+    { model: "gpt-5.5", usage: { input_tokens: 5 }, responseId: "resp-1", timestamp: "2026-09-08T09:00:00Z", turn: null },
   ]);
+});
+
+const v7 = (iso) => {
+  const hex = Date.parse(iso).toString(16).padStart(12, "0");
+  return `${hex.slice(0, 8)}-${hex.slice(8)}-7000-8000-000000000001`;
+};
+const started = (turnId, iso) => ({
+  type: "event_msg",
+  payload: { type: "task_started", turn_id: turnId, started_at: Math.floor(Date.parse(iso) / 1000) },
+});
+
+test("a fork's copied turns are kept apart, dated by the turn's start", async () => {
+  const copiedTurn = v7("2026-09-20T23:59:30Z");
+  const ownTurn = v7("2026-09-22T09:04:00Z");
+  const usage = await usageOf([
+    at("2026-09-22T09:00:00Z", {
+      type: "session_meta",
+      payload: { id: "fork", forked_from_id: "original", timestamp: "2026-09-22T09:00:00Z" },
+    }),
+    at("2026-09-22T09:00:00Z", started(copiedTurn, "2026-09-20T23:59:30Z")),
+    at("2026-09-22T09:00:00Z", { type: "turn_context", payload: { model: "gpt-5.5" } }),
+    at("2026-09-22T09:00:00Z", tokenCount({ input_tokens: 100, output_tokens: 10 })),
+    at("2026-09-22T09:00:00Z", tokenCount({ input_tokens: 300, output_tokens: 30 })),
+    at("2026-09-22T09:04:00Z", started(ownTurn, "2026-09-22T09:04:00Z")),
+    at("2026-09-22T09:05:00Z", tokenCount({ input_tokens: 340, output_tokens: 33 })),
+  ]);
+  assert.deepEqual(usage, {
+    days: { "2026-09-22": { "gpt-5.5": entry("gpt-5.5", 40, 3) } },
+    turns: [ownTurn],
+    copiedTurns: {
+      [copiedTurn]: { usageDate: "2026-09-20", items: 2, models: { "gpt-5.5": entry("gpt-5.5", 300, 30) } },
+    },
+  });
+});
+
+test("a turn id that is not a UUIDv7 is dated by started_at", async () => {
+  const turnId = "43ad1418-d21c-40ec-979a-e809f11001a9";
+  const { days, copiedTurns } = await usageOf([
+    at("2026-09-22T09:00:00Z", {
+      type: "session_meta",
+      payload: { id: "fork", forked_from_id: "original", timestamp: "2026-09-22T09:00:00Z" },
+    }),
+    at("2026-09-22T09:00:00Z", started(turnId, "2026-09-21T08:00:00Z")),
+    at("2026-09-22T09:00:00Z", record("resp-1", { input_tokens: 50, output_tokens: 5 })),
+  ]);
+  assert.deepEqual(days, {});
+  assert.deepEqual(copiedTurns, {
+    [turnId]: { usageDate: "2026-09-21", items: 1, models: { unknown: entry("unknown", 50, 5) } },
+  });
+});
+
+test("a rollout that is not a fork has no copied turns", async () => {
+  const turnId = v7("2026-09-20T09:00:00Z");
+  const usage = await usageOf([
+    at("2026-09-21T09:00:00Z", { type: "session_meta", payload: { id: "s", timestamp: "2026-09-21T09:00:00Z" } }),
+    at("2026-09-21T09:00:00Z", started(turnId, "2026-09-20T09:00:00Z")),
+    at("2026-09-21T09:01:00Z", tokenCount({ input_tokens: 10, output_tokens: 1 })),
+  ]);
+  assert.deepEqual(usage.copiedTurns, {});
+  assert.deepEqual(usage.days, { "2026-09-21": { unknown: entry("unknown", 10, 1) } });
+});
+
+test("a turn that starts in the fork's first second is the fork's own", async () => {
+  const ownTurn = v7("2026-09-22T09:00:00.800Z");
+  const { days, turns, copiedTurns } = await usageOf([
+    at("2026-09-22T09:00:00.500Z", {
+      type: "session_meta",
+      payload: { id: "fork", forked_from_id: "original", timestamp: "2026-09-22T09:00:00.500Z" },
+    }),
+    at("2026-09-22T09:00:00.800Z", started(ownTurn, "2026-09-22T09:00:00.800Z")),
+    at("2026-09-22T09:00:05Z", tokenCount({ input_tokens: 10, output_tokens: 1 })),
+  ]);
+  assert.deepEqual(days, { "2026-09-22": { unknown: entry("unknown", 10, 1) } });
+  assert.deepEqual(turns, [ownTurn]);
+  assert.deepEqual(copiedTurns, {});
 });

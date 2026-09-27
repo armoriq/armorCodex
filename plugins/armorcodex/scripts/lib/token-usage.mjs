@@ -25,8 +25,9 @@
  *
  * `total_token_usage` is cumulative for the rollout file. A fork's file starts
  * with a copy of its original's lines, token_count events and records included,
- * and its counter continues from there. The counter can restart from zero
- * inside one file.
+ * and its counter continues from there. Every copied line carries the fork's
+ * write time as its timestamp; a copied task_started keeps its turn_id and
+ * started_at. The counter can restart from zero inside one file.
  *
  * Codex's `input_tokens` INCLUDES `cached_input_tokens` and
  * `cache_write_input_tokens`, and `output_tokens` includes
@@ -65,6 +66,7 @@ function parseRollout(raw) {
   let currentModel = "";
   let taskSequence = -1;
   let timestamp = "";
+  let turn = null;
   const events = [];
   const records = [];
 
@@ -90,6 +92,7 @@ function parseRollout(raw) {
 
     if (obj.type === "event_msg" && payload.type === "task_started") {
       taskSequence += 1;
+      turn = readTurn(payload);
       continue;
     }
 
@@ -105,6 +108,7 @@ function parseRollout(raw) {
           usage: payload.usage,
           responseId: typeof payload.response_id === "string" ? payload.response_id : "",
           timestamp,
+          turn,
         });
       }
       continue;
@@ -126,6 +130,7 @@ function parseRollout(raw) {
           ? info.last_token_usage
           : null,
       timestamp,
+      turn,
       afterRecord: records.length > 0,
     });
   }
@@ -160,23 +165,54 @@ export function sumEntries(a, b) {
   };
 }
 
+const UUID_V7 = /^([0-9a-f]{8})-([0-9a-f]{4})-7[0-9a-f]{3}-/i;
+
+function readTurn(payload) {
+  const id = typeof payload.turn_id === "string" ? payload.turn_id : "";
+  const v7 = UUID_V7.exec(id);
+  const time = v7
+    ? parseInt(v7[1] + v7[2], 16)
+    : typeof payload.started_at === "number"
+      ? payload.started_at * 1000
+      : NaN;
+  return id && Number.isFinite(time) ? { id, time } : null;
+}
+
+const utcDay = (time) => new Date(time).toISOString().slice(0, 10);
+
 /**
- * Per-UTC-day, per-model usage of one rollout. Up to its first
+ * Usage of one rollout, per UTC day and model. Up to its first
  * token_usage_record it is the growth of the cumulative totals between
  * token_count events; a total lower than the one before starts a new count
- * from zero. From then on it is the sum of the records. The first
- * `copied.events` token_count events and `copied.records` records are history
- * copied from another rollout and count nothing; the copied events still set
- * the starting totals. Returns { "YYYY-MM-DD": { model: entry } }.
+ * from zero. From then on it is the sum of the records.
+ *
+ * In a fork, usage inside a turn that started before the fork was created is
+ * history copied from another rollout. It lands in `copiedTurns[turnId]`,
+ * dated by the turn's start, with `items` the number of usage lines copied.
+ * The first `copied.events` token_count events and `copied.records` records
+ * count nothing, for forks whose turns carry no id. Copied events still set
+ * the starting totals. `turns` lists the ids of the rollout's own turns.
  */
-export function rolloutUsageByDay({ events, records }, copied = {}) {
+export function rolloutUsage({ meta, events, records }, copied = {}) {
+  const createdAt = meta?.forked_from_id ? Date.parse(meta.timestamp) : NaN;
   const days = {};
-  const add = (model, usage, timestamp) => {
-    const time = Date.parse(timestamp);
-    const [entry] = usageEntry(model, usage);
-    if (!entry || Number.isNaN(time)) return;
-    const day = (days[new Date(time).toISOString().slice(0, 10)] ??= {});
-    day[entry.model] = sumEntries(day[entry.model], entry);
+  const turns = new Set();
+  const copiedTurns = {};
+  const add = (item, usage) => {
+    const [entry] = usageEntry(item.model, usage);
+    if (!entry) return;
+    let models;
+    if (item.turn && item.turn.time < createdAt) {
+      const turn = (copiedTurns[item.turn.id] ??= { usageDate: utcDay(item.turn.time), items: 0, models: {} });
+      turn.items++;
+      models = turn.models;
+    } else {
+      const time = Date.parse(item.timestamp);
+      if (Number.isNaN(time)) return;
+      if (item.turn) turns.add(item.turn.id);
+      models = days[utcDay(time)] ??= {};
+    }
+    models[entry.model] = sumEntries(models[entry.model], entry);
   };
   let prev = null;
   for (const [i, event] of events.entries()) {
@@ -185,12 +221,10 @@ export function rolloutUsageByDay({ events, records }, copied = {}) {
     const base = prev && !reset ? prev : {};
     prev = event.totals;
     if (i < (copied.events ?? 0)) continue;
-    add(event.model, subtractTotals(event.totals, base), event.timestamp);
+    add(event, subtractTotals(event.totals, base));
   }
-  for (const record of records.slice(copied.records ?? 0)) {
-    add(record.model, record.usage, record.timestamp);
-  }
-  return days;
+  for (const record of records.slice(copied.records ?? 0)) add(record, record.usage);
+  return { days, turns: [...turns], copiedTurns };
 }
 
 function usageEntry(model, totals) {

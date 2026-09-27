@@ -1,7 +1,7 @@
 import { readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import { readJson } from "./fs-store.mjs";
-import { readRollout, rolloutUsageByDay, sumEntries, usageSignature } from "./token-usage.mjs";
+import { readRollout, rolloutUsage, sumEntries, usageSignature } from "./token-usage.mjs";
 
 const STATE_VERSION = 1;
 const ROLLOUT_RE =
@@ -63,11 +63,15 @@ function copiedPrefix({ events, records }, originalPath) {
   };
 }
 
+const hasTurnIds = ({ events, records }) => [...events, ...records].some((item) => item.turn);
+
 /**
- * Parse one rollout into its state entry. A fork's copied history is found
- * once, by matching its leading token_count totals and token_usage_record
- * response ids against its original's, and kept as `copied` so later reads of
- * the fork skip reading the original.
+ * Parse one rollout into its state entry. A fork's history copied inside
+ * turns with ids is kept per turn in `copiedTurns`, and a copied turn that
+ * some rollout on disk ran itself stays `owned` from then on. For a fork whose
+ * turns carry no id, the copied history is found once by matching its leading
+ * token_count totals and token_usage_record response ids against its
+ * original's, and kept as `copied` so later reads skip reading the original.
  */
 function readFileState(file, [size, mtimeMs], prev, rolloutsById, report) {
   const rollout = readRollout(file);
@@ -75,14 +79,18 @@ function readFileState(file, [size, mtimeMs], prev, rolloutsById, report) {
   const id = typeof meta?.id === "string" && meta.id ? meta.id : rolloutId(file);
   const sessionId =
     typeof meta?.session_id === "string" && meta.session_id ? meta.session_id : id;
+  const forkedFrom = typeof meta?.forked_from_id === "string" ? meta.forked_from_id : "";
   let copied = prev?.copied;
-  const originalPath = rolloutsById.get(meta?.forked_from_id);
-  if (meta?.forked_from_id && copied === undefined) {
+  if (forkedFrom && copied === undefined && !hasTurnIds(rollout)) {
     try {
-      copied = copiedPrefix(rollout, originalPath);
+      copied = copiedPrefix(rollout, rolloutsById.get(forkedFrom));
     } catch {
       report.forksWithoutOriginal++;
     }
+  }
+  const { days, turns, copiedTurns } = rolloutUsage(rollout, copied);
+  for (const [turnId, turn] of Object.entries(copiedTurns)) {
+    if (prev?.copiedTurns?.[turnId]?.owned) turn.owned = true;
   }
   return {
     size,
@@ -90,9 +98,34 @@ function readFileState(file, [size, mtimeMs], prev, rolloutsById, report) {
     id,
     sessionId,
     ...(typeof meta?.cwd === "string" && meta.cwd ? { cwd: meta.cwd } : {}),
+    ...(forkedFrom ? { forkedFrom } : {}),
     ...(copied !== undefined ? { copied } : {}),
-    days: rolloutUsageByDay(rollout, copied),
+    days,
+    turns,
+    copiedTurns,
   };
+}
+
+/**
+ * Copied turns that no rollout on disk ran itself, each counted once: the
+ * usage of its longest copy, on the day the turn started, under the oldest
+ * session a copy names as its original.
+ */
+function unownedCopiedTurns(fileEntries) {
+  const own = new Set(fileEntries.flatMap(({ entry }) => entry.turns ?? []));
+  const turns = new Map();
+  for (const { file, entry } of fileEntries) {
+    for (const [turnId, turn] of Object.entries(entry.copiedTurns ?? {})) {
+      if (own.has(turnId)) turn.owned = true;
+      if (turn.owned) continue;
+      const best = turns.get(turnId);
+      turns.set(turnId, {
+        ...(!best || turn.items > best.turn.items ? { file, entry, turn } : best),
+        sessionId: best && best.sessionId < entry.forkedFrom ? best.sessionId : entry.forkedFrom,
+      });
+    }
+  }
+  return [...turns.values()];
 }
 
 const entryTotal = (e) => e.inputTokens + e.outputTokens + e.cacheReadTokens + e.cacheWriteTokens;
@@ -189,6 +222,7 @@ export async function syncUsage({ roots, state, post, isArmored = () => false, d
     failed: 0,
     left: 0,
     forksWithoutOriginal: 0,
+    copiedTurns: 0,
   };
 
   const unread = new Set();
@@ -213,10 +247,20 @@ export async function syncUsage({ roots, state, post, isArmored = () => false, d
   }
 
   const sessions = new Map();
-  for (const [file, entry] of Object.entries(state.files)) {
-    if (!sessions.has(entry.sessionId)) sessions.set(entry.sessionId, []);
-    sessions.get(entry.sessionId).push({ file, entry });
+  const addTo = (sessionId, item) => {
+    if (!sessions.has(sessionId)) sessions.set(sessionId, []);
+    sessions.get(sessionId).push(item);
+  };
+  const fileEntries = Object.entries(state.files).map(([file, entry]) => ({ file, entry }));
+  for (const item of fileEntries) addTo(item.entry.sessionId, item);
+  const copiedTurns = unownedCopiedTurns(fileEntries);
+  for (const { file, entry, turn, sessionId } of copiedTurns) {
+    addTo(sessionId, {
+      file,
+      entry: { cwd: entry.cwd, days: { [turn.usageDate]: turn.models } },
+    });
   }
+  report.copiedTurns = copiedTurns.length;
   for (const sessionId of Object.keys(state.sessions)) {
     if (!sessions.has(sessionId)) delete state.sessions[sessionId];
   }
