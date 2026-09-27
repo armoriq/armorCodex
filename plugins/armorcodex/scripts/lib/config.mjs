@@ -16,13 +16,40 @@ function pluginOpt(env, pluginKey, legacyKey) {
   return "";
 }
 
-export function loadConfig(env = process.env) {
-  const mode = (pluginOpt(env, "MODE", "ARMORCODEX_MODE") || "enforce").toLowerCase();
-  const envMode = (env.ARMORIQ_ENV || "production").trim().toLowerCase();
+const ENDPOINTS = {
+  production: {
+    backend: "https://api.armoriq.ai",
+    iap: "https://iap.armoriq.ai",
+    proxy: "https://proxy.armoriq.ai"
+  },
+  staging: {
+    backend: "https://staging-api.armoriq.ai",
+    iap: "https://iap-staging.armoriq.ai",
+    proxy: "https://cloud-run-proxy.armoriq.io"
+  },
+  local: {
+    backend: "http://127.0.0.1:3000",
+    iap: "http://127.0.0.1:8080",
+    proxy: "http://127.0.0.1:3001"
+  }
+};
+
+function targetEnv(env) {
+  const named = (env.ARMORIQ_ENV || "").trim().toLowerCase();
+  const armoriqEnv = Object.hasOwn(ENDPOINTS, named) ? named : "production";
   const useProduction = parseBoolean(
     pluginOpt(env, "USE_PRODUCTION", "ARMORCODEX_USE_PRODUCTION") || undefined,
-    envMode === "production"
+    armoriqEnv === "production"
   );
+  if (useProduction) return "production";
+  return armoriqEnv === "production" ? "local" : armoriqEnv;
+}
+
+export function loadConfig(env = process.env) {
+  const mode = (pluginOpt(env, "MODE", "ARMORCODEX_MODE") || "enforce").toLowerCase();
+  const target = targetEnv(env);
+  const useProduction = target === "production";
+  const defaults = ENDPOINTS[target];
 
   // Data directory: prefer plugin-injected storage, then
   // ARMORCODEX_DATA_DIR, then default ~/.codex/armorcodex.
@@ -42,23 +69,17 @@ export function loadConfig(env = process.env) {
   const backendEndpoint =
     env.ARMORCODEX_BACKEND_ENDPOINT?.trim() ||
     env.BACKEND_ENDPOINT?.trim() ||
-    (useProduction
-      ? "https://api.armoriq.ai"
-      : "http://127.0.0.1:3000");
+    defaults.backend;
 
   const iapEndpoint =
     env.ARMORCODEX_IAP_ENDPOINT?.trim() ||
     env.IAP_ENDPOINT?.trim() ||
-    (useProduction
-      ? "https://iap.armoriq.ai"
-      : "http://127.0.0.1:8000");
+    defaults.iap;
 
   const proxyEndpoint =
     env.ARMORCODEX_PROXY_ENDPOINT?.trim() ||
     env.PROXY_ENDPOINT?.trim() ||
-    (useProduction
-      ? "https://proxy.armoriq.ai"
-      : "http://127.0.0.1:3001");
+    defaults.proxy;
 
   const csrgEndpoint =
     pluginOpt(env, "CSRG_ENDPOINT", "CSRG_URL") || iapEndpoint;
