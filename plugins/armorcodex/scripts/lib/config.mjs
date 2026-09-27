@@ -3,19 +3,6 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { parseBoolean, parseInteger, parseList } from "./common.mjs";
 
-/**
- * Read a config value from plugin userConfig env, falling back to the
- * ARMORCODEX_* env var used by repo-local hook installs.
- */
-function pluginOpt(env, pluginKey, legacyKey) {
-  const pluginVal =
-    env[`CODEX_PLUGIN_OPTION_${pluginKey}`]?.trim() ||
-    env[`CLAUDE_PLUGIN_OPTION_${pluginKey}`]?.trim();
-  if (pluginVal) return pluginVal;
-  if (legacyKey) return env[legacyKey]?.trim() || "";
-  return "";
-}
-
 const ENDPOINTS = {
   production: {
     backend: "https://api.armoriq.ai",
@@ -43,6 +30,19 @@ function targetEnv(env) {
   );
   if (useProduction) return "production";
   return armoriqEnv === "production" ? "local" : armoriqEnv;
+}
+
+/**
+ * Read a config value from plugin userConfig env, falling back to the
+ * ARMORCODEX_* env var used by repo-local hook installs.
+ */
+function pluginOpt(env, pluginKey, legacyKey) {
+  const pluginVal =
+    env[`CODEX_PLUGIN_OPTION_${pluginKey}`]?.trim() ||
+    env[`CLAUDE_PLUGIN_OPTION_${pluginKey}`]?.trim();
+  if (pluginVal) return pluginVal;
+  if (legacyKey) return env[legacyKey]?.trim() || "";
+  return "";
 }
 
 export function loadConfig(env = process.env) {
