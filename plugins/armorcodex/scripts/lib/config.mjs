@@ -57,7 +57,7 @@ export function loadConfig(env = process.env) {
     env.ARMORCODEX_PROXY_ENDPOINT?.trim() ||
     env.PROXY_ENDPOINT?.trim() ||
     (useProduction
-      ? "https://cloud-run-proxy.armoriq.io"
+      ? "https://proxy.armoriq.ai"
       : "http://127.0.0.1:3001");
 
   const csrgEndpoint =
