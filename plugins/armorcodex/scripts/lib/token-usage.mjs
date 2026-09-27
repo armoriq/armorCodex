@@ -220,18 +220,6 @@ function subtractTotals(latest, baseline) {
 }
 
 /**
- * @param {string} transcriptPath absolute path to the Codex rollout JSONL
- * @returns {Array<{model:string,inputTokens:number,outputTokens:number,cacheReadTokens:number,cacheWriteTokens:number}>}
- *   at most one entry (per the last-known model); [] on any read/parse error or
- *   when no token usage was recorded.
- */
-export function summarizeCodexTranscriptUsage(transcriptPath) {
-  const { events } = readUsageEvents(transcriptPath);
-  const latest = events.at(-1);
-  return latest ? usageEntry(latest.model, latest.totals) : [];
-}
-
-/**
  * Return only the latest Codex task's token usage for one observability trace.
  * Codex reports cumulative session totals, while the observability backend adds
  * every trace's generation span. Prefer a task-boundary delta so repeated Stop

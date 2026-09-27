@@ -86,6 +86,10 @@ export function loadConfig(env = process.env) {
     pluginOpt(env, "DISABLE_OBSERVABILITY", "ARMORCODEX_OBSERVABILITY_DISABLED") || undefined,
     false
   );
+  const usageSyncDisabled = parseBoolean(
+    pluginOpt(env, "DISABLE_USAGE_SYNC", "ARMORCODEX_USAGE_SYNC_DISABLED") || undefined,
+    false
+  );
 
   return {
     mode: mode === "monitor" ? "monitor" : "enforce",
@@ -106,6 +110,7 @@ export function loadConfig(env = process.env) {
     observabilityEnabled: !observabilityDisabled && Boolean(apiKey),
     observabilityEndpoint: backendEndpoint,
     observabilityProduct: "armorcodex",
+    usageSyncEnabled: !observabilityDisabled && !usageSyncDisabled && Boolean(apiKey),
 
     useSdkIntent: parseBoolean(env.ARMORCODEX_USE_SDK_INTENT, true),
     intentEndpoint: env.ARMORCODEX_INTENT_URL?.trim() || "",
