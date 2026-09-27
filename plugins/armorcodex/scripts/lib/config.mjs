@@ -32,6 +32,26 @@ function targetEnv(env) {
   return armoriqEnv === "production" ? "local" : armoriqEnv;
 }
 
+function pairedRow(backend) {
+  const normalized = backend.trim().replace(/\/+$/, "");
+  return Object.values(ENDPOINTS).find((row) => row.backend === normalized);
+}
+
+const ENDPOINT_VARIABLES = {
+  proxyEndpoint: ["proxy", "PROXY_ENDPOINT or ARMORCODEX_PROXY_ENDPOINT"],
+  iapEndpoint: ["IAP", "IAP_ENDPOINT or ARMORCODEX_IAP_ENDPOINT"],
+  csrgEndpoint: ["CSRG endpoint", "CSRG_URL, IAP_ENDPOINT or ARMORCODEX_IAP_ENDPOINT"]
+};
+
+export function requireEndpoint(config, name) {
+  const value = name === "csrgEndpoint" ? config.csrgEndpoint || config.iapEndpoint : config[name];
+  if (value) return value;
+  const [label, variables] = ENDPOINT_VARIABLES[name];
+  throw new Error(
+    `${config.backendEndpoint} is not a known ArmorIQ backend, so ArmorCodex has no ${label} for it. Set ${variables}.`
+  );
+}
+
 /**
  * Read a config value from plugin userConfig env, falling back to the
  * ARMORCODEX_* env var used by repo-local hook installs.
@@ -66,20 +86,22 @@ export function loadConfig(env = process.env) {
 
   const timeoutMs = parseInteger(env.ARMORCODEX_TIMEOUT_MS, 8000);
 
-  const backendEndpoint =
-    env.ARMORCODEX_BACKEND_ENDPOINT?.trim() ||
-    env.BACKEND_ENDPOINT?.trim() ||
-    defaults.backend;
+  const backendOverride =
+    env.ARMORCODEX_BACKEND_ENDPOINT?.trim() || env.BACKEND_ENDPOINT?.trim() || "";
+  const backendEndpoint = backendOverride || defaults.backend;
+  const paired = backendOverride ? pairedRow(backendOverride) : defaults;
 
   const iapEndpoint =
     env.ARMORCODEX_IAP_ENDPOINT?.trim() ||
     env.IAP_ENDPOINT?.trim() ||
-    defaults.iap;
+    paired?.iap ||
+    "";
 
   const proxyEndpoint =
     env.ARMORCODEX_PROXY_ENDPOINT?.trim() ||
     env.PROXY_ENDPOINT?.trim() ||
-    defaults.proxy;
+    paired?.proxy ||
+    "";
 
   const csrgEndpoint =
     pluginOpt(env, "CSRG_ENDPOINT", "CSRG_URL") || iapEndpoint;
