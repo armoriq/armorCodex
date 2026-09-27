@@ -137,7 +137,7 @@ import {
 import { readdir, unlink, stat } from "node:fs/promises";
 import path from "node:path";
 
-const { ArmorIQTelemetryRuntime, OtelSession, computeCostUsd } = armoriqSdk;
+const { ArmorIQTelemetryRuntime, OtelSession } = armoriqSdk;
 
 // A trace file older than this is considered abandoned (crashed session,
 // missed Stop) and is garbage-collected on the next SessionStart rather than
@@ -376,6 +376,18 @@ async function replaySpan(session, span) {
   }
 }
 
+async function replayModel(session, entry) {
+  const usage = {
+    "armoriq.timing.provenance": "post_hoc",
+    "gen_ai.usage.input_tokens": entry.inputTokens,
+    "gen_ai.usage.output_tokens": entry.outputTokens,
+    "gen_ai.usage.cache_read_tokens": entry.cacheReadTokens,
+    "gen_ai.usage.cache_write_tokens": entry.cacheWriteTokens,
+  };
+  const model = await session.beginModel(entry.model);
+  await session.endModel(model, usage);
+}
+
 async function obsEndTurnAndShip(sessionId, config, transcriptPath) {
   const livePath = turnLogPath(config, sessionId);
   const claimedPath = shippingPath(config, sessionId);
@@ -421,26 +433,15 @@ async function obsEndTurnAndShip(sessionId, config, transcriptPath) {
   // A runtime without a lease records nothing, so wait for it (the SDK bounds the wait).
   await session.refreshPolicy();
   await session.beginRoot({ input: meta?.attributes?.input ?? null });
-  for (const span of spans) await replaySpan(session, span);
-  for (const entry of summarizeCodexTurnUsage(transcriptPath)) {
-    const model = await session.beginModel(entry.model);
-    await session.endModel(model, {
-      "armoriq.timing.provenance": "post_hoc",
-      "armoriq.cost.provenance": "estimated",
-      "gen_ai.usage.input_tokens": entry.inputTokens,
-      "gen_ai.usage.output_tokens": entry.outputTokens,
-      "gen_ai.usage.cache_read_tokens": entry.cacheReadTokens,
-      "gen_ai.usage.cache_write_tokens": entry.cacheWriteTokens,
-      "gen_ai.usage.cost_usd": computeCostUsd(
-        entry.model,
-        entry.inputTokens,
-        entry.outputTokens,
-        entry.cacheReadTokens,
-        entry.cacheWriteTokens
-      ),
-    });
+  let failure = null;
+  try {
+    for (const span of spans) await replaySpan(session, span);
+    for (const entry of summarizeCodexTurnUsage(transcriptPath)) await replayModel(session, entry);
+  } catch (err) {
+    failure = err;
+    process.stderr.write(`[armorcodex-obs] Stop could not replay the turn: ${err?.message ?? err}\n`);
   }
-  await session.close("ok");
+  await session.close(failure ? "error" : "ok");
   await unlink(claimedPath).catch(() => {});
 }
 
