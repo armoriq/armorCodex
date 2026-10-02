@@ -22,8 +22,10 @@ const ENDPOINTS = {
 };
 
 function targetEnv(env) {
-  const named = (env.ARMORIQ_ENV || "").trim().toLowerCase();
-  const armoriqEnv = Object.hasOwn(ENDPOINTS, named) ? named : "production";
+  const armoriqEnv = (env.ARMORIQ_ENV || "").trim().toLowerCase() || "production";
+  if (!Object.hasOwn(ENDPOINTS, armoriqEnv)) {
+    throw new Error(`ARMORIQ_ENV=${env.ARMORIQ_ENV} is not one of ${Object.keys(ENDPOINTS).join(", ")}.`);
+  }
   const useProduction = parseBoolean(
     pluginOpt(env, "USE_PRODUCTION", "ARMORCODEX_USE_PRODUCTION") || undefined,
     armoriqEnv === "production"
@@ -33,8 +35,7 @@ function targetEnv(env) {
 }
 
 function pairedRow(backend) {
-  const normalized = backend.trim().replace(/\/+$/, "");
-  return Object.values(ENDPOINTS).find((row) => row.backend === normalized);
+  return Object.values(ENDPOINTS).find((row) => row.backend === backend);
 }
 
 const ENDPOINT_VARIABLES = {
@@ -86,8 +87,11 @@ export function loadConfig(env = process.env) {
 
   const timeoutMs = parseInteger(env.ARMORCODEX_TIMEOUT_MS, 8000);
 
-  const backendOverride =
-    env.ARMORCODEX_BACKEND_ENDPOINT?.trim() || env.BACKEND_ENDPOINT?.trim() || "";
+  const backendOverride = (
+    env.ARMORCODEX_BACKEND_ENDPOINT?.trim() ||
+    env.BACKEND_ENDPOINT?.trim() ||
+    ""
+  ).replace(/\/+$/, "");
   const backendEndpoint = backendOverride || defaults.backend;
   const paired = backendOverride ? pairedRow(backendOverride) : defaults;
 

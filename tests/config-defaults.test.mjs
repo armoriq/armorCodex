@@ -61,9 +61,10 @@ test("ARMORIQ_ENV=local selects the SDK local endpoints, IAP on 8080 (#102)", ()
   assert.deepEqual(endpoints(config), LOCAL);
 });
 
-test("an unknown ARMORIQ_ENV falls back to production, as the SDK does", () => {
-  for (const value of ["dev", "prod", "stage", ""]) {
-    assert.deepEqual(endpoints(loadConfig({ ARMORIQ_ENV: value })), PRODUCTION, JSON.stringify(value));
+test("an empty ARMORIQ_ENV means production and an unknown one is refused", () => {
+  assert.deepEqual(endpoints(loadConfig({ ARMORIQ_ENV: " " })), PRODUCTION);
+  for (const value of ["dev", "prod", "stage"]) {
+    assert.throws(() => loadConfig({ ARMORIQ_ENV: value }), new RegExp(`ARMORIQ_ENV=${value} is not one of production, staging, local`));
   }
 });
 
