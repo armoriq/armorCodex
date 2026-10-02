@@ -21,11 +21,24 @@ const ENDPOINTS = {
   }
 };
 
+const ENV_NAMES = {
+  "": "production",
+  production: "production",
+  prod: "production",
+  staging: "staging",
+  stage: "staging",
+  local: "local",
+  development: "local",
+  dev: "local",
+  test: "local"
+};
+
 function targetEnv(env) {
-  const armoriqEnv = (env.ARMORIQ_ENV || "").trim().toLowerCase() || "production";
-  if (!Object.hasOwn(ENDPOINTS, armoriqEnv)) {
-    throw new Error(`ARMORIQ_ENV=${env.ARMORIQ_ENV} is not one of ${Object.keys(ENDPOINTS).join(", ")}.`);
+  const named = (env.ARMORIQ_ENV || "").trim().toLowerCase();
+  if (!Object.hasOwn(ENV_NAMES, named)) {
+    throw new Error(`ARMORIQ_ENV=${env.ARMORIQ_ENV} is not one of ${Object.keys(ENV_NAMES).filter(Boolean).join(", ")}.`);
   }
+  const armoriqEnv = ENV_NAMES[named];
   const useProduction = parseBoolean(
     pluginOpt(env, "USE_PRODUCTION", "ARMORCODEX_USE_PRODUCTION") || undefined,
     armoriqEnv === "production"
@@ -45,8 +58,7 @@ const ENDPOINT_VARIABLES = {
 };
 
 export function requireEndpoint(config, name) {
-  const value = name === "csrgEndpoint" ? config.csrgEndpoint || config.iapEndpoint : config[name];
-  if (value) return value;
+  if (config[name]) return config[name];
   const [label, variables] = ENDPOINT_VARIABLES[name];
   throw new Error(
     `${config.backendEndpoint} is not a known ArmorIQ backend, so ArmorCodex has no ${label} for it. Set ${variables}.`
