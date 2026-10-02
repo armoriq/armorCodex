@@ -23,10 +23,10 @@
  * bytes and reject larger payloads upstream rather than risk corruption.
  */
 
-import { appendFile, open, readdir, readFile, rename, stat, unlink } from "node:fs/promises";
+import { appendFile, open, readFile, rename, stat, unlink } from "node:fs/promises";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
-import { PRIVATE_FILE_MODE, ensurePrivateDir, tightenPrivateFile, writePrivateFile } from "./fs-store.mjs";
+import { PRIVATE_FILE_MODE, ensurePrivateDir, tightenDirFilesOnce, writePrivateFile } from "./fs-store.mjs";
 
 const MAX_LINE_BYTES = 4000; // stay under PIPE_BUF (~4 KB) for atomic appends
 const DEFAULT_ROTATE_BYTES = 10 * 1024 * 1024; // 10 MB
@@ -45,8 +45,8 @@ export function createAuditWal(opts) {
     if (ensured) return;
     await ensurePrivateDir(dir);
     await ensurePrivateDir(archiveDir);
-    const archived = (await readdir(archiveDir)).map((file) => path.join(archiveDir, file));
-    for (const file of [currentPath, offsetPath, ...archived]) await tightenPrivateFile(file);
+    await tightenDirFilesOnce(dir);
+    await tightenDirFilesOnce(archiveDir);
     ensured = true;
   }
 

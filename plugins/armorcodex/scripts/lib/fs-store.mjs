@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { appendFile, chmod, mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 export async function readJson(filePath, fallbackValue) {
@@ -29,19 +29,22 @@ export async function ensurePrivateDir(dir) {
   if (isOwnedAndShared(await stat(dir))) await chmod(dir, PRIVATE_DIR_MODE);
 }
 
-export async function tightenPrivateFile(filePath) {
-  try {
-    if (isOwnedAndShared(await stat(filePath))) await chmod(filePath, PRIVATE_FILE_MODE);
-  } catch (error) {
-    if (error?.code !== "ENOENT") throw error;
+const tightenedDirs = new Set();
+
+export async function tightenDirFilesOnce(dir) {
+  if (tightenedDirs.has(dir)) return;
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    const file = path.join(dir, entry.name);
+    if (entry.isFile() && isOwnedAndShared(await stat(file))) await chmod(file, PRIVATE_FILE_MODE);
   }
+  tightenedDirs.add(dir);
 }
 
 // Atomic write: write to a sibling tmp file then rename into place. Prevents
 // partial/torn JSON when two hooks (PreToolUse + PostToolUse) race or when the
 // process is killed mid-write.
 export async function writePrivateFile(filePath, text) {
-  await ensurePrivateDir(path.dirname(filePath));
+  await mkdir(path.dirname(filePath), { recursive: true, mode: PRIVATE_DIR_MODE });
   const tmpPath = `${filePath}.tmp.${process.pid}.${randomUUID()}`;
   try {
     await writeFile(tmpPath, text, { encoding: "utf8", mode: PRIVATE_FILE_MODE, flag: "wx" });
@@ -85,7 +88,7 @@ export async function appendNdjsonLine(filePath, value) {
       `appendNdjsonLine: line of ${bytes} bytes exceeds atomic-append safe size (${NDJSON_APPEND_SAFE_BYTES})`
     );
   }
-  await ensurePrivateDir(path.dirname(filePath));
+  await mkdir(path.dirname(filePath), { recursive: true, mode: PRIVATE_DIR_MODE });
   await appendFile(filePath, line, { encoding: "utf8", mode: PRIVATE_FILE_MODE });
 }
 
