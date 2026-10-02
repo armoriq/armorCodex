@@ -1,5 +1,5 @@
-import { chmod, mkdir, open, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
-import { constants as fsConstants } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { appendFile, chmod, mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 export async function readJson(filePath, fallbackValue) {
@@ -19,14 +19,21 @@ export async function readJson(filePath, fallbackValue) {
   }
 }
 
-const PRIVATE_FILE_MODE = 0o600;
+export const PRIVATE_FILE_MODE = 0o600;
 const PRIVATE_DIR_MODE = 0o700;
+
+const isOwnedAndShared = (st) => (st.mode & 0o077) !== 0 && st.uid === process.getuid?.();
 
 export async function ensurePrivateDir(dir) {
   await mkdir(dir, { recursive: true, mode: PRIVATE_DIR_MODE });
-  const st = await stat(dir);
-  if ((st.mode & 0o777) !== PRIVATE_DIR_MODE && st.uid === process.getuid?.()) {
-    await chmod(dir, PRIVATE_DIR_MODE);
+  if (isOwnedAndShared(await stat(dir))) await chmod(dir, PRIVATE_DIR_MODE);
+}
+
+export async function tightenPrivateFile(filePath) {
+  try {
+    if (isOwnedAndShared(await stat(filePath))) await chmod(filePath, PRIVATE_FILE_MODE);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
   }
 }
 
@@ -35,7 +42,7 @@ export async function ensurePrivateDir(dir) {
 // process is killed mid-write.
 export async function writePrivateFile(filePath, text) {
   await ensurePrivateDir(path.dirname(filePath));
-  const tmpPath = `${filePath}.tmp.${process.pid}.${Date.now()}`;
+  const tmpPath = `${filePath}.tmp.${process.pid}.${randomUUID()}`;
   try {
     await writeFile(tmpPath, text, { encoding: "utf8", mode: PRIVATE_FILE_MODE, flag: "wx" });
     await rename(tmpPath, filePath);
@@ -47,17 +54,6 @@ export async function writePrivateFile(filePath, text) {
 
 export async function writeJson(filePath, value) {
   await writePrivateFile(filePath, JSON.stringify(value, null, 2));
-}
-
-export async function appendPrivateFile(filePath, text) {
-  await ensurePrivateDir(path.dirname(filePath));
-  const handle = await open(filePath, fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_WRONLY, PRIVATE_FILE_MODE);
-  try {
-    await handle.chmod(PRIVATE_FILE_MODE);
-    await handle.write(text, null, "utf8");
-  } finally {
-    await handle.close();
-  }
 }
 
 // Largest single write POSIX guarantees is written atomically (no
@@ -89,7 +85,8 @@ export async function appendNdjsonLine(filePath, value) {
       `appendNdjsonLine: line of ${bytes} bytes exceeds atomic-append safe size (${NDJSON_APPEND_SAFE_BYTES})`
     );
   }
-  await appendPrivateFile(filePath, line);
+  await ensurePrivateDir(path.dirname(filePath));
+  await appendFile(filePath, line, { encoding: "utf8", mode: PRIVATE_FILE_MODE });
 }
 
 // Read an NDJSON file as an array of parsed values. Tolerates a torn last
