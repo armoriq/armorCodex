@@ -53,6 +53,22 @@ export function requireEndpoint(config, name) {
   );
 }
 
+const firstSet = (env, ...names) => names.map((name) => env[name]?.trim()).find(Boolean) || "";
+
+function resolveEndpoints(env) {
+  const target = targetEnv(env);
+  const backendOverride = firstSet(env, "ARMORCODEX_BACKEND_ENDPOINT", "BACKEND_ENDPOINT").replace(/\/+$/, "");
+  const paired = backendOverride ? pairedRow(backendOverride) : ENDPOINTS[target];
+  const iapEndpoint = firstSet(env, "ARMORCODEX_IAP_ENDPOINT", "IAP_ENDPOINT") || paired?.iap || "";
+  return {
+    useProduction: target === "production",
+    backendEndpoint: backendOverride || ENDPOINTS[target].backend,
+    iapEndpoint,
+    proxyEndpoint: firstSet(env, "ARMORCODEX_PROXY_ENDPOINT", "PROXY_ENDPOINT") || paired?.proxy || "",
+    csrgEndpoint: pluginOpt(env, "CSRG_ENDPOINT", "CSRG_URL") || iapEndpoint
+  };
+}
+
 /**
  * Read a config value from plugin userConfig env, falling back to the
  * ARMORCODEX_* env var used by repo-local hook installs.
@@ -68,9 +84,7 @@ function pluginOpt(env, pluginKey, legacyKey) {
 
 export function loadConfig(env = process.env) {
   const mode = (pluginOpt(env, "MODE", "ARMORCODEX_MODE") || "enforce").toLowerCase();
-  const target = targetEnv(env);
-  const useProduction = target === "production";
-  const defaults = ENDPOINTS[target];
+  const { useProduction, backendEndpoint, iapEndpoint, proxyEndpoint, csrgEndpoint } = resolveEndpoints(env);
 
   // Data directory: prefer plugin-injected storage, then
   // ARMORCODEX_DATA_DIR, then default ~/.codex/armorcodex.
@@ -86,29 +100,6 @@ export function loadConfig(env = process.env) {
     env.ARMORCODEX_RUNTIME_FILE?.trim() || path.join(dataDir, "runtime.json");
 
   const timeoutMs = parseInteger(env.ARMORCODEX_TIMEOUT_MS, 8000);
-
-  const backendOverride = (
-    env.ARMORCODEX_BACKEND_ENDPOINT?.trim() ||
-    env.BACKEND_ENDPOINT?.trim() ||
-    ""
-  ).replace(/\/+$/, "");
-  const backendEndpoint = backendOverride || defaults.backend;
-  const paired = backendOverride ? pairedRow(backendOverride) : defaults;
-
-  const iapEndpoint =
-    env.ARMORCODEX_IAP_ENDPOINT?.trim() ||
-    env.IAP_ENDPOINT?.trim() ||
-    paired?.iap ||
-    "";
-
-  const proxyEndpoint =
-    env.ARMORCODEX_PROXY_ENDPOINT?.trim() ||
-    env.PROXY_ENDPOINT?.trim() ||
-    paired?.proxy ||
-    "";
-
-  const csrgEndpoint =
-    pluginOpt(env, "CSRG_ENDPOINT", "CSRG_URL") || iapEndpoint;
 
   // API key resolution: plugin config → env var → ~/.armoriq/credentials.json
   let apiKey = pluginOpt(env, "API_KEY", "ARMORIQ_API_KEY");
