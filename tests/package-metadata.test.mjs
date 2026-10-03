@@ -18,10 +18,6 @@ test("release metadata uses the registry SDK and one ArmorCodex version", () => 
   assert.equal(lock.packages[""].dependencies["@armoriq/sdk"], "^0.6.3");
   assert.equal(lockedSdk.version, "0.6.3");
   assert.match(lockedSdk.resolved, /^https:\/\/registry\.npmjs\.org\//);
-  assert.equal(
-    lockedSdk.integrity,
-    "sha512-I/YjZrnOsbN4Yg3ZujEX91descHOf6K1Z1Kg2KfuTi019VPQaGfSdrda2Hx1VqLWxysw8UJil9BxZKRIVLHMrg==",
-  );
   assert.equal(lockedSdk.link, undefined);
   assert.equal(
     Object.keys(lock.packages).some((key) => key.includes("armoriq-sdk-customer-ts")),
@@ -53,4 +49,19 @@ test("release installer uses only the production SDK CLI", () => {
   assert.match(installer, /npx @armoriq\/sdk login/);
   assert.doesNotMatch(installer, /armoriq-dev/);
   assert.doesNotMatch(installer, /@armoriq\/sdk-dev/);
+});
+
+test("every locked @armoriq package has the integrity the registry serves", async () => {
+  const lock = readJson("../plugins/armorcodex/package-lock.json");
+  const locked = Object.entries(lock.packages).filter(([key]) => key.startsWith("node_modules/@armoriq/"));
+  assert.notEqual(locked.length, 0);
+  for (const [key, entry] of locked) {
+    const name = key.slice("node_modules/".length);
+    const response = await fetch(`https://registry.npmjs.org/${name}/${entry.version}`, {
+      signal: AbortSignal.timeout(15_000),
+    });
+    assert.equal(response.status, 200, `${name}@${entry.version} on the registry`);
+    const { dist } = await response.json();
+    assert.equal(entry.integrity, dist.integrity, `${name}@${entry.version}`);
+  }
 });
