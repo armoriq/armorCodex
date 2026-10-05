@@ -1,0 +1,33 @@
+name: ArmorCodex CI
+
+on:
+  pull_request:
+    paths:
+      - "plugins/armorcodex/**"
+      - "tests/**"
+      - ".github/workflows/armorcodex-ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "plugins/armorcodex/**"
+      - "tests/**"
+      - ".github/workflows/armorcodex-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  plugin-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: plugins/armorcodex/package-lock.json
+      - run: npm ci --ignore-scripts
+        working-directory: plugins/armorcodex
+      - run: npm test
+        working-directory: plugins/armorcodex
