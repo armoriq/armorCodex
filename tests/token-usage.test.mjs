@@ -147,6 +147,61 @@ test("uses the LAST cumulative token_count snapshot (idempotent totals)", async 
   assert.equal(entries[0].outputTokens, 60);
 });
 
+test("preserves every model when a session switches models", async () => {
+  const file = await writeRollout([
+    { type: "turn_context", payload: { model: "gpt-5.5" } },
+    tokenCount({ input_tokens: 100, cached_input_tokens: 0, output_tokens: 10 }),
+    { type: "turn_context", payload: { model: "gpt-5.5-codex" } },
+    tokenCount({ input_tokens: 220, cached_input_tokens: 70, output_tokens: 30 }),
+  ]);
+  assert.deepEqual(summarizeCodexTranscriptUsage(file), [
+    {
+      model: "gpt-5.5",
+      inputTokens: 100,
+      outputTokens: 10,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+    },
+    {
+      model: "gpt-5.5-codex",
+      inputTokens: 50,
+      outputTokens: 20,
+      cacheReadTokens: 70,
+      cacheWriteTokens: 0,
+    },
+  ]);
+});
+
+test("preserves every model in a task-boundary turn delta", async () => {
+  const file = await writeRollout([
+    { type: "event_msg", payload: { type: "task_started" } },
+    { type: "turn_context", payload: { model: "gpt-5.5" } },
+    tokenCount({ input_tokens: 100, cached_input_tokens: 0, output_tokens: 10 }),
+    { type: "event_msg", payload: { type: "task_complete" } },
+    { type: "event_msg", payload: { type: "task_started" } },
+    { type: "turn_context", payload: { model: "gpt-5.5-codex" } },
+    tokenCount({ input_tokens: 220, cached_input_tokens: 70, output_tokens: 30 }),
+    { type: "turn_context", payload: { model: "gpt-5.5" } },
+    tokenCount({ input_tokens: 300, cached_input_tokens: 80, output_tokens: 40 }),
+  ]);
+  assert.deepEqual(summarizeCodexTurnUsage(file), [
+    {
+      model: "gpt-5.5-codex",
+      inputTokens: 50,
+      outputTokens: 20,
+      cacheReadTokens: 70,
+      cacheWriteTokens: 0,
+    },
+    {
+      model: "gpt-5.5",
+      inputTokens: 70,
+      outputTokens: 10,
+      cacheReadTokens: 10,
+      cacheWriteTokens: 0,
+    },
+  ]);
+});
+
 test("tracks the most recent model across turns", async () => {
   const file = await writeRollout([
     { type: "turn_context", payload: { model: "gpt-5.5" } },
@@ -155,7 +210,7 @@ test("tracks the most recent model across turns", async () => {
     tokenCount({ input_tokens: 220, output_tokens: 30 }),
   ]);
   const entries = summarizeCodexTranscriptUsage(file);
-  assert.equal(entries[0].model, "gpt-5.5-codex");
+  assert.deepEqual(entries.map((entry) => entry.model), ["gpt-5.5", "gpt-5.5-codex"]);
 });
 
 test("does not relabel cumulative totals when a later model context has no token count", async () => {

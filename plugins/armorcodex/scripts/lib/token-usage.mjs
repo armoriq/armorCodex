@@ -14,9 +14,10 @@
  *                                    output_tokens, reasoning_output_tokens,
  *                                    total_tokens }, ... } } }
  *
- * `total_token_usage` is CUMULATIVE for the session, so we take the last
- * token_count event's totals — matching the idempotent, cumulative contract of
- * the backend upsert (it SETS per-(session,model) counts, never adds).
+ * `total_token_usage` is CUMULATIVE for the session. We convert successive
+ * snapshots into deltas and keep those deltas under the model that was active
+ * for each snapshot. This preserves every model when one session switches
+ * providers or model families.
  *
  * Codex's `input_tokens` INCLUDES `cached_input_tokens` (input+output=total).
  * To match the Claude convention (input excludes cache reads) we split them:
@@ -121,16 +122,47 @@ function subtractTotals(latest, baseline) {
   };
 }
 
+function deltaTotals(latest, previous) {
+  if (!previous) return latest;
+  const fields = ["input_tokens", "cached_input_tokens", "output_tokens"];
+  const reset = fields.some((field) => toCount(latest?.[field]) < toCount(previous?.[field]));
+  return reset ? latest : subtractTotals(latest, previous);
+}
+
+function addEntry(entries, model, totals) {
+  const [entry] = usageEntry(model, totals);
+  if (!entry) return;
+  const key = entry.model;
+  const current = entries.get(key);
+  if (current) {
+    current.inputTokens += entry.inputTokens;
+    current.outputTokens += entry.outputTokens;
+    current.cacheReadTokens += entry.cacheReadTokens;
+    current.cacheWriteTokens += entry.cacheWriteTokens;
+  } else {
+    entries.set(key, entry);
+  }
+}
+
+function entriesFromEvents(events) {
+  const entries = new Map();
+  let previous = null;
+  for (const event of events) {
+    addEntry(entries, event.model, deltaTotals(event.totals, previous));
+    previous = event.totals;
+  }
+  return [...entries.values()];
+}
+
 /**
  * @param {string} transcriptPath absolute path to the Codex rollout JSONL
  * @returns {Array<{model:string,inputTokens:number,outputTokens:number,cacheReadTokens:number,cacheWriteTokens:number}>}
- *   at most one entry (per the last-known model); [] on any read/parse error or
- *   when no token usage was recorded.
+ *   one entry per model observed in the cumulative transcript; [] on any
+ *   read/parse error or when no token usage was recorded.
  */
 export function summarizeCodexTranscriptUsage(transcriptPath) {
   const { events } = readUsageEvents(transcriptPath);
-  const latest = events.at(-1);
-  return latest ? usageEntry(latest.model, latest.totals) : [];
+  return entriesFromEvents(events);
 }
 
 /**
@@ -149,9 +181,14 @@ export function summarizeCodexTurnUsage(transcriptPath) {
   if (latestTaskSequence >= 0) {
     if (latest.taskSequence !== latestTaskSequence) return [];
     const baseline = events.findLast((event) => event.taskSequence < latest.taskSequence);
-    const totals = baseline ? subtractTotals(latest.totals, baseline.totals) : latest.totals;
-    const entry = usageEntry(latest.model, totals);
-    if (entry.length) return entry;
+    const taskEvents = events.filter((event) => event.taskSequence === latestTaskSequence);
+    const entries = new Map();
+    let previous = baseline?.totals ?? null;
+    for (const event of taskEvents) {
+      addEntry(entries, event.model, deltaTotals(event.totals, previous));
+      previous = event.totals;
+    }
+    if (entries.size) return [...entries.values()];
     return usageEntry(latest.model, latest.lastUsage);
   }
 
