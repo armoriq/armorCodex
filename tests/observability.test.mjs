@@ -339,7 +339,7 @@ test("PermissionRequest denial ships as a denied policy call with its reason", a
   assert.ok(policyCall);
   assert.equal(policyCall.attributes["armoriq.policy.decision"], "deny");
   assert.equal(policyCall.attributes["armoriq.intent_plan_item_status"], "blocked");
-  assert.equal(policyCall.attributes["armoriq.policy.tool_name"], "Bash");
+  assert.equal(policyCall.attributes["armoriq.tool.name"], "Bash");
   assert.equal(policyCall.attributes["armoriq.policy.reason_code"], "Protected files cannot be removed");
   assert.equal(policyCall.attributes["armoriq.session_id"], sessionId);
 });
