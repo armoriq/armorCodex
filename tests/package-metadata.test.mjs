@@ -53,3 +53,18 @@ test("release installer uses only the production SDK CLI", () => {
   assert.doesNotMatch(installer, /armoriq-dev/);
   assert.doesNotMatch(installer, /(npx|npm install -g) @armoriq\/sdk-dev/);
 });
+
+test("every locked @armoriq package has the integrity the registry serves", async () => {
+  const lock = readJson("../plugins/armorcodex/package-lock.json");
+  const locked = Object.entries(lock.packages).filter(([key]) => key.startsWith("node_modules/@armoriq/"));
+  assert.notEqual(locked.length, 0);
+  for (const [key, entry] of locked) {
+    const name = key.slice("node_modules/".length);
+    const response = await fetch(`https://registry.npmjs.org/${name}/${entry.version}`, {
+      signal: AbortSignal.timeout(15_000),
+    });
+    assert.equal(response.status, 200, `${name}@${entry.version} on the registry`);
+    const { dist } = await response.json();
+    assert.equal(entry.integrity, dist.integrity, `${name}@${entry.version}`);
+  }
+});
