@@ -3,7 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import path from "node:path";
 import { z } from "zod";
 import { loadConfig } from "./lib/config.mjs";
-import { writeJson } from "./lib/fs-store.mjs";
+import { ensurePrivateDir, writeJson } from "./lib/fs-store.mjs";
 import { extractAllowedActions, requestIntent } from "./lib/intent.mjs";
 import { INTENT_PLAN_ZOD, PLAN_STEP_SCHEMA, normalizeIntentPlan } from "./lib/intent-schema.mjs";
 import { applyPolicyCommand, computePolicyHash, loadPolicyState, parsePolicyTextCommand } from "./lib/policy.mjs";
@@ -87,6 +87,7 @@ async function loadStateAndConfig() {
 }
 
 async function run() {
+  await ensurePrivateDir(loadConfig().dataDir);
   const server = new McpServer({
     name: "armorcodex-policy",
     version: "0.1.0"

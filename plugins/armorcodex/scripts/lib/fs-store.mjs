@@ -1,5 +1,5 @@
-import { mkdir, readFile, rename, unlink, writeFile, open } from "node:fs/promises";
-import { constants as fsConstants } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { appendFile, chmod, mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 export async function readJson(filePath, fallbackValue) {
@@ -19,20 +19,44 @@ export async function readJson(filePath, fallbackValue) {
   }
 }
 
+export const PRIVATE_FILE_MODE = 0o600;
+const PRIVATE_DIR_MODE = 0o700;
+
+const isOwnedAndShared = (st) => (st.mode & 0o077) !== 0 && st.uid === process.getuid?.();
+
+export async function ensurePrivateDir(dir) {
+  await mkdir(dir, { recursive: true, mode: PRIVATE_DIR_MODE });
+  if (isOwnedAndShared(await stat(dir))) await chmod(dir, PRIVATE_DIR_MODE);
+}
+
+const tightenedDirs = new Set();
+
+export async function tightenDirFilesOnce(dir) {
+  if (tightenedDirs.has(dir)) return;
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    const file = path.join(dir, entry.name);
+    if (entry.isFile() && isOwnedAndShared(await stat(file))) await chmod(file, PRIVATE_FILE_MODE);
+  }
+  tightenedDirs.add(dir);
+}
+
 // Atomic write: write to a sibling tmp file then rename into place. Prevents
 // partial/torn JSON when two hooks (PreToolUse + PostToolUse) race or when the
 // process is killed mid-write.
-export async function writeJson(filePath, value) {
-  await mkdir(path.dirname(filePath), { recursive: true });
-  const tmpPath = `${filePath}.tmp.${process.pid}.${Date.now()}`;
-  const payload = JSON.stringify(value, null, 2);
+export async function writePrivateFile(filePath, text) {
+  await mkdir(path.dirname(filePath), { recursive: true, mode: PRIVATE_DIR_MODE });
+  const tmpPath = `${filePath}.tmp.${process.pid}.${randomUUID()}`;
   try {
-    await writeFile(tmpPath, payload, "utf8");
+    await writeFile(tmpPath, text, { encoding: "utf8", mode: PRIVATE_FILE_MODE, flag: "wx" });
     await rename(tmpPath, filePath);
   } catch (error) {
     await unlink(tmpPath).catch(() => {});
     throw error;
   }
+}
+
+export async function writeJson(filePath, value) {
+  await writePrivateFile(filePath, JSON.stringify(value, null, 2));
 }
 
 // Largest single write POSIX guarantees is written atomically (no
@@ -54,7 +78,6 @@ export const NDJSON_APPEND_SAFE_BYTES = 3800;
 // interleaving. This is what makes multi-process accumulation race-free
 // without any lock: unlike read-modify-write, there is no read step to race.
 export async function appendNdjsonLine(filePath, value) {
-  await mkdir(path.dirname(filePath), { recursive: true });
   const line = `${JSON.stringify(value)}\n`;
   const bytes = Buffer.byteLength(line, "utf8");
   if (bytes > NDJSON_APPEND_SAFE_BYTES) {
@@ -65,12 +88,8 @@ export async function appendNdjsonLine(filePath, value) {
       `appendNdjsonLine: line of ${bytes} bytes exceeds atomic-append safe size (${NDJSON_APPEND_SAFE_BYTES})`
     );
   }
-  const handle = await open(filePath, fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_WRONLY, 0o600);
-  try {
-    await handle.write(line, null, "utf8");
-  } finally {
-    await handle.close();
-  }
+  await mkdir(path.dirname(filePath), { recursive: true, mode: PRIVATE_DIR_MODE });
+  await appendFile(filePath, line, { encoding: "utf8", mode: PRIVATE_FILE_MODE });
 }
 
 // Read an NDJSON file as an array of parsed values. Tolerates a torn last

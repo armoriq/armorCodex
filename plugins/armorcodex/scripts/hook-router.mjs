@@ -11,6 +11,7 @@ import {
   handleStop,
   handleUserPromptSubmit
 } from "./lib/engine.mjs";
+import { ensurePrivateDir } from "./lib/fs-store.mjs";
 import { observeHook } from "./lib/observability.mjs";
 import { launchUsageSync, requestUsageSync } from "./lib/usage-sync-launch.mjs";
 
@@ -33,6 +34,7 @@ function debugLog(config, message) {
 
 async function main() {
   const config = loadConfig();
+  await ensurePrivateDir(config.dataDir);
   const rawInput = await readStdin();
   if (!rawInput.trim()) {
     return;

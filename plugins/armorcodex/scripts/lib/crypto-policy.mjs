@@ -14,6 +14,7 @@
 
 import { isPlainObject, postJson, sha256Hex } from "./common.mjs";
 import { readJson, writeJson } from "./fs-store.mjs";
+import { requireEndpoint } from "./config.mjs";
 import path from "node:path";
 
 // ---------------------------------------------------------------------------
@@ -50,7 +51,6 @@ export function computePolicyDigest(rules) {
  * Adapted for stateless hook execution with file-based persistence.
  */
 export function createCryptoPolicyService(config) {
-  const csrgEndpoint = config.csrgEndpoint || config.iapEndpoint || "";
   const timeoutMs = config.timeoutMs || 30000;
   const stateFilePath = path.join(config.dataDir, "crypto-policy-state.json");
 
@@ -87,7 +87,7 @@ export function createCryptoPolicyService(config) {
       };
 
       const response = await postJson(
-        `${csrgEndpoint}/intent`,
+        `${requireEndpoint(config, "csrgEndpoint")}/intent`,
         request,
         { "Content-Type": "application/json" },
         timeoutMs
@@ -158,7 +158,7 @@ export function createCryptoPolicyService(config) {
       };
 
       const response = await postJson(
-        `${csrgEndpoint}/verify/action`,
+        `${requireEndpoint(config, "csrgEndpoint")}/verify/action`,
         verifyRequest,
         { "Content-Type": "application/json" },
         Math.min(timeoutMs, 15000)
