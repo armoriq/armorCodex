@@ -1,13 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
-import { appendNdjsonLine, writeJson } from "../plugins/armorcodex/scripts/lib/fs-store.mjs";
+import { fileURLToPath } from "node:url";
+import { appendNdjsonLine, writeJson, writePrivateFile } from "../plugins/armorcodex/scripts/lib/fs-store.mjs";
 import { createAuditWal } from "../plugins/armorcodex/scripts/lib/audit-wal.mjs";
 import { handleUserPromptSubmit } from "../plugins/armorcodex/scripts/lib/engine.mjs";
 
 process.umask(0o022);
+
+const HOOK_ROUTER = path.join(path.dirname(fileURLToPath(import.meta.url)), "../plugins/armorcodex/scripts/hook-router.mjs");
 
 async function modeOf(file) {
   return (await stat(file)).mode & 0o777;
@@ -54,14 +58,25 @@ test("writeJson replaces a world-readable file with an owner-only one", async ()
   assert.deepEqual(JSON.parse(await readFile(file, "utf8")), { secret: "x" });
 });
 
-test("writeJson creates a missing data dir 0700 and closes an existing 0755 one", async () => {
+test("writeJson creates a missing dir 0700 and leaves an existing one alone", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorcodex-mode-"));
   const fresh = path.join(tmp, "fresh", "armorcodex");
   await writeJson(path.join(fresh, "runtime.json"), {});
   assert.equal(await modeOf(fresh), 0o700);
 
+  const projectDir = await openDataDir();
+  await writeJson(path.join(projectDir, "runtime.json"), {});
+  assert.equal(await modeOf(projectDir), 0o755);
+});
+
+test("the hook router makes an existing data dir 0700", async () => {
   const dataDir = await openDataDir();
-  await writeJson(path.join(dataDir, "runtime.json"), {});
+  const child = spawn(process.execPath, [HOOK_ROUTER], {
+    stdio: ["pipe", "ignore", "ignore"],
+    env: { PATH: process.env.PATH, HOME: dataDir, ARMORCODEX_DATA_DIR: dataDir, ARMORIQ_API_KEY: "" }
+  });
+  child.stdin.end("");
+  await new Promise((resolve) => child.once("exit", resolve));
   assert.equal(await modeOf(dataDir), 0o700);
 });
 
@@ -98,12 +113,32 @@ test("the audit WAL closes an existing 0644 log in a 0755 dir", async () => {
   assert.equal((await readFile(currentPath, "utf8")).trim().split("\n").length, 2);
 });
 
-test("appendNdjsonLine closes an existing 0644 turn log", async () => {
-  const dataDir = await openDataDir();
+test("appendNdjsonLine creates an owner-only turn log in an owner-only dir", async () => {
+  const dataDir = path.join(await openDataDir(), "turns");
   const file = path.join(dataDir, "obs-turn.x.ndjson");
-  await writeFile(file, "");
-  await chmod(file, 0o644);
   await appendNdjsonLine(file, { prompt: "deploy with token abc123" });
+  await appendNdjsonLine(file, { prompt: "second" });
+  assert.equal((await readFile(file, "utf8")).trim().split("\n").length, 2);
   assert.equal(await modeOf(file), 0o600);
   assert.equal(await modeOf(dataDir), 0o700);
+});
+
+test("tightening keeps owner-only bits and concurrent writes never share a temp file", async () => {
+  const dataDir = await openDataDir();
+  const archiveDir = path.join(dataDir, "audit", "archive");
+  await mkdir(archiveDir, { recursive: true });
+  const readOnly = path.join(archiveDir, "old.jsonl");
+  await writeFile(readOnly, "{}\n", { mode: 0o400 });
+  await chmod(readOnly, 0o400);
+  const shared = path.join(archiveDir, "older.jsonl");
+  await writeFile(shared, "{}\n");
+  await chmod(shared, 0o644);
+  await createAuditWal({ dataDir }).appendLine({ tool: "Read" });
+  assert.equal(await modeOf(readOnly), 0o400);
+  assert.equal(await modeOf(shared), 0o600);
+
+  const target = path.join(dataDir, "state.json");
+  await Promise.all(Array.from({ length: 20 }, (_, i) => writePrivateFile(target, String(i))));
+  assert.match(await readFile(target, "utf8"), /^\d+$/);
+  assert.deepEqual((await readdir(dataDir)).filter((f) => f.includes(".tmp.")), []);
 });

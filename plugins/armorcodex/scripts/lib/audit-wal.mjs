@@ -23,10 +23,10 @@
  * bytes and reject larger payloads upstream rather than risk corruption.
  */
 
-import { open, readFile, rename, stat, unlink } from "node:fs/promises";
+import { appendFile, open, readFile, rename, stat, unlink } from "node:fs/promises";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
-import { appendPrivateFile, ensurePrivateDir, writePrivateFile } from "./fs-store.mjs";
+import { PRIVATE_FILE_MODE, ensurePrivateDir, tightenDirFilesOnce, writePrivateFile } from "./fs-store.mjs";
 
 const MAX_LINE_BYTES = 4000; // stay under PIPE_BUF (~4 KB) for atomic appends
 const DEFAULT_ROTATE_BYTES = 10 * 1024 * 1024; // 10 MB
@@ -45,6 +45,8 @@ export function createAuditWal(opts) {
     if (ensured) return;
     await ensurePrivateDir(dir);
     await ensurePrivateDir(archiveDir);
+    await tightenDirFilesOnce(dir);
+    await tightenDirFilesOnce(archiveDir);
     ensured = true;
   }
 
@@ -72,7 +74,7 @@ export function createAuditWal(opts) {
         `audit row too large (${json.length} bytes); cap is ${MAX_LINE_BYTES}`,
       );
     }
-    await appendPrivateFile(currentPath, json + "\n");
+    await appendFile(currentPath, json + "\n", { encoding: "utf8", mode: PRIVATE_FILE_MODE });
   }
 
   async function readShippedOffset() {

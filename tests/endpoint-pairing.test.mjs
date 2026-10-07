@@ -21,7 +21,7 @@ test("a backend override from a known env pairs that env's proxy and IAP under e
     for (const armoriqEnv of [undefined, "production", "staging", "local"]) {
       for (const variable of ["BACKEND_ENDPOINT", "ARMORCODEX_BACKEND_ENDPOINT"]) {
         const config = loadConfig({ ARMORIQ_ENV: armoriqEnv, [variable]: `${backend}/` });
-        assert.deepEqual(paired(config), [`${backend}/`, proxy, iap, iap], `${row} ${variable} ARMORIQ_ENV=${armoriqEnv}`);
+        assert.deepEqual(paired(config), [backend, proxy, iap, iap], `${row} ${variable} ARMORIQ_ENV=${armoriqEnv}`);
       }
     }
   }
