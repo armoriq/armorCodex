@@ -3,6 +3,84 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { parseBoolean, parseInteger, parseList } from "./common.mjs";
 
+const ENDPOINTS = {
+  production: {
+    backend: "https://api.armoriq.ai",
+    iap: "https://iap.armoriq.ai",
+    proxy: "https://proxy.armoriq.ai"
+  },
+  staging: {
+    backend: "https://staging-api.armoriq.ai",
+    iap: "https://iap-staging.armoriq.ai",
+    proxy: "https://cloud-run-proxy.armoriq.io"
+  },
+  local: {
+    backend: "http://127.0.0.1:3000",
+    iap: "http://127.0.0.1:8080",
+    proxy: "http://127.0.0.1:3001"
+  }
+};
+
+const ENV_NAMES = {
+  "": "production",
+  production: "production",
+  prod: "production",
+  staging: "staging",
+  stage: "staging",
+  local: "local",
+  development: "local",
+  dev: "local",
+  test: "local"
+};
+
+function targetEnv(env) {
+  const named = (env.ARMORIQ_ENV || "").trim().toLowerCase();
+  if (!Object.hasOwn(ENV_NAMES, named)) {
+    throw new Error(`ARMORIQ_ENV=${env.ARMORIQ_ENV} is not one of ${Object.keys(ENV_NAMES).filter(Boolean).join(", ")}.`);
+  }
+  const armoriqEnv = ENV_NAMES[named];
+  const useProduction = parseBoolean(
+    pluginOpt(env, "USE_PRODUCTION", "ARMORCODEX_USE_PRODUCTION") || undefined,
+    armoriqEnv === "production"
+  );
+  if (useProduction) return "production";
+  return armoriqEnv === "production" ? "local" : armoriqEnv;
+}
+
+function pairedRow(backend) {
+  return Object.values(ENDPOINTS).find((row) => row.backend === backend);
+}
+
+const ENDPOINT_VARIABLES = {
+  proxyEndpoint: ["proxy", "PROXY_ENDPOINT or ARMORCODEX_PROXY_ENDPOINT"],
+  iapEndpoint: ["IAP", "IAP_ENDPOINT or ARMORCODEX_IAP_ENDPOINT"],
+  csrgEndpoint: ["CSRG endpoint", "CSRG_URL, IAP_ENDPOINT or ARMORCODEX_IAP_ENDPOINT"]
+};
+
+export function requireEndpoint(config, name) {
+  if (config[name]) return config[name];
+  const [label, variables] = ENDPOINT_VARIABLES[name];
+  throw new Error(
+    `${config.backendEndpoint} is not a known ArmorIQ backend, so ArmorCodex has no ${label} for it. Set ${variables}.`
+  );
+}
+
+const firstSet = (env, ...names) => names.map((name) => env[name]?.trim()).find(Boolean) || "";
+
+function resolveEndpoints(env) {
+  const target = targetEnv(env);
+  const backendOverride = firstSet(env, "ARMORCODEX_BACKEND_ENDPOINT", "BACKEND_ENDPOINT").replace(/\/+$/, "");
+  const paired = backendOverride ? pairedRow(backendOverride) : ENDPOINTS[target];
+  const iapEndpoint = firstSet(env, "ARMORCODEX_IAP_ENDPOINT", "IAP_ENDPOINT") || paired?.iap || "";
+  return {
+    useProduction: target === "production",
+    backendEndpoint: backendOverride || ENDPOINTS[target].backend,
+    iapEndpoint,
+    proxyEndpoint: firstSet(env, "ARMORCODEX_PROXY_ENDPOINT", "PROXY_ENDPOINT") || paired?.proxy || "",
+    csrgEndpoint: pluginOpt(env, "CSRG_ENDPOINT", "CSRG_URL") || iapEndpoint
+  };
+}
+
 /**
  * Read a config value from plugin userConfig env, falling back to the
  * ARMORCODEX_* env var used by repo-local hook installs.
@@ -18,11 +96,7 @@ function pluginOpt(env, pluginKey, legacyKey) {
 
 export function loadConfig(env = process.env) {
   const mode = (pluginOpt(env, "MODE", "ARMORCODEX_MODE") || "enforce").toLowerCase();
-  const envMode = (env.ARMORIQ_ENV || "production").trim().toLowerCase();
-  const useProduction = parseBoolean(
-    pluginOpt(env, "USE_PRODUCTION", "ARMORCODEX_USE_PRODUCTION") || undefined,
-    envMode === "production"
-  );
+  const { useProduction, backendEndpoint, iapEndpoint, proxyEndpoint, csrgEndpoint } = resolveEndpoints(env);
 
   // Data directory: prefer plugin-injected storage, then
   // ARMORCODEX_DATA_DIR, then default ~/.codex/armorcodex.
@@ -38,30 +112,6 @@ export function loadConfig(env = process.env) {
     env.ARMORCODEX_RUNTIME_FILE?.trim() || path.join(dataDir, "runtime.json");
 
   const timeoutMs = parseInteger(env.ARMORCODEX_TIMEOUT_MS, 8000);
-
-  const backendEndpoint =
-    env.ARMORCODEX_BACKEND_ENDPOINT?.trim() ||
-    env.BACKEND_ENDPOINT?.trim() ||
-    (useProduction
-      ? "https://api.armoriq.ai"
-      : "http://127.0.0.1:3000");
-
-  const iapEndpoint =
-    env.ARMORCODEX_IAP_ENDPOINT?.trim() ||
-    env.IAP_ENDPOINT?.trim() ||
-    (useProduction
-      ? "https://iap.armoriq.ai"
-      : "http://127.0.0.1:8000");
-
-  const proxyEndpoint =
-    env.ARMORCODEX_PROXY_ENDPOINT?.trim() ||
-    env.PROXY_ENDPOINT?.trim() ||
-    (useProduction
-      ? "https://cloud-run-proxy.armoriq.io"
-      : "http://127.0.0.1:3001");
-
-  const csrgEndpoint =
-    pluginOpt(env, "CSRG_ENDPOINT", "CSRG_URL") || iapEndpoint;
 
   // API key resolution: plugin config → env var → ~/.armoriq/credentials.json
   let apiKey = pluginOpt(env, "API_KEY", "ARMORIQ_API_KEY");

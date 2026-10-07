@@ -23,18 +23,10 @@
  * bytes and reject larger payloads upstream rather than risk corruption.
  */
 
-import {
-  appendFile,
-  mkdir,
-  open,
-  readFile,
-  rename,
-  stat,
-  unlink,
-  writeFile,
-} from "node:fs/promises";
+import { appendFile, open, readFile, rename, stat, unlink } from "node:fs/promises";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
+import { PRIVATE_FILE_MODE, ensurePrivateDir, tightenDirFilesOnce, writePrivateFile } from "./fs-store.mjs";
 
 const MAX_LINE_BYTES = 4000; // stay under PIPE_BUF (~4 KB) for atomic appends
 const DEFAULT_ROTATE_BYTES = 10 * 1024 * 1024; // 10 MB
@@ -51,8 +43,10 @@ export function createAuditWal(opts) {
   let ensured = false;
   async function ensureDirs() {
     if (ensured) return;
-    await mkdir(dir, { recursive: true });
-    await mkdir(archiveDir, { recursive: true });
+    await ensurePrivateDir(dir);
+    await ensurePrivateDir(archiveDir);
+    await tightenDirFilesOnce(dir);
+    await tightenDirFilesOnce(archiveDir);
     ensured = true;
   }
 
@@ -80,7 +74,7 @@ export function createAuditWal(opts) {
         `audit row too large (${json.length} bytes); cap is ${MAX_LINE_BYTES}`,
       );
     }
-    await appendFile(currentPath, json + "\n", { encoding: "utf8" });
+    await appendFile(currentPath, json + "\n", { encoding: "utf8", mode: PRIVATE_FILE_MODE });
   }
 
   async function readShippedOffset() {
@@ -96,9 +90,7 @@ export function createAuditWal(opts) {
 
   async function writeShippedOffset(offset) {
     await ensureDirs();
-    const tmpPath = `${offsetPath}.tmp.${process.pid}.${Date.now()}`;
-    await writeFile(tmpPath, String(offset), "utf8");
-    await rename(tmpPath, offsetPath);
+    await writePrivateFile(offsetPath, String(offset));
   }
 
   /**

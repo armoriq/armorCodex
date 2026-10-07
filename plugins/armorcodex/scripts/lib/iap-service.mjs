@@ -17,6 +17,7 @@ import {
   readString
 } from "./common.mjs";
 import { createAuditWal } from "./audit-wal.mjs";
+import { requireEndpoint } from "./config.mjs";
 
 // Shared WAL instance per dataDir. The MCP server, hook handlers, and any
 // fire-and-forget background flusher all enqueue to the same on-disk JSONL
@@ -37,7 +38,6 @@ function getAuditWal(config) {
  */
 export function createIapService(config) {
   const backendEndpoint = config.backendEndpoint || config.verifyStepEndpoint?.replace(/\/iap\/verify-step$/, "") || "";
-  const csrgEndpoint = config.csrgEndpoint || config.iapEndpoint || "";
   const timeoutMs = config.timeoutMs || 8000;
   const headers = buildAuthHeaders(config);
 
@@ -128,7 +128,7 @@ export function createIapService(config) {
 
       const payload = { path, value, proof, token, context };
       const response = await postJson(
-        `${csrgEndpoint}/verify/action`,
+        `${requireEndpoint(config, "csrgEndpoint")}/verify/action`,
         payload,
         { "Content-Type": "application/json" },
         Math.min(timeoutMs, 15000)
