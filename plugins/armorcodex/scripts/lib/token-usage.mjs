@@ -160,23 +160,25 @@ export function sumEntries(a, b) {
   };
 }
 
+const utcHour = (time) => new Date(time).toISOString().slice(0, 13);
+
 /**
- * Per-UTC-day, per-model usage of one rollout. Up to its first
+ * Per-UTC-hour, per-model usage of one rollout. Up to its first
  * token_usage_record it is the growth of the cumulative totals between
  * token_count events; a total lower than the one before starts a new count
  * from zero. From then on it is the sum of the records. The first
  * `copied.events` token_count events and `copied.records` records are history
  * copied from another rollout and count nothing; the copied events still set
- * the starting totals. Returns { "YYYY-MM-DD": { model: entry } }.
+ * the starting totals. Returns { "YYYY-MM-DDTHH": { model: entry } }.
  */
-export function rolloutUsageByDay({ events, records }, copied = {}) {
-  const days = {};
+export function rolloutUsageByHour({ events, records }, copied = {}) {
+  const hours = {};
   const add = (model, usage, timestamp) => {
     const time = Date.parse(timestamp);
     const [entry] = usageEntry(model, usage);
     if (!entry || Number.isNaN(time)) return;
-    const day = (days[new Date(time).toISOString().slice(0, 10)] ??= {});
-    day[entry.model] = sumEntries(day[entry.model], entry);
+    const hour = (hours[utcHour(time)] ??= {});
+    hour[entry.model] = sumEntries(hour[entry.model], entry);
   };
   let prev = null;
   for (const [i, event] of events.entries()) {
@@ -190,7 +192,7 @@ export function rolloutUsageByDay({ events, records }, copied = {}) {
   for (const record of records.slice(copied.records ?? 0)) {
     add(record.model, record.usage, record.timestamp);
   }
-  return days;
+  return hours;
 }
 
 function usageEntry(model, totals) {
