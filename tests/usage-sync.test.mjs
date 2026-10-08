@@ -339,7 +339,7 @@ function baseEnv(home, port) {
     ARMORIQ_DEVICE_ID_PATH: path.join(home, "device-id"),
     ARMORIQ_ENV: "local",
     ARMORCODEX_USE_PRODUCTION: "false",
-    ...(port ? { ARMORCODEX_BACKEND_ENDPOINT: `http://127.0.0.1:${port}` } : {}),
+    ...(port ? { ARMORCODEX_BACKEND_ENDPOINT: `http://127.0.0.1:${port}`, IAP_ENDPOINT: `http://127.0.0.1:${port}`, PROXY_ENDPOINT: `http://127.0.0.1:${port}` } : {}),
   };
 }
 
@@ -366,12 +366,12 @@ test("usage-sync --dry-run prints each row, then finds nothing changed", async (
   assert.deepEqual(summary(rows), FIRST_ROWS);
   for (const row of rows) assert.equal(row.product, "armorcodex");
   assert.match(first.stderr, /4 rollout\(s\) under .*\(1 other file\(s\)\)/);
-  assert.match(first.stderr, /4 changed, 4 read, 3 session\(s\); would post 4 session-day\(s\) \(192 tokens\)/);
+  assert.match(first.stderr, /4 changed, 4 read, 3 session\(s\); would post 4 session-hour\(s\) \(192 tokens\)/);
 
   const second = await node([SYNC, "--dry-run"], baseEnv(home));
   assert.equal(second.status, 0, second.stderr);
   assert.equal(second.stdout, "");
-  assert.match(second.stderr, /0 changed, 0 read, 3 session\(s\); would post 0 session-day\(s\)/);
+  assert.match(second.stderr, /0 changed, 0 read, 3 session\(s\); would post 0 session-hour\(s\)/);
 });
 
 test("usage-sync without an API key posts nothing", async () => {
@@ -472,7 +472,7 @@ const readLastRun = (statePath) => {
   }
 };
 
-test("SessionStart and Stop hooks run the sync, which posts each session-day with its date", async () => {
+test("SessionStart and Stop hooks run the sync, which posts each session-hour with its date", async () => {
   const home = fixtureHome();
   const statePath = path.join(home, "data", "usage-sync-state.json");
   const { server, posts, port } = await fakeBackend();
@@ -504,12 +504,12 @@ test("SessionStart and Stop hooks run the sync, which posts each session-day wit
     await hook("SessionStart");
     await until(settled(undefined), "the SessionStart pass");
     const rows = (list) =>
-      list.map((p) => [p.sessionId, p.usageDate, p.product, p.repo, p.entries.length]).sort();
+      list.map((p) => [p.sessionId, p.usageDate, p.usageHour, p.product, p.repo, p.entries.length]).sort();
     const expected = [
-      [S1, "2026-09-20", "armorcodex", "/work/repo-a", 2],
-      [S1, "2026-09-21", "armorcodex", "/work/repo-a", 1],
-      [S2, "2026-09-22", "armorcodex", "/work/repo-b", 1],
-      [S3, "2026-09-19", "armorcodex", "/work/repo-c", 1],
+      [S1, "2026-09-20", 9, "armorcodex", "/work/repo-a", 2],
+      [S1, "2026-09-21", 10, "armorcodex", "/work/repo-a", 1],
+      [S2, "2026-09-22", 9, "armorcodex", "/work/repo-b", 1],
+      [S3, "2026-09-19", 9, "armorcodex", "/work/repo-c", 1],
     ];
     assert.deepEqual(rows(posts), expected);
 
@@ -519,9 +519,9 @@ test("SessionStart and Stop hooks run the sync, which posts each session-day wit
     await until(settled(firstRun), "the Stop pass");
     assert.deepEqual(
       rows(posts),
-      [...expected, [S2, "2026-09-22", "armorcodex", "/work/repo-b", 1]].sort()
+      [...expected, [S2, "2026-09-22", 10, "armorcodex", "/work/repo-b", 1]].sort()
     );
-    assert.equal(posts.at(-1).entries[0].inputTokens, 15);
+    assert.equal(posts.at(-1).entries[0].inputTokens, 10);
   } finally {
     server.close();
   }
