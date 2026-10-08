@@ -254,7 +254,7 @@ function capAttributes(attributes) {
 
   // Still too big (e.g. many mid-sized fields): drop non-essential bulky
   // fields entirely rather than risk exceeding the atomic-append cap.
-  const essential = new Set(["toolName", "decision", "outcome", "reason", "source"]);
+  const essential = new Set(["toolName", "decision", "outcome", "source"]);
   const minimal = {};
   for (const [key, value] of Object.entries(out)) {
     if (essential.has(key)) minimal[key] = value;
@@ -317,21 +317,11 @@ async function obsStartPlan(sessionId, config, prompt) {
 }
 
 async function obsCheck(sessionId, config, toolName, toolInput, output) {
-  const reason =
-    (output && output.hookSpecificOutput && output.hookSpecificOutput.permissionDecisionReason) ||
-    (output &&
-      output.hookSpecificOutput &&
-      output.hookSpecificOutput.decision &&
-      typeof output.hookSpecificOutput.decision.message === "string"
-      ? output.hookSpecificOutput.decision.message
-      : null) ||
-    (output && typeof output.reason === "string" ? output.reason : null);
   await appendSpan(sessionId, config, {
     kind: "policy",
     attributes: {
       toolName: toolName || undefined,
       decision: classifyDecision(output),
-      reason: redactObservabilitySecrets(reason ?? null),
       input: redactObservabilitySecrets(sanitizeParams(toolInput, config.sanitize)),
     },
   });
@@ -363,10 +353,7 @@ async function replaySpan(session, span) {
   if (span.kind === "policy") {
     await session.recordPolicy(
       { toolName, arguments: attrs.input },
-      {
-        decision: attrs.decision === "deny" ? "block" : "allow",
-        ...(attrs.reason ? { policyReasonCode: attrs.reason } : {}),
-      }
+      { decision: attrs.decision === "deny" ? "block" : "allow" }
     );
   } else if (span.kind === "tool") {
     await session.recordTool(

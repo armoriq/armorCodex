@@ -305,12 +305,18 @@ test("Stop still ships the turn and logs the error when a model span fails", asy
   assert.deepEqual(await readdir(dataDir), ["rollout.jsonl"]);
 });
 
-test("PermissionRequest denial ships as a denied policy call with its reason", async (t) => {
+test("PermissionRequest denial ships as a denied policy call without its free-text reason", async (t) => {
   const dataDir = await mkdtemp(path.join(tmpdir(), "armorcodex-obs-"));
   const ingest = await startIngestServer();
   t.after(async () => {
     await ingest.close();
     await rm(dataDir, { recursive: true, force: true });
+  });
+  const policyResults = [];
+  const recordPolicy = OtelSession.prototype.recordPolicy;
+  t.mock.method(OtelSession.prototype, "recordPolicy", function (call, result) {
+    policyResults.push(result);
+    return recordPolicy.call(this, call, result);
   });
 
   const sessionId = randomUUID();
@@ -340,8 +346,9 @@ test("PermissionRequest denial ships as a denied policy call with its reason", a
   assert.equal(policyCall.attributes["armoriq.policy.decision"], "deny");
   assert.equal(policyCall.attributes["armoriq.intent_plan_item_status"], "blocked");
   assert.equal(policyCall.attributes["armoriq.tool.name"], "Bash");
-  assert.equal(policyCall.attributes["armoriq.policy.reason_code"], "Protected files cannot be removed");
   assert.equal(policyCall.attributes["armoriq.session_id"], sessionId);
+  assert.deepEqual(policyResults, [{ decision: "block" }]);
+  assert.ok(!JSON.stringify(spans).includes("Protected files cannot be removed"));
 });
 
 test("PostToolUse ships a tool span with its outcome under the session", async (t) => {

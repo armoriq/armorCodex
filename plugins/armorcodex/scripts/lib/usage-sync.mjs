@@ -88,7 +88,7 @@ function readFileState(file, [size, mtimeMs], prev, rolloutsById, report) {
       report.forksWithoutOriginal++;
     }
   }
-  const { days, turns, copiedTurns } = rolloutUsage(rollout, copied);
+  const { hours, turns, copiedTurns } = rolloutUsage(rollout, copied);
   for (const [turnId, turn] of Object.entries(copiedTurns)) {
     if (prev?.copiedTurns?.[turnId]?.owned) turn.owned = true;
   }
@@ -100,7 +100,7 @@ function readFileState(file, [size, mtimeMs], prev, rolloutsById, report) {
     ...(typeof meta?.cwd === "string" && meta.cwd ? { cwd: meta.cwd } : {}),
     ...(forkedFrom ? { forkedFrom } : {}),
     ...(copied !== undefined ? { copied } : {}),
-    days,
+    hours,
     turns,
     copiedTurns,
   };
@@ -108,7 +108,7 @@ function readFileState(file, [size, mtimeMs], prev, rolloutsById, report) {
 
 /**
  * Copied turns that no rollout on disk ran itself, each counted once: the
- * usage of its longest copy, on the day the turn started, under the oldest
+ * usage of its longest copy, in the UTC hour the turn started, under the oldest
  * session a copy names as its original.
  */
 function unownedCopiedTurns(fileEntries) {
@@ -139,52 +139,52 @@ const zeroEntry = (model) => ({
   reasoningOutputTokens: 0,
 });
 
-function sessionDays(fileEntries) {
-  const days = {};
+function sessionHours(fileEntries) {
+  const hours = {};
   for (const entry of fileEntries) {
-    for (const [usageDate, models] of Object.entries(entry.days)) {
-      const day = (days[usageDate] ??= {});
-      for (const [model, usage] of Object.entries(models)) day[model] = sumEntries(day[model], usage);
+    for (const [key, models] of Object.entries(entry.hours)) {
+      const hour = (hours[key] ??= {});
+      for (const [model, usage] of Object.entries(models)) hour[model] = sumEntries(hour[model], usage);
     }
   }
-  return days;
+  return hours;
 }
 
 /**
- * The rows to post for one session: every day whose per-model totals differ
- * from what was posted before. A model posted before but absent from a day now
- * is sent with zero tokens, since the backend replaces each (session, model,
- * day) row it receives and leaves the rest alone.
+ * The rows to post for one session: every UTC hour whose per-model totals
+ * differ from what was posted before. A model posted before but absent from an
+ * hour now is sent with zero tokens, since the backend replaces each (session,
+ * model, date, hour) row it receives and leaves the rest alone.
  */
-function changedDays(usageByDay, prevDays = {}) {
-  const days = {};
-  for (const [usageDate, models] of Object.entries(usageByDay)) {
-    days[usageDate] = Object.fromEntries(
+function changedHours(usageByHour, prevHours = {}) {
+  const hours = {};
+  for (const [key, models] of Object.entries(usageByHour)) {
+    hours[key] = Object.fromEntries(
       Object.entries(models).map(([model, e]) => [model, entryTotal(e)])
     );
   }
   const rows = [];
-  for (const usageDate of new Set([...Object.keys(days), ...Object.keys(prevDays)])) {
-    const now = days[usageDate] ?? {};
-    const before = prevDays[usageDate] ?? {};
+  for (const key of new Set([...Object.keys(hours), ...Object.keys(prevHours)])) {
+    const now = hours[key] ?? {};
+    const before = prevHours[key] ?? {};
     const models = new Set([...Object.keys(now), ...Object.keys(before)]);
     if ([...models].every((m) => now[m] === before[m])) continue;
     const vanished = Object.keys(before).filter((m) => !Object.hasOwn(now, m));
-    const entries = [...Object.values(usageByDay[usageDate] ?? {}), ...vanished.map(zeroEntry)];
+    const entries = [...Object.values(usageByHour[key] ?? {}), ...vanished.map(zeroEntry)];
     const tokens = Object.values(now).reduce((a, b) => a + b, 0);
-    rows.push({ usageDate, entries, tokens });
+    rows.push({ usageDate: key.slice(0, 10), usageHour: Number(key.slice(11, 13)), entries, tokens });
   }
-  return { days, rows };
+  return { hours, rows };
 }
 
 /**
- * Post the session-days that changed since the last run.
+ * Post the session-hours that changed since the last run.
  *
- * `state.files` caches each rollout's per-day totals under its size and mtime,
+ * `state.files` caches each rollout's per-hour totals under its size and mtime,
  * so only rollouts that changed are read. A session is every rollout whose
  * session_meta names it, subagent rollouts included. `state.sessions` keeps the
- * per-model totals last posted for each session-day, and a session's entry is
- * replaced only when all of its changed days posted, so a failed day is
+ * per-model totals last posted for each session-hour, and a session's entry is
+ * replaced only when all of its changed hours posted, so a failed hour is
  * retried on the next run. A run that reaches `deadline` while reading posts
  * nothing; the next run reads the rest. `state` is updated in place.
  */
@@ -217,7 +217,7 @@ export async function syncUsage({ roots, state, post, isArmored = () => false, d
     changed: changed.length,
     read: 0,
     sessions: 0,
-    sessionDays: 0,
+    sessionHours: 0,
     tokens: 0,
     failed: 0,
     left: 0,
@@ -257,7 +257,7 @@ export async function syncUsage({ roots, state, post, isArmored = () => false, d
   for (const { file, entry, turn, sessionId } of copiedTurns) {
     addTo(sessionId, {
       file,
-      entry: { cwd: entry.cwd, days: { [turn.usageDate]: turn.models } },
+      entry: { cwd: entry.cwd, hours: { [turn.hour]: turn.models } },
     });
   }
   report.copiedTurns = copiedTurns.length;
@@ -269,9 +269,9 @@ export async function syncUsage({ roots, state, post, isArmored = () => false, d
   for (const [sessionId, files] of sessions) {
     if (files.some(({ file }) => unread.has(file))) continue;
     const prev = state.sessions[sessionId];
-    const { days, rows } = changedDays(
-      sessionDays(files.map(({ entry }) => entry)),
-      prev?.days
+    const { hours, rows } = changedHours(
+      sessionHours(files.map(({ entry }) => entry)),
+      prev?.hours
     );
     if (!rows.length) continue;
     if (Date.now() > deadline) {
@@ -285,19 +285,20 @@ export async function syncUsage({ roots, state, post, isArmored = () => false, d
       const result = await post({
         sessionId,
         usageDate: row.usageDate,
+        usageHour: row.usageHour,
         repo: main.entry.cwd,
         entries: row.entries,
         armored,
       });
       if (result?.ok) {
-        report.sessionDays++;
+        report.sessionHours++;
         report.tokens += row.tokens;
       } else {
         ok = false;
         report.failed++;
       }
     }
-    if (ok) state.sessions[sessionId] = { days, ...(armored ? { armored: true } : {}) };
+    if (ok) state.sessions[sessionId] = { hours, ...(armored ? { armored: true } : {}) };
   }
   return report;
 }

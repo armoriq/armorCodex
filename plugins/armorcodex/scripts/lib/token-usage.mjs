@@ -178,24 +178,24 @@ function readTurn(payload) {
   return id && Number.isFinite(time) ? { id, time } : null;
 }
 
-const utcDay = (time) => new Date(time).toISOString().slice(0, 10);
+const utcHour = (time) => new Date(time).toISOString().slice(0, 13);
 
 /**
- * Usage of one rollout, per UTC day and model. Up to its first
+ * Usage of one rollout, per UTC hour (`YYYY-MM-DDTHH`) and model. Up to its first
  * token_usage_record it is the growth of the cumulative totals between
  * token_count events; a total lower than the one before starts a new count
  * from zero. From then on it is the sum of the records.
  *
  * In a fork, usage inside a turn that started before the fork was created is
  * history copied from another rollout. It lands in `copiedTurns[turnId]`,
- * dated by the turn's start, with `items` the number of usage lines copied.
+ * in the UTC hour the turn started, with `items` the number of usage lines copied.
  * The first `copied.events` token_count events and `copied.records` records
  * count nothing, for forks whose turns carry no id. Copied events still set
  * the starting totals. `turns` lists the ids of the rollout's own turns.
  */
 export function rolloutUsage({ meta, events, records }, copied = {}) {
   const createdAt = meta?.forked_from_id ? Date.parse(meta.timestamp) : NaN;
-  const days = {};
+  const hours = {};
   const turns = new Set();
   const copiedTurns = {};
   const add = (item, usage) => {
@@ -203,14 +203,14 @@ export function rolloutUsage({ meta, events, records }, copied = {}) {
     if (!entry) return;
     let models;
     if (item.turn && item.turn.time < createdAt) {
-      const turn = (copiedTurns[item.turn.id] ??= { usageDate: utcDay(item.turn.time), items: 0, models: {} });
+      const turn = (copiedTurns[item.turn.id] ??= { hour: utcHour(item.turn.time), items: 0, models: {} });
       turn.items++;
       models = turn.models;
     } else {
       const time = Date.parse(item.timestamp);
       if (Number.isNaN(time)) return;
       if (item.turn) turns.add(item.turn.id);
-      models = days[utcDay(time)] ??= {};
+      models = hours[utcHour(time)] ??= {};
     }
     models[entry.model] = sumEntries(models[entry.model], entry);
   };
@@ -224,7 +224,7 @@ export function rolloutUsage({ meta, events, records }, copied = {}) {
     add(event, subtractTotals(event.totals, base));
   }
   for (const record of records.slice(copied.records ?? 0)) add(record, record.usage);
-  return { days, turns: [...turns], copiedTurns };
+  return { hours, turns: [...turns], copiedTurns };
 }
 
 function usageEntry(model, totals) {

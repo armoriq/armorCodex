@@ -82,7 +82,7 @@ Core environment variables:
 While observability is on, `plugins/armorcodex/scripts/usage-sync.mjs` uploads token counts for
 every Codex session under `~/.codex/sessions` and `~/.codex/archived_sessions` (or
 `$CODEX_HOME`), including sessions that ran without ArmorCodex. It posts one row per session,
-model and UTC day, with the session's working directory and the device name. It sends no prompts
+model, UTC date and UTC hour, with the session's working directory and the device name. It sends no prompts
 or transcript text. The hook router starts it in the background on `SessionStart` and after each
 `Stop`. `node plugins/armorcodex/scripts/usage-sync.mjs --dry-run` prints the rows without
 posting them.

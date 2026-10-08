@@ -135,18 +135,18 @@ async function run(home, state, opts = {}) {
 const total = (e) => e.inputTokens + e.outputTokens + e.cacheReadTokens + e.cacheWriteTokens;
 const summary = (rows) =>
   rows
-    .map((r) => [r.sessionId, r.usageDate, ...r.entries.map((e) => `${e.model}=${total(e)}`)])
+    .map((r) => [r.sessionId, r.usageDate, r.usageHour, ...r.entries.map((e) => `${e.model}=${total(e)}`)])
     .sort();
 const emptyState = (home) => loadSyncState(path.join(home, "none.json"));
 
 const FIRST_ROWS = [
-  [S1, "2026-09-20", "gpt-5.5=100", "gpt-5.5-mini=7"],
-  [S1, "2026-09-21", "gpt-5.5=50"],
-  [S2, "2026-09-22", "gpt-5.5=5"],
-  [S3, "2026-09-19", "gpt-5.5=30"],
+  [S1, "2026-09-20", 9, "gpt-5.5=100", "gpt-5.5-mini=7"],
+  [S1, "2026-09-21", 10, "gpt-5.5=50"],
+  [S2, "2026-09-22", 9, "gpt-5.5=5"],
+  [S3, "2026-09-19", 9, "gpt-5.5=30"],
 ];
 
-test("first run posts every session-day once, subagents folded in, forked history skipped", async () => {
+test("first run posts every session-hour once, subagents folded in, forked history skipped", async () => {
   const home = fixtureHome();
   const { rows, report } = await run(home, await emptyState(home));
   assert.deepEqual(summary(rows), FIRST_ROWS);
@@ -156,7 +156,7 @@ test("first run posts every session-day once, subagents folded in, forked histor
   assert.equal(report.rollouts, 4);
   assert.equal(report.read, 4);
   assert.equal(report.sessions, 3);
-  assert.equal(report.sessionDays, 4);
+  assert.equal(report.sessionHours, 4);
   assert.equal(report.tokens, 192);
   assert.deepEqual(
     report.notRead.map((f) => path.basename(f)),
@@ -174,7 +174,7 @@ test("a second run with no file changes reads and posts nothing", async () => {
   assert.equal(report.read, 0);
 });
 
-test("an appended rollout re-posts only its changed day", async () => {
+test("an appended rollout re-posts only its changed hour", async () => {
   const home = fixtureHome();
   const state = await emptyState(home);
   await run(home, state);
@@ -183,8 +183,8 @@ test("an appended rollout re-posts only its changed day", async () => {
   const { rows, report } = await run(home, state);
   assert.equal(report.read, 2);
   assert.deepEqual(summary(rows), [
-    [S1, "2026-09-21", "gpt-5.5=50", "gpt-5.5-mini=5"],
-    [S2, "2026-09-22", "gpt-5.5=15"],
+    [S1, "2026-09-21", 11, "gpt-5.5-mini=5"],
+    [S2, "2026-09-22", 10, "gpt-5.5=10"],
   ]);
 });
 
@@ -198,7 +198,7 @@ test("a changed rollout whose totals did not change posts nothing", async () => 
   assert.deepEqual(rows, []);
 });
 
-test("a model or day that vanishes from a session is posted with zero tokens", async () => {
+test("a model or hour that vanishes from a session is posted with zero tokens", async () => {
   const home = fixtureHome();
   const state = await emptyState(home);
   await run(home, state);
@@ -206,11 +206,57 @@ test("a model or day that vanishes from a session is posted with zero tokens", a
   writeRollout(rolloutPath(home, "2026-09-20", S1), s1History);
   const { rows } = await run(home, state);
   assert.deepEqual(summary(rows), [
-    [S1, "2026-09-20", "gpt-5.5=100", "gpt-5.5-mini=0"],
-    [S1, "2026-09-21", "gpt-5.5=0"],
+    [S1, "2026-09-20", 9, "gpt-5.5=100", "gpt-5.5-mini=0"],
+    [S1, "2026-09-21", 10, "gpt-5.5=0"],
   ]);
   const again = await run(home, state);
   assert.deepEqual(again.rows, []);
+});
+
+test("a model that leaves one hour is zeroed in that hour only", async () => {
+  const home = mkdtempSync(path.join(tmpdir(), "acx-usage-hour-zero-"));
+  const S4 = "019e0000-0000-7000-8000-000000000004";
+  const file = rolloutPath(home, "2026-09-20", S4);
+  const head = [meta("2026-09-20T09:00:00Z", { id: S4, session_id: S4, cwd: "/work/repo-d" }), model("2026-09-20T09:00:01Z", "gpt-5.5")];
+  writeRollout(file, [...head, count("2026-09-20T09:30:00Z", 40), count("2026-09-20T10:30:00Z", 70)]);
+  const state = await emptyState(home);
+  const first = await run(home, state);
+  assert.deepEqual(summary(first.rows), [
+    [S4, "2026-09-20", 10, "gpt-5.5=30"],
+    [S4, "2026-09-20", 9, "gpt-5.5=40"],
+  ]);
+  writeRollout(file, [
+    ...head,
+    count("2026-09-20T09:30:00Z", 40),
+    model("2026-09-20T10:00:00Z", "gpt-5.5-mini"),
+    count("2026-09-20T10:30:00Z", 70),
+  ]);
+  const { rows } = await run(home, state);
+  assert.deepEqual(summary(rows), [[S4, "2026-09-20", 10, "gpt-5.5-mini=30", "gpt-5.5=0"]]);
+  assert.deepEqual((await run(home, state)).rows, []);
+});
+
+test("a fork counts a copied turn once in the hour its original turn started, across UTC midnight", async () => {
+  const home = mkdtempSync(path.join(tmpdir(), "acx-usage-fork-hour-"));
+  const S4 = "019e0000-0000-7000-8000-000000000004";
+  const S5 = "019e0000-0000-7000-8000-000000000005";
+  const late = turnId("2026-09-20T23:59:30Z", 5);
+  const copied = [turn("2026-09-20T23:59:30Z", late), model("2026-09-20T23:59:31Z", "gpt-5.5"), count("2026-09-21T00:00:10Z", 80, 8)];
+  for (const [id, created] of [[S5, "2026-09-22T09:00:00Z"], ["019e0000-0000-7000-8000-000000000006", "2026-09-23T14:00:00Z"]]) {
+    writeRollout(rolloutPath(home, created.slice(0, 10), id), forkOf(id, S4, created, copied, []));
+  }
+  const state = await emptyState(home);
+  const { rows, report } = await run(home, state);
+  assert.deepEqual(summary(rows), [[S4, "2026-09-20", 23, "gpt-5.5=88"]]);
+  assert.equal(report.copiedTurns, 1);
+  assert.deepEqual((await run(home, state)).rows, []);
+});
+
+test("a re-run from lost state posts the same hourly rows again, which the backend replaces", async () => {
+  const home = fixtureHome();
+  const first = await run(home, await emptyState(home));
+  const again = await run(home, await emptyState(home));
+  assert.deepEqual(again.rows, first.rows);
 });
 
 test("a fork keeps skipping its copied history after its original is gone", async () => {
@@ -221,18 +267,18 @@ test("a fork keeps skipping its copied history after its original is gone", asyn
   rmSync(rolloutPath(home, "2026-09-20", A1));
   append(rolloutPath(home, "2026-09-22", S2), count("2026-09-22T10:00:00Z", 105, 10));
   const { rows, report } = await run(home, state);
-  assert.deepEqual(summary(rows), [[S2, "2026-09-22", "gpt-5.5=15"]]);
+  assert.deepEqual(summary(rows), [[S2, "2026-09-22", 10, "gpt-5.5=10"]]);
   assert.equal(report.forksWithoutOriginal, 0);
 });
 
-test("a fork whose original is gone counts the copied turn once, on the day it ran, under the original", async () => {
+test("a fork whose original is gone counts the copied turn once, in the hour it started, under the original", async () => {
   const home = fixtureHome();
   rmSync(rolloutPath(home, "2026-09-20", S1));
   const { rows, report } = await run(home, await emptyState(home));
   assert.deepEqual(summary(rows), [
-    [S1, "2026-09-20", "gpt-5.5-mini=7", "gpt-5.5=100"],
-    [S2, "2026-09-22", "gpt-5.5=5"],
-    [S3, "2026-09-19", "gpt-5.5=30"],
+    [S1, "2026-09-20", 9, "gpt-5.5-mini=7", "gpt-5.5=100"],
+    [S2, "2026-09-22", 9, "gpt-5.5=5"],
+    [S3, "2026-09-19", 9, "gpt-5.5=30"],
   ]);
   assert.equal(report.copiedTurns, 1);
   assert.equal(report.forksWithoutOriginal, 0);
@@ -246,9 +292,9 @@ test("two forks of a missing original count its copied turn once, from the longe
   writeRollout(rolloutPath(home, "2026-09-23", S4), forkOf(S4, S1, "2026-09-23T09:00:00Z", s1Turn.slice(0, 3), []));
   const { rows, report } = await run(home, await emptyState(home));
   assert.deepEqual(summary(rows), [
-    [S1, "2026-09-20", "gpt-5.5=100"],
-    [S2, "2026-09-22", "gpt-5.5=5"],
-    [S3, "2026-09-19", "gpt-5.5=30"],
+    [S1, "2026-09-20", 9, "gpt-5.5=100"],
+    [S2, "2026-09-22", 9, "gpt-5.5=5"],
+    [S3, "2026-09-19", 9, "gpt-5.5=30"],
   ]);
   assert.equal(report.copiedTurns, 1);
 });
@@ -266,11 +312,11 @@ test("a fork of a missing fork counts each copied turn under the session that ra
   );
   const { rows, report } = await run(home, await emptyState(home));
   assert.deepEqual(summary(rows), [
-    [S1, "2026-09-20", "gpt-5.5=100", "gpt-5.5-mini=7"],
-    [S1, "2026-09-21", "gpt-5.5=50"],
-    [S2, "2026-09-22", "gpt-5.5=5"],
-    [S3, "2026-09-19", "gpt-5.5=30"],
-    [S4, "2026-09-24", "gpt-5.5=31"],
+    [S1, "2026-09-20", 9, "gpt-5.5=100", "gpt-5.5-mini=7"],
+    [S1, "2026-09-21", 10, "gpt-5.5=50"],
+    [S2, "2026-09-22", 9, "gpt-5.5=5"],
+    [S3, "2026-09-19", 9, "gpt-5.5=30"],
+    [S4, "2026-09-24", 9, "gpt-5.5=31"],
   ]);
   assert.equal(report.copiedTurns, 1);
 });
@@ -286,9 +332,9 @@ test("copies that name different originals count the turn under the oldest one",
   );
   const { rows, report } = await run(home, await emptyState(home));
   assert.deepEqual(summary(rows), [
-    [S1, "2026-09-20", "gpt-5.5=100"],
-    [S2, "2026-09-22", "gpt-5.5=5"],
-    [S3, "2026-09-19", "gpt-5.5=30"],
+    [S1, "2026-09-20", 9, "gpt-5.5=100"],
+    [S2, "2026-09-22", 9, "gpt-5.5=5"],
+    [S3, "2026-09-19", 9, "gpt-5.5=30"],
   ]);
   assert.equal(report.copiedTurns, 1);
 });
@@ -301,7 +347,7 @@ test("an original that turns up later takes its turn back from the copy", async 
   await run(home, state);
   writeFileSync(rolloutPath(home, "2026-09-20", S1), original);
   const { rows, report } = await run(home, state);
-  assert.deepEqual(summary(rows), [[S1, "2026-09-21", "gpt-5.5=50"]]);
+  assert.deepEqual(summary(rows), [[S1, "2026-09-21", 10, "gpt-5.5=50"]]);
   assert.equal(report.copiedTurns, 0);
 });
 
@@ -314,17 +360,17 @@ test("a fork without turn ids counts all of its history when its original was ne
     count("2026-09-22T09:05:00Z", 95, 10),
   ]);
   const { rows, report } = await run(home, await emptyState(home));
-  assert.deepEqual(summary(rows), [[S4, "2026-09-22", "gpt-5.5=105"]]);
+  assert.deepEqual(summary(rows), [[S4, "2026-09-22", 9, "gpt-5.5=105"]]);
   assert.equal(report.forksWithoutOriginal, 1);
 });
 
-test("a failed day is retried on the next run", async () => {
+test("a failed hour is retried on the next run", async () => {
   const home = fixtureHome();
   const state = await emptyState(home);
   const first = await run(home, state, { fail: (row) => row.sessionId === S3 });
   assert.equal(first.report.failed, 1);
   const { rows } = await run(home, state);
-  assert.deepEqual(summary(rows), [[S3, "2026-09-19", "gpt-5.5=30"]]);
+  assert.deepEqual(summary(rows), [[S3, "2026-09-19", 9, "gpt-5.5=30"]]);
 });
 
 test("sessions the plugin saw post armored, and stay armored", async () => {
@@ -376,8 +422,8 @@ test("a fork's copied token_usage_records count nothing", async () => {
   ]);
   const { rows } = await run(home, await emptyState(home));
   assert.deepEqual(summary(rows), [
-    [S4, "2026-09-08", "gpt-5.5=77"],
-    [S5, "2026-09-09", "gpt-5.5=10"],
+    [S4, "2026-09-08", 9, "gpt-5.5=77"],
+    [S5, "2026-09-09", 9, "gpt-5.5=10"],
   ]);
 });
 
@@ -408,7 +454,7 @@ function baseEnv(home, port) {
     ARMORIQ_DEVICE_ID_PATH: path.join(home, "device-id"),
     ARMORIQ_ENV: "local",
     ARMORCODEX_USE_PRODUCTION: "false",
-    ...(port ? { ARMORCODEX_BACKEND_ENDPOINT: `http://127.0.0.1:${port}` } : {}),
+    ...(port ? { ARMORCODEX_BACKEND_ENDPOINT: `http://127.0.0.1:${port}`, IAP_ENDPOINT: `http://127.0.0.1:${port}`, PROXY_ENDPOINT: `http://127.0.0.1:${port}` } : {}),
   };
 }
 
@@ -433,14 +479,17 @@ test("usage-sync --dry-run prints each row, then finds nothing changed", async (
     .split("\n")
     .map((l) => JSON.parse(l));
   assert.deepEqual(summary(rows), FIRST_ROWS);
-  for (const row of rows) assert.equal(row.product, "armorcodex");
+  for (const row of rows) {
+    assert.equal(row.product, "armorcodex");
+    assert.ok(Number.isInteger(row.usageHour) && row.usageHour >= 0 && row.usageHour <= 23);
+  }
   assert.match(first.stderr, /4 rollout\(s\) under .*\(1 other file\(s\)\)/);
-  assert.match(first.stderr, /4 changed, 4 read, 3 session\(s\); would post 4 session-day\(s\) \(192 tokens\)/);
+  assert.match(first.stderr, /4 changed, 4 read, 3 session\(s\); would post 4 session-hour\(s\) \(192 tokens\)/);
 
   const second = await node([SYNC, "--dry-run"], baseEnv(home));
   assert.equal(second.status, 0, second.stderr);
   assert.equal(second.stdout, "");
-  assert.match(second.stderr, /0 changed, 0 read, 3 session\(s\); would post 0 session-day\(s\)/);
+  assert.match(second.stderr, /0 changed, 0 read, 3 session\(s\); would post 0 session-hour\(s\)/);
 });
 
 test("usage-sync without an API key posts nothing", async () => {
@@ -541,7 +590,7 @@ const readLastRun = (statePath) => {
   }
 };
 
-test("SessionStart and Stop hooks run the sync, which posts each session-day with its date", async () => {
+test("SessionStart and Stop hooks run the sync, which posts each session-hour with its date and hour", async () => {
   const home = fixtureHome();
   const statePath = path.join(home, "data", "usage-sync-state.json");
   const { server, posts, port } = await fakeBackend();
@@ -573,12 +622,12 @@ test("SessionStart and Stop hooks run the sync, which posts each session-day wit
     await hook("SessionStart");
     await until(settled(undefined), "the SessionStart pass");
     const rows = (list) =>
-      list.map((p) => [p.sessionId, p.usageDate, p.product, p.repo, p.entries.length]).sort();
+      list.map((p) => [p.sessionId, p.usageDate, p.usageHour, p.product, p.repo, p.entries.length]).sort();
     const expected = [
-      [S1, "2026-09-20", "armorcodex", "/work/repo-a", 2],
-      [S1, "2026-09-21", "armorcodex", "/work/repo-a", 1],
-      [S2, "2026-09-22", "armorcodex", "/work/repo-b", 1],
-      [S3, "2026-09-19", "armorcodex", "/work/repo-c", 1],
+      [S1, "2026-09-20", 9, "armorcodex", "/work/repo-a", 2],
+      [S1, "2026-09-21", 10, "armorcodex", "/work/repo-a", 1],
+      [S2, "2026-09-22", 9, "armorcodex", "/work/repo-b", 1],
+      [S3, "2026-09-19", 9, "armorcodex", "/work/repo-c", 1],
     ];
     assert.deepEqual(rows(posts), expected);
 
@@ -588,9 +637,9 @@ test("SessionStart and Stop hooks run the sync, which posts each session-day wit
     await until(settled(firstRun), "the Stop pass");
     assert.deepEqual(
       rows(posts),
-      [...expected, [S2, "2026-09-22", "armorcodex", "/work/repo-b", 1]].sort()
+      [...expected, [S2, "2026-09-22", 10, "armorcodex", "/work/repo-b", 1]].sort()
     );
-    assert.equal(posts.at(-1).entries[0].inputTokens, 15);
+    assert.equal(posts.at(-1).entries[0].inputTokens, 10);
   } finally {
     server.close();
   }
