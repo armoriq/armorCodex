@@ -4,6 +4,7 @@ import { mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { loadConfig, requireEndpoint } from "../plugins/armorcodex/scripts/lib/config.mjs";
+import { getSdkClient } from "../plugins/armorcodex/scripts/lib/intent.mjs";
 import { createCryptoPolicyService } from "../plugins/armorcodex/scripts/lib/crypto-policy.mjs";
 import { createIapService } from "../plugins/armorcodex/scripts/lib/iap-service.mjs";
 
@@ -59,6 +60,13 @@ test("requireEndpoint names the variable a custom backend is missing", () => {
   assert.throws(() => requireEndpoint(config, "iapEndpoint"), /IAP_ENDPOINT/);
   assert.throws(() => requireEndpoint(config, "csrgEndpoint"), /CSRG_URL.*IAP_ENDPOINT/);
   assert.equal(requireEndpoint(loadConfig({}), "proxyEndpoint"), ROWS.production[1]);
+});
+
+test("the SDK client is never built with an endpoint config did not resolve", () => {
+  const noProxy = loadConfig({ BACKEND_ENDPOINT: CUSTOM, ARMORIQ_API_KEY: "ak_test_pairing", IAP_ENDPOINT: "http://127.0.0.1:3932" });
+  assert.throws(() => getSdkClient(noProxy), /PROXY_ENDPOINT/);
+  const noIap = loadConfig({ BACKEND_ENDPOINT: CUSTOM, ARMORIQ_API_KEY: "ak_test_pairing", PROXY_ENDPOINT: "http://127.0.0.1:3931" });
+  assert.throws(() => getSdkClient(noIap), /IAP_ENDPOINT/);
 });
 
 test("crypto policy and CSRG verification refuse a custom backend without posting", async (t) => {
