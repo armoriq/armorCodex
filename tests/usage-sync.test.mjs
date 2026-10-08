@@ -264,16 +264,6 @@ test("a re-run from lost state posts the same hourly rows again, which the backe
   assert.deepEqual(again.rows, first.rows);
 });
 
-test("a sync state written per day is discarded, so every hour is posted", async () => {
-  const home = fixtureHome();
-  const statePath = path.join(home, "state.json");
-  writeFileSync(statePath, JSON.stringify({ version: 1, files: {}, sessions: { [S1]: { days: {} } } }));
-  const state = await loadSyncState(statePath);
-  assert.deepEqual(state.sessions, {});
-  const { rows } = await run(home, state);
-  assert.deepEqual(summary(rows), FIRST_ROWS);
-});
-
 test("a fork keeps skipping its copied history after its original is gone", async () => {
   const home = fixtureHome();
   const state = await emptyState(home);
@@ -469,7 +459,7 @@ function baseEnv(home, port) {
     ARMORIQ_DEVICE_ID_PATH: path.join(home, "device-id"),
     ARMORIQ_ENV: "local",
     ARMORCODEX_USE_PRODUCTION: "false",
-    ...(port ? { ARMORCODEX_BACKEND_ENDPOINT: `http://127.0.0.1:${port}` } : {}),
+    ...(port ? { ARMORCODEX_BACKEND_ENDPOINT: `http://127.0.0.1:${port}`, IAP_ENDPOINT: `http://127.0.0.1:${port}`, PROXY_ENDPOINT: `http://127.0.0.1:${port}` } : {}),
   };
 }
 

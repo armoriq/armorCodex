@@ -3,7 +3,7 @@ import path from "node:path";
 import { readJson } from "./fs-store.mjs";
 import { readRollout, rolloutUsage, sumEntries, usageSignature } from "./token-usage.mjs";
 
-const STATE_VERSION = 2;
+const STATE_VERSION = 1;
 const ROLLOUT_RE =
   /^rollout-.*-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i;
 
