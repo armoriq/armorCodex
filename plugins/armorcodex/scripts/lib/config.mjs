@@ -97,6 +97,15 @@ function pluginOpt(env, pluginKey, legacyKey) {
 const PRODUCT = "armorcodex";
 const { loadLoginContext } = armoriqSdk;
 
+function savedLogin(backend) {
+  try {
+    return loadLoginContext({ backend, product: PRODUCT });
+  } catch (error) {
+    if (typeof error?.code === "string") return null;
+    throw error;
+  }
+}
+
 export function loadConfig(env = process.env) {
   const mode = (pluginOpt(env, "MODE", "ARMORCODEX_MODE") || "enforce").toLowerCase();
   const { useProduction, backendEndpoint, iapEndpoint, proxyEndpoint, csrgEndpoint } = resolveEndpoints(env);
@@ -118,7 +127,7 @@ export function loadConfig(env = process.env) {
 
   const apiKey =
     pluginOpt(env, "API_KEY", "ARMORIQ_API_KEY") ||
-    (loadLoginContext({ backend: backendEndpoint, product: PRODUCT })?.profile?.apiKey ?? "");
+    (savedLogin(backendEndpoint)?.profile?.apiKey ?? "");
 
   // Observability ("Model A" trace export) is ON by default whenever an API
   // key is configured — opt out via the `disable_observability` plugin

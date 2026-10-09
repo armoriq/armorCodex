@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync } from "node:fs";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
@@ -71,6 +71,23 @@ test("a login for another product is not used", () => {
 test("a lookalike backend host does not match", () => {
   const config = withSavedLogin({ backend: "https://api.armoriq.ai.evil.test" }, () => loadConfig({}));
   assert.equal(config.apiKey, "");
+});
+
+test("a credentials file that can't be read counts as no saved login", () => {
+  const home = mkdtempSync(path.join(os.tmpdir(), "armorcodex-unreadable-"));
+  mkdirSync(path.join(home, ".armoriq", "credentials.json"), { recursive: true });
+  const real = os.homedir;
+  os.homedir = () => home;
+  syncBuiltinESMExports();
+  try {
+    assert.ok(os.homedir().startsWith(os.tmpdir()), os.homedir());
+    const config = loadConfig({});
+    assert.equal(config.apiKey, "");
+    assert.equal(config.auditEnabled, false);
+  } finally {
+    os.homedir = real;
+    syncBuiltinESMExports();
+  }
 });
 
 test("ARMORIQ_API_KEY is used over the saved login", () => {
