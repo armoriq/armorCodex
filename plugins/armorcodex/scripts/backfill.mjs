@@ -141,7 +141,7 @@ async function main() {
   const config = loadConfig(process.env);
   if (!config.apiKey) {
     console.error(
-      "[backfill] no API key. Set ARMORIQ_API_KEY or ~/.armoriq/credentials.json first.",
+      `[backfill] no ArmorCodex login for ${config.backendEndpoint}. Run: armoriq-dev login --product armorcodex`,
     );
     process.exit(1);
   }
