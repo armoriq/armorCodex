@@ -54,7 +54,6 @@ function lockHeld(lockPath) {
   }
 }
 
-/** Last time a pass was requested, in epoch ms; 0 when none was. */
 export function requestedAt(requestPath) {
   try {
     return statSync(requestPath).mtimeMs;
@@ -81,14 +80,6 @@ function logSize(logPath) {
   }
 }
 
-/**
- * Start scripts/usage-sync.mjs as a detached process with this hook's
- * environment, and return without waiting for it. Its stderr goes to
- * usage-sync.log in the data dir. Starts nothing while a live sync holds the
- * lock. Returns false when the config disables the usage sync (no API key,
- * observability off, or `disable_usage_sync` set) or the process could not be
- * started.
- */
 export function launchUsageSync(config) {
   if (!config?.usageSyncEnabled) return false;
   try {
@@ -116,11 +107,6 @@ export function launchUsageSync(config) {
   }
 }
 
-/**
- * Ask for a sync pass that starts after now: touch the request marker, then
- * launch a sync unless one is running. A running sync checks the marker after
- * each pass and after releasing its lock, so it runs again instead.
- */
 export function requestUsageSync(config) {
   if (!config?.usageSyncEnabled) return false;
   try {
