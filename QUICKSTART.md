@@ -33,10 +33,10 @@ Then ask Codex to run a shell command. ArmorCodex will inject an instruction to 
 ## 4. Optional ArmorIQ Backend
 
 ```bash
-export ARMORIQ_API_KEY=...
+armoriq-dev login --product armorcodex
 ```
 
-Without an API key, ArmorCodex still performs local policy and local plan enforcement. With an API key, it can request signed intent tokens and send audit logs.
+Without a saved login, ArmorCodex performs local policy and local plan enforcement. After login, it can request signed intent tokens and send audit logs.
 
 ## Current Limitation
 
