@@ -102,6 +102,15 @@ function pluginOpt(env, pluginKey, legacyKey) {
 const PRODUCT = "armorcodex";
 const { loadLoginContext } = armoriqSdk;
 
+function savedLogin(backend) {
+  try {
+    return loadLoginContext({ backend, product: PRODUCT });
+  } catch (error) {
+    if (typeof error?.code === "string") return null;
+    throw error;
+  }
+}
+
 export function loadConfig(env = process.env) {
   const mode = (
     pluginOpt(env, "MODE", "ARMORCODEX_MODE") || "enforce"
@@ -129,10 +138,7 @@ export function loadConfig(env = process.env) {
 
   const timeoutMs = parseInteger(env.ARMORCODEX_TIMEOUT_MS, 8000);
 
-  const login = loadLoginContext({
-    backend: backendEndpoint,
-    product: PRODUCT,
-  });
+  const login = savedLogin(backendEndpoint);
   const profile = login?.profile;
   const apiKey = profile?.apiKey ?? "";
 
