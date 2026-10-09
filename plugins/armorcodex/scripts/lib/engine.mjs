@@ -158,14 +158,8 @@ export async function handleSessionStart(input, config) {
 
   const modeLabel = config.mode === "enforce" ? "ENFORCING" : "MONITORING";
   const intentLabel = config.intentRequired ? "required" : "optional";
-  const ignored = config.ignoredSavedCredential;
-  const ignoredNote = ignored
-    ? `\nNo API key in use. The key saved in ~/.armoriq/credentials.json is for ` +
-      `${ignored.product || "no product"} on ${ignored.backend || "an unrecorded backend"}, ` +
-      `not armorcodex on ${config.backendEndpoint}. Run \`armoriq login --product armorcodex\` to connect.`
-    : "";
   return addPromptContext(
-    `ArmorCodex active (${modeLabel}, intent=${intentLabel})${ignoredNote}`,
+    `ArmorCodex active (${modeLabel}, intent=${intentLabel})`,
     "SessionStart"
   );
 }
