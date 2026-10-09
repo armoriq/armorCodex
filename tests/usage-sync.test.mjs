@@ -20,7 +20,7 @@ import { fileURLToPath } from "node:url";
 import { loadConfig } from "../plugins/armorcodex/scripts/lib/config.mjs";
 import { signIn, withHome } from "./helpers/login.mjs";
 import { loadSyncState, syncUsage } from "../plugins/armorcodex/scripts/lib/usage-sync.mjs";
-import { observeHistory, ownedBy, ownedOrUnassigned } from "../plugins/armorcodex/scripts/lib/login-ownership.mjs";
+import { observeHistory, ownedBy, ownedOrUnassigned, validHistory } from "../plugins/armorcodex/scripts/lib/login-ownership.mjs";
 import {
   launchUsageSync,
   requestUsageSync,
@@ -853,4 +853,31 @@ test("a dashboard history request claims only unassigned time and its own, never
   const home = switchHome();
   const claimed = await run(home, await emptyState(home), { owns: ownedOrUnassigned(anchors, "B") });
   assert.deepEqual(hoursOf(claimed.rows), [[10, 24], [11, 17]]);
+});
+
+const rolledBack = (origin = "fresh") => loginHistory([[T("10:30"), "A"], [T("10:10"), "B"]], { origin });
+
+test("a login whose time is earlier than the one before it is accepted in sequence order", () => {
+  assert.equal(validHistory(rolledBack()), true);
+});
+
+test("after a clock rollback, usage in the overlap is posted for neither user and never claimed", async () => {
+  const anchors = anchorsOf(rolledBack());
+  const home = switchHome();
+  const asA = await run(home, await emptyState(home), { owns: ownedBy(anchors, "A") });
+  assert.deepEqual(hoursOf(asA.rows), [[9, 7]]);
+  const asB = await run(home, await emptyState(home), { owns: ownedBy(anchors, "B") });
+  assert.deepEqual(hoursOf(asB.rows), [[10, 13], [11, 17]]);
+  for (const user of ["A", "B"]) {
+    const claimed = await run(home, await emptyState(home), { owns: ownedOrUnassigned(anchors, user) });
+    assert.deepEqual(hoursOf(claimed.rows), user === "A" ? [[9, 7]] : [[10, 13], [11, 17]], user);
+  }
+});
+
+test("an overlap inside an archived history stays unclaimed after a gap", async () => {
+  const seen = anchorsOf(rolledBack("unknown"), T("11:00"));
+  const { anchors } = observeHistory(seen, loginHistory([[T("11:10"), "C"]], { id: "h-2", origin: "unknown" }), T("11:40"));
+  const home = switchHome();
+  const claimed = await run(home, await emptyState(home), { owns: ownedOrUnassigned(anchors, "C") });
+  assert.deepEqual(hoursOf(claimed.rows), [[9, 7], [11, 17]]);
 });

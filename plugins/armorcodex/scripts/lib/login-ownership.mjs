@@ -14,8 +14,7 @@ export function validHistory(history) {
     (e, i) =>
       e?.sequence === i + 1 &&
       canonical(e.at) &&
-      (e.userId === null || (typeof e.userId === "string" && e.userId !== "")) &&
-      (i === 0 || Date.parse(e.at) >= Date.parse(events[i - 1].at))
+      (e.userId === null || (typeof e.userId === "string" && e.userId !== ""))
   );
 }
 
@@ -41,35 +40,46 @@ export function observeHistory(anchors, history, now) {
   };
 }
 
-function ownerWithin(events, t, until) {
-  if (events.length === 0 || t < Date.parse(events[0].at) || t > until) return undefined;
-  let owner = null;
+const AMBIGUOUS = Symbol("ambiguous");
+const time = (e) => Date.parse(e.at);
+
+/** Clock ranges a rolled-back login shares with the logins before it. */
+function overlaps(events) {
+  const ranges = [];
+  let latest = -Infinity;
   for (const e of events) {
-    if (Date.parse(e.at) > t) break;
-    owner = e.userId;
+    if (time(e) < latest) ranges.push([time(e), latest]);
+    latest = Math.max(latest, time(e));
   }
-  return owner;
+  return ranges;
+}
+
+function ownerWithin(events, t, until, ambiguous) {
+  if (t > until) return undefined;
+  if (ambiguous.some(([from, to]) => t >= from && t <= to)) return AMBIGUOUS;
+  return events.findLast((e) => time(e) <= t)?.userId;
 }
 
 const firstUserIfFresh = (anchor, t) =>
   anchor.origin === "fresh" && t < Date.parse(anchor.events[0].at) ? anchor.events[0].userId : null;
 
 /**
- * The user who owned instant `t` (epoch ms), or null when it was logged out or
- * is unknown. Up to the last time an archived history was seen, that history
- * decides; after it, only logins newer than that proof count.
+ * The user who owned instant `t` (epoch ms), null when it was logged out or is
+ * unknown, or AMBIGUOUS inside a clock rollback's overlap. Up to the last time
+ * an archived history was seen, that history decides; after it, only logins
+ * newer than that proof count.
  */
 export function ownerAt({ current, archived }, t) {
   const provenUntil = Math.max(-Infinity, ...archived.map((a) => Date.parse(a.observedAt)));
   if (t <= provenUntil) {
     for (const anchor of [...archived].reverse()) {
-      const owner = ownerWithin(anchor.events, t, Date.parse(anchor.observedAt));
+      const owner = ownerWithin(anchor.events, t, Date.parse(anchor.observedAt), overlaps(anchor.events));
       if (owner !== undefined) return owner;
     }
     return firstUserIfFresh(archived[0], t);
   }
-  const trusted = current.events.filter((e) => Date.parse(e.at) > provenUntil);
-  const owner = ownerWithin(trusted, t, Infinity);
+  const trusted = current.events.filter((e) => time(e) > provenUntil);
+  const owner = ownerWithin(trusted, t, Infinity, overlaps(current.events));
   if (owner !== undefined) return owner;
   return archived.length ? null : firstUserIfFresh(current, t);
 }
