@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "../plugins/armorcodex/scripts/lib/config.mjs";
+import { signIn, withHome } from "./helpers/login.mjs";
 import { loadSyncState, syncUsage } from "../plugins/armorcodex/scripts/lib/usage-sync.mjs";
 import {
   launchUsageSync,
@@ -526,7 +527,9 @@ test("usageSyncEnabled needs observability on and disable_usage_sync unset", () 
     [{ ARMORCODEX_OBSERVABILITY_DISABLED: "yes" }, false, false],
   ];
   for (const [env, observability, usageSync] of cases) {
-    const cfg = loadConfig({ CODEX_PLUGIN_OPTION_API_KEY: KEY, ...env });
+    const home = mkdtempSync(path.join(tmpdir(), "acx-config-"));
+    signIn(home, { backend: loadConfig({}).backendEndpoint, apiKey: KEY });
+    const cfg = withHome(home, () => loadConfig(env));
     assert.equal(cfg.observabilityEnabled, observability, JSON.stringify(env));
     assert.equal(cfg.usageSyncEnabled, usageSync, JSON.stringify(env));
   }
@@ -535,11 +538,8 @@ test("usageSyncEnabled needs observability on and disable_usage_sync unset", () 
 test("the launcher starts no sync and writes no request while the usage sync is off", () => {
   for (const [name, toggles] of TOGGLES) {
     const dataDir = mkdtempSync(path.join(tmpdir(), "acx-sync-off-"));
-    const cfg = loadConfig({
-      CODEX_PLUGIN_OPTION_API_KEY: KEY,
-      ARMORCODEX_DATA_DIR: dataDir,
-      ...toggles,
-    });
+    signIn(dataDir, { backend: loadConfig({}).backendEndpoint, apiKey: KEY });
+    const cfg = withHome(dataDir, () => loadConfig({ ARMORCODEX_DATA_DIR: dataDir, ...toggles }));
     assert.equal(requestUsageSync(cfg), false, name);
     assert.equal(launchUsageSync(cfg), false, name);
     assert.equal(existsSync(path.join(dataDir, "usage-sync-state.json.request")), false, name);
@@ -551,12 +551,8 @@ test("usage-sync posts nothing while observability or the usage sync is off", as
   const { server, posts, port } = await fakeBackend();
   try {
     for (const [name, toggles] of TOGGLES) {
-      const home = fixtureHome();
-      const res = await node([SYNC], {
-        ...baseEnv(home, port),
-        CODEX_PLUGIN_OPTION_API_KEY: KEY,
-        ...toggles,
-      });
+      const home = signIn(fixtureHome(), { backend: `http://127.0.0.1:${port}`, apiKey: KEY });
+      const res = await node([SYNC], { ...baseEnv(home, port), ...toggles });
       assert.equal(res.status, 0, res.stderr);
       assert.match(res.stderr, /usage sync is off .*nothing synced/, name);
       assert.equal(existsSync(path.join(home, "data", "usage-sync-state.json")), false, name);
@@ -564,8 +560,7 @@ test("usage-sync posts nothing while observability or the usage sync is off", as
     assert.equal(posts.length, 0);
 
     const res = await node([SYNC], {
-      ...baseEnv(fixtureHome(), port),
-      CODEX_PLUGIN_OPTION_API_KEY: KEY,
+      ...baseEnv(signIn(fixtureHome(), { backend: `http://127.0.0.1:${port}`, apiKey: KEY }), port),
       CODEX_PLUGIN_OPTION_DISABLE_OBSERVABILITY: "false",
       CODEX_PLUGIN_OPTION_DISABLE_USAGE_SYNC: "false",
     });
@@ -596,7 +591,8 @@ test("SessionStart and Stop hooks run the sync, which posts each session-hour wi
   const home = fixtureHome();
   const statePath = path.join(home, "data", "usage-sync-state.json");
   const { server, posts, port } = await fakeBackend();
-  const env = { ...baseEnv(home, port), CODEX_PLUGIN_OPTION_API_KEY: KEY };
+  signIn(home, { backend: `http://127.0.0.1:${port}`, apiKey: KEY });
+  const env = baseEnv(home, port);
   const hook = (event, toggles = {}) =>
     node(
       [ROUTER],
