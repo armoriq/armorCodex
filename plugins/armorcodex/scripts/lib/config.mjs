@@ -1,5 +1,5 @@
+import armoriqSdk from "@armoriq/sdk-dev";
 import { homedir } from "node:os";
-import { readFileSync } from "node:fs";
 import path from "node:path";
 import { parseBoolean, parseInteger, parseList } from "./common.mjs";
 
@@ -95,21 +95,7 @@ function pluginOpt(env, pluginKey, legacyKey) {
 }
 
 const PRODUCT = "armorcodex";
-
-function normalizeBackend(url) {
-  if (typeof url !== "string" || !url.trim()) return "";
-  try {
-    const parsed = new URL(url.trim());
-    return `${parsed.origin}${parsed.pathname.replace(/\/+$/, "")}`;
-  } catch {
-    return "";
-  }
-}
-
-function savedLoginMatches(scope, backendEndpoint) {
-  const saved = normalizeBackend(scope.backend);
-  return scope.product === PRODUCT && saved !== "" && saved === normalizeBackend(backendEndpoint);
-}
+const { loadLoginContext } = armoriqSdk;
 
 export function loadConfig(env = process.env) {
   const mode = (pluginOpt(env, "MODE", "ARMORCODEX_MODE") || "enforce").toLowerCase();
@@ -130,28 +116,9 @@ export function loadConfig(env = process.env) {
 
   const timeoutMs = parseInteger(env.ARMORCODEX_TIMEOUT_MS, 8000);
 
-  // API key resolution: plugin config → env var → ~/.armoriq/credentials.json
-  let apiKey = pluginOpt(env, "API_KEY", "ARMORIQ_API_KEY");
-  let ignoredSavedCredential = null;
-  if (!apiKey) {
-    try {
-      const credPath = path.join(homedir(), ".armoriq", "credentials.json");
-      const creds = JSON.parse(readFileSync(credPath, "utf-8"));
-      if (creds?.apiKey && typeof creds.apiKey === "string") {
-        const scope = {
-          product: typeof creds.product === "string" ? creds.product : "",
-          backend: typeof creds.backend === "string" ? creds.backend : ""
-        };
-        if (savedLoginMatches(scope, backendEndpoint)) {
-          apiKey = creds.apiKey;
-        } else {
-          ignoredSavedCredential = scope;
-        }
-      }
-    } catch {
-      // no credentials file — local-only mode
-    }
-  }
+  const apiKey =
+    pluginOpt(env, "API_KEY", "ARMORIQ_API_KEY") ||
+    (loadLoginContext({ backend: backendEndpoint, product: PRODUCT })?.profile?.apiKey ?? "");
 
   // Observability ("Model A" trace export) is ON by default whenever an API
   // key is configured — opt out via the `disable_observability` plugin
@@ -174,7 +141,6 @@ export function loadConfig(env = process.env) {
     proxyEndpoint,
     csrgEndpoint,
     apiKey,
-    ignoredSavedCredential,
 
     // Observability ("Model A" trace export, per-plan via disk — see
     // scripts/lib/observability.mjs). Default ON whenever an API key is
