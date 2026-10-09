@@ -15,6 +15,16 @@ const PROD = "https://api.armoriq.ai";
 const LOCAL = "http://127.0.0.1:3920";
 const KEY = "ak_test_savedlogin0000000000000000";
 
+test("the manifest offers no API-key setting alongside the login profile", () => {
+  const manifest = JSON.parse(
+    fs.readFileSync(
+      new URL("../plugins/armorcodex/.codex-plugin/plugin.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  assert.equal(Object.hasOwn(manifest.userConfig, "api_key"), false);
+});
+
 function withLogins(records, fn) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "armorcodex-creds-"));
   assert.ok(home.startsWith(os.tmpdir()), home);
