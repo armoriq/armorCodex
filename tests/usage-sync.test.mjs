@@ -881,3 +881,24 @@ test("an overlap inside an archived history stays unclaimed after a gap", async 
   const claimed = await run(home, await emptyState(home), { owns: ownedOrUnassigned(anchors, "C") });
   assert.deepEqual(hoursOf(claimed.rows), [[9, 7], [11, 17]]);
 });
+
+test("the shared clock-rollback history: overlap usage is posted for no one and nothing counts twice", async () => {
+  const anchors = anchorsOf(JSON.parse(readFileSync(new URL("./fixtures/login-clock-rollback.json", import.meta.url))));
+  const at = (time) => `2026-10-09T${time}Z`;
+  const home = mkdtempSync(path.join(tmpdir(), "acx-rollback-"));
+  writeRollout(rolloutPath(home, "2026-10-09", S1), [
+    meta(at("08:59:00.000"), { id: S1, session_id: S1, cwd: "/work/repo-a" }),
+    model(at("08:59:00.000"), "gpt-5.5"),
+    count(at("09:00:00.000"), 5),
+    count(at("09:55:00.000"), 12),
+    count(at("10:37:12.344"), 23),
+    count(at("10:59:59.999"), 36),
+    count(at("11:05:00.000"), 53),
+    count(at("11:30:00.000"), 72)
+  ]);
+  const posted = async (owns) => hoursOf((await run(home, await emptyState(home), { owns })).rows);
+  assert.deepEqual(await posted(ownedBy(anchors, "A")), [[11, 36]]);
+  assert.deepEqual(await posted(ownedBy(anchors, "B")), [[10, 24]]);
+  assert.deepEqual(await posted(ownedOrUnassigned(anchors, "A")), [[9, 5], [11, 36]]);
+  assert.deepEqual(await posted(ownedOrUnassigned(anchors, "B")), [[9, 5], [10, 24]]);
+});
