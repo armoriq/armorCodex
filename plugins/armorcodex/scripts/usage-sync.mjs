@@ -17,7 +17,9 @@ import { readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { loadConfig } from "./lib/config.mjs";
+import { confirmHistory, historyRequest, startHistory } from "./lib/history-request.mjs";
 import { keyOwner } from "./lib/key-owner.mjs";
+import { loginOwnership } from "./lib/login-ownership.mjs";
 import { deviceIdentity } from "./lib/device.mjs";
 import { ensurePrivateDir, PRIVATE_FILE_MODE, writeJson } from "./lib/fs-store.mjs";
 import { getSdkClient } from "./lib/intent.mjs";
@@ -75,22 +77,27 @@ async function ownStatePath(config) {
     log(`could not resolve the API key's user (${owner.reason}), nothing synced`);
     return null;
   }
-  return userStatePath(config.dataDir, {
+  const statePath = userStatePath(config.dataDir, {
     backend: config.backendEndpoint,
     product: config.productSlug,
     userId: owner.userId,
   });
+  return { statePath, userId: owner.userId };
 }
 
 async function chooseStatePath(config) {
   if (stateIdx >= 0) return { statePath: path.resolve(argv[stateIdx + 1]), fixed: true };
   if (DRY) return { statePath: path.join(config.dataDir, "usage-sync-dry-run.json"), fixed: true };
-  return { statePath: await ownStatePath(config), fixed: false };
+  const own = await ownStatePath(config);
+  if (!own) return { statePath: null };
+  const history = await historyRequest(config, deviceIdentity().deviceId, log);
+  return { ...own, fixed: false, history };
 }
 
-async function syncPass({ config, statePath, deadline }) {
+async function syncPass({ config, statePath, history, owns, deadline }) {
   await ensurePrivateDir(path.dirname(statePath));
   const state = await loadSyncState(statePath);
+  if (startHistory(state, history)) log("the dashboard asked for this device's earlier history, uploading it");
   const runtime = await loadRuntimeState(config.runtimeFile);
   const { deviceId, deviceName } = deviceIdentity();
   const toBody = (row) => ({ product: config.productSlug, deviceId, deviceName, ...row });
@@ -108,7 +115,9 @@ async function syncPass({ config, statePath, deadline }) {
     post,
     isArmored: (sessionId) => Boolean(runtime.sessions[sessionId]),
     deadline,
+    owns,
   });
+  await confirmHistory({ config, deviceId, state, report, requestedAt: history, log });
   const { notRead, ...counts } = report;
   state.lastRun = { at: new Date().toISOString(), dryRun: DRY, ...counts };
   await writeJson(statePath, state);
@@ -125,7 +134,7 @@ async function syncPass({ config, statePath, deadline }) {
   if (report.failed) process.exitCode = 1;
 }
 
-async function runPasses({ config, statePath, paths, deadline }) {
+async function runPasses({ config, statePath, userId, fixed, history, paths, deadline }) {
   const mine = keyFingerprint(config.apiKey);
   let passStart = -Infinity;
   // A Stop can touch the request marker after the last pass began but see
@@ -137,10 +146,15 @@ async function runPasses({ config, statePath, paths, deadline }) {
       return;
     }
     try {
+      const owns = fixed ? undefined : await loginOwnership({ config, userId, request: history, log });
+      if (owns === null) {
+        process.exitCode = 1;
+        return;
+      }
       do {
         await debounce(paths.request, deadline);
         passStart = Date.now();
-        await syncPass({ config, statePath, deadline });
+        await syncPass({ config, statePath, history, owns, deadline });
       } while (requestedFor(paths.request, mine) >= passStart && Date.now() < deadline);
     } finally {
       await release();
@@ -162,7 +176,7 @@ async function main() {
     log("usage sync is off (observability disabled or disable_usage_sync set), nothing synced");
     return;
   }
-  const { statePath, fixed } = await chooseStatePath(config);
+  const { statePath, userId, fixed, history } = await chooseStatePath(config);
   if (!statePath) {
     process.exitCode = 1;
     return;
@@ -175,7 +189,7 @@ async function main() {
   }, HARD_STOP_MS);
   hardStop.unref();
   try {
-    await runPasses({ config, statePath, paths, deadline });
+    await runPasses({ config, statePath, userId, fixed, history, paths, deadline });
   } finally {
     clearTimeout(hardStop);
   }

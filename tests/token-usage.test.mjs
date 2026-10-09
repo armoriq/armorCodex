@@ -411,3 +411,102 @@ test("a turn that starts in the fork's first second is the fork's own", async ()
   assert.deepEqual(turns, [ownTurn]);
   assert.deepEqual(copiedTurns, {});
 });
+
+const ownedFrom = (iso) => (t) => t >= Date.parse(iso);
+const ownedBefore = (iso) => (t) => t < Date.parse(iso);
+
+test("an event another user owns is skipped, and the next owned event counts only its own growth", async () => {
+  const lines = [
+    { type: "turn_context", payload: { model: "gpt-5.5" } },
+    at(
+      "2026-10-09T10:20:00Z",
+      tokenCount({
+        input_tokens: 100,
+        cached_input_tokens: 20,
+        output_tokens: 10,
+      }),
+    ),
+    at(
+      "2026-10-09T10:45:00Z",
+      tokenCount({
+        input_tokens: 250,
+        cached_input_tokens: 70,
+        output_tokens: 30,
+      }),
+    ),
+  ];
+  const file = await writeRollout(lines);
+  assert.deepEqual(
+    rolloutUsage(readRollout(file), {}, ownedFrom("2026-10-09T10:37:00Z"))
+      .hours,
+    {
+      "2026-10-09T10": { "gpt-5.5": entry("gpt-5.5", 100, 20, 50) },
+    },
+  );
+  assert.deepEqual(
+    rolloutUsage(readRollout(file), {}, ownedBefore("2026-10-09T10:37:00Z"))
+      .hours,
+    {
+      "2026-10-09T10": { "gpt-5.5": entry("gpt-5.5", 80, 10, 20) },
+    },
+  );
+});
+
+test("a usage record follows its own timestamp's owner", async () => {
+  const file = await writeRollout([
+    { type: "turn_context", payload: { model: "gpt-5.5" } },
+    at(
+      "2026-10-09T10:20:00Z",
+      record("resp-a", { input_tokens: 40, output_tokens: 4 }),
+    ),
+    at(
+      "2026-10-09T10:45:00Z",
+      record("resp-b", { input_tokens: 25, output_tokens: 2 }),
+    ),
+  ]);
+  assert.deepEqual(
+    rolloutUsage(readRollout(file), {}, ownedFrom("2026-10-09T10:37:00Z"))
+      .hours,
+    {
+      "2026-10-09T10": { "gpt-5.5": entry("gpt-5.5", 25, 2) },
+    },
+  );
+});
+
+test("a fork's copied turn follows the owner at the time the turn ran", async () => {
+  const copiedTurn = v7("2026-09-20T23:59:30Z");
+  const ownTurn = v7("2026-09-22T09:04:00Z");
+  const file = await writeRollout([
+    at("2026-09-22T09:00:00Z", {
+      type: "session_meta",
+      payload: {
+        id: "fork",
+        forked_from_id: "original",
+        timestamp: "2026-09-22T09:00:00Z",
+      },
+    }),
+    at("2026-09-22T09:00:00Z", started(copiedTurn, "2026-09-20T23:59:30Z")),
+    at("2026-09-22T09:00:00Z", {
+      type: "turn_context",
+      payload: { model: "gpt-5.5" },
+    }),
+    at(
+      "2026-09-22T09:00:00Z",
+      tokenCount({ input_tokens: 300, output_tokens: 30 }),
+    ),
+    at("2026-09-22T09:04:00Z", started(ownTurn, "2026-09-22T09:04:00Z")),
+    at(
+      "2026-09-22T09:05:00Z",
+      tokenCount({ input_tokens: 340, output_tokens: 33 }),
+    ),
+  ]);
+  const usage = rolloutUsage(
+    readRollout(file),
+    {},
+    ownedFrom("2026-09-21T00:00:00Z"),
+  );
+  assert.deepEqual(usage.copiedTurns, {});
+  assert.deepEqual(usage.hours, {
+    "2026-09-22T09": { "gpt-5.5": entry("gpt-5.5", 40, 3) },
+  });
+});

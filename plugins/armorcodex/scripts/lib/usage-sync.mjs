@@ -73,7 +73,7 @@ const hasTurnIds = ({ events, records }) => [...events, ...records].some((item) 
  * token_count totals and token_usage_record response ids against its
  * original's, and kept as `copied` so later reads skip reading the original.
  */
-function readFileState(file, [size, mtimeMs], prev, rolloutsById, report) {
+function readFileState(file, [size, mtimeMs], prev, rolloutsById, report, owns) {
   const rollout = readRollout(file);
   const { meta } = rollout;
   const id = typeof meta?.id === "string" && meta.id ? meta.id : rolloutId(file);
@@ -88,7 +88,7 @@ function readFileState(file, [size, mtimeMs], prev, rolloutsById, report) {
       report.forksWithoutOriginal++;
     }
   }
-  const { hours, turns, copiedTurns } = rolloutUsage(rollout, copied);
+  const { hours, turns, copiedTurns } = rolloutUsage(rollout, copied, owns);
   for (const [turnId, turn] of Object.entries(copiedTurns)) {
     if (prev?.copiedTurns?.[turnId]?.owned) turn.owned = true;
   }
@@ -188,7 +188,7 @@ function changedHours(usageByHour, prevHours = {}) {
  * retried on the next run. A run that reaches `deadline` while reading posts
  * nothing; the next run reads the rest. `state` is updated in place.
  */
-export async function syncUsage({ roots, state, post, isArmored = () => false, deadline = Infinity }) {
+export async function syncUsage({ roots, state, post, isArmored = () => false, deadline = Infinity, owns }) {
   const { rollouts, other } = await listRollouts(roots);
   const stats = new Map();
   for (const file of rollouts) {
@@ -237,7 +237,8 @@ export async function syncUsage({ roots, state, post, isArmored = () => false, d
         stats.get(file),
         state.files[file],
         rolloutsById,
-        report
+        report,
+        owns
       );
       report.read++;
     } catch {

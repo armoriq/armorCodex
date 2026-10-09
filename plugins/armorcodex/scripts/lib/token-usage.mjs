@@ -193,14 +193,19 @@ const utcHour = (time) => new Date(time).toISOString().slice(0, 13);
  * count nothing, for forks whose turns carry no id. Copied events still set
  * the starting totals. `turns` lists the ids of the rollout's own turns.
  */
-export function rolloutUsage({ meta, events, records }, copied = {}) {
+export function rolloutUsage({ meta, events, records }, copied = {}, owns = () => true) {
   const createdAt = meta?.forked_from_id ? Date.parse(meta.timestamp) : NaN;
+  const kept = (item) => {
+    const at = item.turn && item.turn.time < createdAt ? item.turn.time : Date.parse(item.timestamp);
+    return Number.isNaN(at) || owns(at);
+  };
   const hours = {};
   const turns = new Set();
   const copiedTurns = {};
   const add = (item, usage) => {
     const [entry] = usageEntry(item.model, usage);
     if (!entry) return;
+    if (!kept(item)) return;
     let models;
     if (item.turn && item.turn.time < createdAt) {
       const turn = (copiedTurns[item.turn.id] ??= { hour: utcHour(item.turn.time), items: 0, models: {} });

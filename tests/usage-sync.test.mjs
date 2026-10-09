@@ -19,6 +19,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "../plugins/armorcodex/scripts/lib/config.mjs";
 import { loadSyncState, syncUsage } from "../plugins/armorcodex/scripts/lib/usage-sync.mjs";
+import { observeHistory, ownedBy, ownedOrUnassigned } from "../plugins/armorcodex/scripts/lib/login-ownership.mjs";
 import {
   launchUsageSync,
   requestUsageSync,
@@ -796,4 +797,63 @@ test("a backend URL with a trailing slash keys the same state", () => {
     userStatePath("/data", { ...who, backend: "http://127.0.0.1:9/" }),
     userStatePath("/data", { ...who, backend: "http://127.0.0.1:9" })
   );
+});
+
+const T = (hhmm) => `2026-10-09T${hhmm}:00.000Z`;
+const loginHistory = (events, { id = "h-1", origin = "fresh" } = {}) => ({
+  id,
+  origin,
+  events: events.map(([at, userId], i) => ({ sequence: i + 1, at, userId }))
+});
+const anchorsOf = (h, observedAt = T("23:00")) => observeHistory(null, h, observedAt).anchors;
+
+function switchHome() {
+  const home = mkdtempSync(path.join(tmpdir(), "acx-login-owner-"));
+  writeRollout(rolloutPath(home, "2026-10-09", S1), [
+    meta(T("09:00"), { id: S1, session_id: S1, cwd: "/work/repo-a" }),
+    model(T("09:00"), "gpt-5.5"),
+    count(T("09:10"), 7),
+    count(T("10:20"), 18),
+    count(T("10:45"), 31),
+    count(T("11:30"), 48)
+  ]);
+  return home;
+}
+
+const hoursOf = (rows) => rows.map((r) => [r.usageHour, total(r.entries[0])]).sort((a, b) => a[0] - b[0]);
+
+test("a mid-hour login splits a session-hour by event time, and the next owned event counts only its growth", async () => {
+  const anchors = anchorsOf(loginHistory([[T("09:00"), "A"], [T("10:37"), "B"]]));
+  const home = switchHome();
+  const asB = await run(home, await emptyState(home), { owns: ownedBy(anchors, "B") });
+  assert.deepEqual(hoursOf(asB.rows), [[10, 13], [11, 17]]);
+  const asA = await run(home, await emptyState(home), { owns: ownedBy(anchors, "A") });
+  assert.deepEqual(hoursOf(asA.rows), [[9, 7], [10, 11]]);
+});
+
+test("A -> B -> A with no sync while B was logged in keeps B's interval for B", async () => {
+  const anchors = anchorsOf(loginHistory([[T("09:00"), "A"], [T("10:37"), "B"], [T("11:05"), "A"]]));
+  const home = switchHome();
+  const asA = await run(home, await emptyState(home), { owns: ownedBy(anchors, "A") });
+  assert.deepEqual(hoursOf(asA.rows), [[9, 7], [10, 11], [11, 17]]);
+  const asB = await run(home, await emptyState(home), { owns: ownedBy(anchors, "B") });
+  assert.deepEqual(hoursOf(asB.rows), [[10, 13]]);
+});
+
+test("A's rows that failed before a switch are posted when A syncs again", async () => {
+  const anchors = anchorsOf(loginHistory([[T("09:00"), "A"], [T("10:37"), "B"], [T("11:05"), "A"]]));
+  const home = switchHome();
+  const state = await emptyState(home);
+  const failed = await run(home, state, { owns: ownedBy(anchors, "A"), fail: () => true });
+  assert.ok(failed.report.failed > 0);
+  const again = await run(home, state, { owns: ownedBy(anchors, "A") });
+  assert.deepEqual(hoursOf(again.rows), [[9, 7], [10, 11], [11, 17]]);
+});
+
+test("a dashboard history request claims only unassigned time and its own, never another user's", async () => {
+  const seen = anchorsOf(loginHistory([[T("09:00"), "A"]]), T("09:30"));
+  const { anchors } = observeHistory(seen, loginHistory([[T("11:00"), "B"]], { id: "h-2", origin: "unknown" }), T("11:40"));
+  const home = switchHome();
+  const claimed = await run(home, await emptyState(home), { owns: ownedOrUnassigned(anchors, "B") });
+  assert.deepEqual(hoursOf(claimed.rows), [[10, 24], [11, 17]]);
 });
