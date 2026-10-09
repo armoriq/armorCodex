@@ -6,7 +6,7 @@ function readJson(relativePath) {
   return JSON.parse(readFileSync(new URL(relativePath, import.meta.url), "utf8"));
 }
 
-test("release metadata uses the registry sdk-dev 0.8.11 SDK and one ArmorCodex version", () => {
+test("release metadata uses the registry sdk-dev 0.8.12 SDK and one ArmorCodex version", () => {
   const pkg = readJson("../plugins/armorcodex/package.json");
   const lock = readJson("../plugins/armorcodex/package-lock.json");
   const plugin = readJson("../plugins/armorcodex/.codex-plugin/plugin.json");
@@ -15,10 +15,10 @@ test("release metadata uses the registry sdk-dev 0.8.11 SDK and one ArmorCodex v
   const lockedSdk = lock.packages["node_modules/@armoriq/sdk-dev"];
 
   assert.equal(pkg.dependencies["@armoriq/sdk"], undefined);
-  assert.equal(pkg.dependencies["@armoriq/sdk-dev"], "^0.8.11");
-  assert.equal(lock.packages[""].dependencies["@armoriq/sdk-dev"], "^0.8.11");
+  assert.equal(pkg.dependencies["@armoriq/sdk-dev"], "^0.8.12");
+  assert.equal(lock.packages[""].dependencies["@armoriq/sdk-dev"], "^0.8.12");
   assert.match(lockedSdk.version, /^0\.8\.\d+$/);
-  assert.ok(Number(lockedSdk.version.split(".")[2]) >= 11, lockedSdk.version);
+  assert.ok(Number(lockedSdk.version.split(".")[2]) >= 12, lockedSdk.version);
   assert.match(lockedSdk.resolved, /^https:\/\/registry\.npmjs\.org\//);
   assert.match(lockedSdk.integrity, /^sha512-/);
   assert.equal(lockedSdk.link, undefined);
