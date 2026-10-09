@@ -576,7 +576,7 @@ test("usage-sync posts nothing while observability or the usage sync is off", as
   const { server, posts, port } = await fakeBackend();
   try {
     for (const [name, toggles] of TOGGLES) {
-      const home = signIn(fixtureHome(), { backend: `http://127.0.0.1:${port}`, apiKey: KEY });
+      const home = signIn(fixtureHome(), { backend: `http://127.0.0.1:${port}`, apiKey: KEY, userId: userOf(KEY) });
       const res = await node([SYNC], { ...baseEnv(home, port), ...toggles });
       assert.equal(res.status, 0, res.stderr);
       assert.match(res.stderr, /usage sync is off .*nothing synced/, name);
@@ -585,7 +585,7 @@ test("usage-sync posts nothing while observability or the usage sync is off", as
     assert.equal(posts.length, 0);
 
     const res = await node([SYNC], {
-      ...baseEnv(signIn(fixtureHome(), { backend: `http://127.0.0.1:${port}`, apiKey: KEY }), port),
+      ...baseEnv(signIn(fixtureHome(), { backend: `http://127.0.0.1:${port}`, apiKey: KEY, userId: userOf(KEY) }), port),
       CODEX_PLUGIN_OPTION_DISABLE_OBSERVABILITY: "false",
       CODEX_PLUGIN_OPTION_DISABLE_USAGE_SYNC: "false",
     });
