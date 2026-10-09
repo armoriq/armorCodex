@@ -69,15 +69,25 @@ const firstUserIfFresh = (anchor, t) =>
  * an archived history was seen, that history decides; after it, only logins
  * newer than that proof count.
  */
+function provenOwner(archived, t) {
+  let floor = -Infinity;
+  const floors = archived.map((anchor) => {
+    const own = floor;
+    floor = Math.max(floor, Date.parse(anchor.observedAt));
+    return own;
+  });
+  for (let i = archived.length - 1; i >= 0; i--) {
+    const anchor = archived[i];
+    const trusted = anchor.events.filter((e) => time(e) > floors[i]);
+    const owner = ownerWithin(trusted, t, Date.parse(anchor.observedAt), overlaps(anchor.events));
+    if (owner !== undefined) return owner;
+  }
+  return firstUserIfFresh(archived[0], t);
+}
+
 export function ownerAt({ current, archived }, t) {
   const provenUntil = Math.max(-Infinity, ...archived.map((a) => Date.parse(a.observedAt)));
-  if (t <= provenUntil) {
-    for (const anchor of [...archived].reverse()) {
-      const owner = ownerWithin(anchor.events, t, Date.parse(anchor.observedAt), overlaps(anchor.events));
-      if (owner !== undefined) return owner;
-    }
-    return firstUserIfFresh(archived[0], t);
-  }
+  if (t <= provenUntil) return provenOwner(archived, t);
   const trusted = current.events.filter((e) => time(e) > provenUntil);
   const owner = ownerWithin(trusted, t, Infinity, overlaps(current.events));
   if (owner !== undefined) return owner;

@@ -804,6 +804,20 @@ const loginHistory = (events, { id = "h-1", origin = "fresh" } = {}) => ({
 });
 const anchorsOf = (h, observedAt = T("23:00")) => observeHistory(null, h, observedAt).anchors;
 
+test("a second gap keeps the intervals the first gap proved", () => {
+  const first = anchorsOf(loginHistory([[T("09:00"), "A"]]), T("12:00"));
+  const second = observeHistory(first, loginHistory([[T("08:00"), "B"]], { id: "h-2", origin: "unknown" }), T("14:00")).anchors;
+  const third = observeHistory(second, loginHistory([[T("15:00"), "B"]], { id: "h-3", origin: "unknown" }), T("16:00")).anchors;
+  const at = (hhmm) => Date.parse(T(hhmm));
+  for (const anchors of [second, third]) {
+    assert.equal(ownedBy(anchors, "A")(at("10:00")), true);
+    assert.equal(ownedBy(anchors, "B")(at("10:00")), false);
+    assert.equal(ownedOrUnassigned(anchors, "B")(at("13:00")), true);
+    assert.equal(ownedBy(anchors, "B")(at("13:00")), false);
+  }
+  assert.equal(ownedBy(third, "B")(at("15:30")), true);
+});
+
 function switchHome() {
   const home = mkdtempSync(path.join(tmpdir(), "acx-login-owner-"));
   writeRollout(rolloutPath(home, "2026-10-09", S1), [
