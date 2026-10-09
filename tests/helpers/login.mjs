@@ -8,7 +8,6 @@ import { createRequire, syncBuiltinESMExports } from "node:module";
 const requireSdk = createRequire(new URL("../../plugins/armorcodex/package.json", import.meta.url));
 const { profileName } = requireSdk("@armoriq/sdk-dev");
 
-/** Write an armorcodex login for `backend` into `home`, appending its login event at `at`. */
 export function signIn(home, { backend, apiKey, userId = "user-login", at = new Date().toISOString(), origin = "fresh" }) {
   assert.ok(home.startsWith(os.tmpdir()), home);
   const file = path.join(home, ".armoriq", "credentials.json");
