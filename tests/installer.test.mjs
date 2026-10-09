@@ -78,3 +78,27 @@ test("a normal update adds the Stop hook to an existing ArmorCodex hooks file", 
     /armorcodex\/scripts\/bootstrap\.mjs router/i,
   );
 });
+
+test("an environment key cannot skip login or appear in installer instructions", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "armorcodex-login-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const installer = readFileSync(new URL("../install_armorcodex.sh", import.meta.url), "utf8");
+  const connect = installer.match(/connect_to_armoriq\(\) \{[\s\S]*?\n\}(?=\n\nfinale)/)?.[0];
+  assert.ok(connect);
+  const result = spawnSync("bash", ["-c", `
+    section() { :; }
+    err() { printf '%s\\n' "$1"; }
+    ok() { printf '%s\\n' "$1"; }
+    is_promptable() { return 1; }
+    abort_install() { exit 17; }
+    ${connect}
+    connect_to_armoriq
+  `], {
+    encoding: "utf8",
+    env: { ...process.env, HOME: root, ARMORIQ_API_KEY: "ignored-test-key" },
+  });
+  assert.equal(result.status, 17, result.stderr || result.stdout);
+  assert.match(result.stdout, /armoriq-dev login --product armorcodex/);
+  assert.doesNotMatch(result.stdout, /credentials already present|ARMORIQ_API_KEY/);
+  assert.doesNotMatch(installer, /ARMORIQ_API_KEY/);
+});
