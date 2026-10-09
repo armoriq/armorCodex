@@ -63,6 +63,8 @@ ArmorCodex ships a Codex plugin manifest at `.codex-plugin/plugin.json` and an M
 
 ## Configuration
 
+Sign in with `armoriq-dev login --product armorcodex`. ArmorCodex reads the saved login for its backend and product.
+
 Core environment variables:
 
 | Variable | Default | Description |
@@ -71,7 +73,6 @@ Core environment variables:
 | `ARMORCODEX_INTENT_REQUIRED` | `true` | Require a registered intent plan before Bash |
 | `ARMORCODEX_DATA_DIR` | `~/.codex/armorcodex` | Runtime, policy, and pending-plan storage |
 | `ARMORCODEX_DEBUG` | `false` | Debug logs on stderr |
-| `ARMORIQ_API_KEY` | from `~/.armoriq/credentials.json` | ArmorIQ backend key |
 | `ARMORCODEX_AUDIT_ENABLED` | true when API key exists | Send audit logs |
 | `ARMORCODEX_CRYPTO_POLICY_ENABLED` | `false` | Enable Merkle policy binding |
 

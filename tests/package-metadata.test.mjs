@@ -40,7 +40,7 @@ test("release metadata uses the registry sdk-dev 0.8 SDK and one ArmorCodex vers
   }
 });
 
-test("release installer uses only the production SDK CLI", () => {
+test("release installer uses the product-scoped sdk-dev login", () => {
   const installer = readFileSync(
     new URL("../install_armorcodex.sh", import.meta.url),
     "utf8",
@@ -48,10 +48,12 @@ test("release installer uses only the production SDK CLI", () => {
 
   assert.match(installer, /DASHBOARD_URL="\$\{ARMORCODEX_DASHBOARD_URL:-https:\/\/platform\.armoriq\.ai\}"/);
   assert.doesNotMatch(installer, /tools\.armoriq\.ai/);
-  assert.match(installer, /npm install -g @armoriq\/sdk@latest/);
-  assert.match(installer, /npx @armoriq\/sdk login/);
-  assert.doesNotMatch(installer, /armoriq-dev/);
-  assert.doesNotMatch(installer, /(npx|npm install -g) @armoriq\/sdk-dev/);
+  assert.match(installer, /npm install -g @armoriq\/sdk-dev@latest/);
+  assert.match(installer, /npx @armoriq\/sdk-dev login --product armorcodex/);
+  assert.match(installer, /armoriq-dev login --product armorcodex/);
+  assert.doesNotMatch(installer, /ARMORIQ_API_KEY/);
+  assert.doesNotMatch(installer, /ARMORIQ_PRODUCT/);
+  assert.doesNotMatch(installer, /(npx|npm install -g) @armoriq\/sdk(?:@| )/);
 });
 
 test("every locked @armoriq package has the integrity the registry serves", async () => {
