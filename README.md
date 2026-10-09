@@ -63,6 +63,8 @@ ArmorCodex ships a Codex plugin manifest at `.codex-plugin/plugin.json` and an M
 
 ## Configuration
 
+Sign in with `armoriq-dev login --product armorcodex`. ArmorCodex reads the saved login for its backend and product.
+
 Core environment variables:
 
 | Variable | Default | Description |
@@ -71,9 +73,20 @@ Core environment variables:
 | `ARMORCODEX_INTENT_REQUIRED` | `true` | Require a registered intent plan before Bash |
 | `ARMORCODEX_DATA_DIR` | `~/.codex/armorcodex` | Runtime, policy, and pending-plan storage |
 | `ARMORCODEX_DEBUG` | `false` | Debug logs on stderr |
-| `ARMORIQ_API_KEY` | from `~/.armoriq/credentials.json` | ArmorIQ backend key |
 | `ARMORCODEX_AUDIT_ENABLED` | true when API key exists | Send audit logs |
 | `ARMORCODEX_CRYPTO_POLICY_ENABLED` | `false` | Enable Merkle policy binding |
+| `ARMORCODEX_OBSERVABILITY_DISABLED` | `false` | Stop sending execution traces; also stops the token usage sync. Same as the `disable_observability` plugin option |
+| `ARMORCODEX_USAGE_SYNC_DISABLED` | `false` | Stop the token usage sync and keep traces. Applies only while observability is on. Same as the `disable_usage_sync` plugin option |
+
+### Token usage sync
+
+While observability is on, `plugins/armorcodex/scripts/usage-sync.mjs` uploads token counts for
+every Codex session under `~/.codex/sessions` and `~/.codex/archived_sessions` (or
+`$CODEX_HOME`), including sessions that ran without ArmorCodex. It posts one row per session,
+model, UTC date and UTC hour, with the session's working directory and the device name. It sends no prompts
+or transcript text. The hook router starts it in the background on `SessionStart` and after each
+`Stop`. `node plugins/armorcodex/scripts/usage-sync.mjs --dry-run` prints the rows without
+posting them.
 
 ## Policy Commands
 

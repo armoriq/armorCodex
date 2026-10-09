@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { chmodSync, closeSync, fchmodSync, mkdirSync, openSync, statSync, writeSync } from "node:fs";
 import { appendFile, chmod, mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -27,6 +28,32 @@ const isOwnedAndShared = (st) => (st.mode & 0o077) !== 0 && st.uid === process.g
 export async function ensurePrivateDir(dir) {
   await mkdir(dir, { recursive: true, mode: PRIVATE_DIR_MODE });
   if (isOwnedAndShared(await stat(dir))) await chmod(dir, PRIVATE_DIR_MODE);
+}
+
+export function ensurePrivateDirSync(dir) {
+  mkdirSync(dir, { recursive: true, mode: PRIVATE_DIR_MODE });
+  if (isOwnedAndShared(statSync(dir))) chmodSync(dir, PRIVATE_DIR_MODE);
+}
+
+export function openPrivateSync(filePath, flags) {
+  ensurePrivateDirSync(path.dirname(filePath));
+  const fd = openSync(filePath, flags, PRIVATE_FILE_MODE);
+  try {
+    fchmodSync(fd, PRIVATE_FILE_MODE);
+  } catch (error) {
+    closeSync(fd);
+    throw error;
+  }
+  return fd;
+}
+
+export function writePrivateFileSync(filePath, text) {
+  const fd = openPrivateSync(filePath, "w");
+  try {
+    writeSync(fd, text);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 const tightenedDirs = new Set();

@@ -48,7 +48,7 @@ MARKETPLACE_REPO="${ARMORCODEX_MARKETPLACE_REPO:-armoriq/armorCodex}"
 PLUGIN_GIT_URL="${ARMORCODEX_GIT_URL:-https://github.com/armoriq/armorCodex.git}"
 PLUGIN_GIT_REF="${ARMORCODEX_GIT_REF:-main}"
 INSTALL_HOME="${ARMORCODEX_INSTALL_HOME:-${HOME}/.armoriq/armorCodex}"
-DASHBOARD_URL="${ARMORCODEX_DASHBOARD_URL:-https://tools.armoriq.ai}"
+DASHBOARD_URL="${ARMORCODEX_DASHBOARD_URL:-https://platform.armoriq.ai}"
 
 # Recover if the caller is running this from a deleted directory (common when
 # piping curl into bash from /tmp).
@@ -411,7 +411,7 @@ EOF
 
 install_npm_deps() {
   pushd "${PLUGIN_PATH}" >/dev/null
-  if [[ -d node_modules/@armoriq/sdk && -d node_modules/zod && -d node_modules/@modelcontextprotocol/sdk ]]; then
+  if [[ -d node_modules/@armoriq/sdk-dev && -d node_modules/zod && -d node_modules/@modelcontextprotocol/sdk ]]; then
     info "npm dependencies already present"
   else
     info "installing npm dependencies (--omit=dev)"
@@ -422,11 +422,11 @@ install_npm_deps() {
 }
 
 install_armoriq_cli() {
-  info "installing ArmorIQ CLI ${B}(@armoriq/sdk)${N}"
-  if npm install -g @armoriq/sdk@latest --silent --no-audit --no-fund >/dev/null 2>&1; then
-    ok "armoriq CLI ready"
+  info "installing ArmorIQ CLI ${B}(@armoriq/sdk-dev)${N}"
+  if npm install -g @armoriq/sdk-dev@latest --silent --no-audit --no-fund >/dev/null 2>&1; then
+    ok "armoriq-dev CLI ready"
   else
-    warn "couldn't install globally, use ${B}npx @armoriq/sdk${N} instead"
+    warn "couldn't install globally, use ${B}npx @armoriq/sdk-dev${N} instead"
   fi
 }
 
@@ -495,11 +495,11 @@ finish_update_banner() {
   else
     info "Plugin: ${INSTALL_HOME} (refreshed)"
   fi
-  info "SDK:    @armoriq/sdk (latest)"
+  info "SDK:    @armoriq/sdk-dev (latest)"
   info "Hooks:  ${GLOBAL_HOOKS} (verified)"
   if [[ ! -f "${HOME}/.armoriq/credentials.json" ]]; then
     echo
-    printf "  Run ${G}${B}armoriq login --product armorcodex${N} to authenticate.\n"
+    printf "  Run ${G}${B}armoriq-dev login --product armorcodex${N} to authenticate.\n"
   fi
   echo
 }
@@ -553,6 +553,12 @@ abort_install() {
   exit 1
 }
 
+plugin_has_login() {
+  node --input-type=module -e \
+    'const { loadConfig } = await import(process.argv[1]); process.exit(loadConfig().apiKey ? 0 : 1);' \
+    "${INSTALL_HOME}/${PLUGIN_SUBDIR}/scripts/lib/config.mjs" >/dev/null 2>&1
+}
+
 connect_to_armoriq() {
   section "Connect to ArmorIQ"
   cat <<EOF
@@ -562,14 +568,14 @@ connect_to_armoriq() {
 
 EOF
 
-  if [[ -n "${ARMORIQ_API_KEY:-}" ]] || [[ -f "$HOME/.armoriq/credentials.json" ]]; then
-    ok "ArmorIQ credentials already present"
+  if plugin_has_login; then
+    ok "ArmorIQ login for ArmorCodex found"
     return 0
   fi
 
   if ! is_promptable; then
     err "No TTY available for interactive login."
-    printf "  Set ${B}ARMORIQ_API_KEY${N} or run interactively.\n"
+    printf "  Run ${B}armoriq-dev login --product armorcodex${N} interactively.\n"
     abort_install
   fi
 
@@ -578,30 +584,18 @@ EOF
   fi
 
   echo
-  # Pass --product so the browser approval page renders ArmorCodex branding.
-  # Older CLIs without --product fall back to ARMORIQ_PRODUCT env var, which
-  # newer CLIs also honor; older ones simply ignore it.
-  local product="armorcodex"
   local login_ok=0
-  if command -v armoriq >/dev/null 2>&1; then
-    if armoriq login --help 2>&1 | grep -q -- '--product'; then
-      armoriq login --product "${product}" && login_ok=1
-    else
-      ARMORIQ_PRODUCT="${product}" armoriq login && login_ok=1
-    fi
+  if command -v armoriq-dev >/dev/null 2>&1; then
+    armoriq-dev login --product armorcodex && login_ok=1
   elif command -v npx >/dev/null 2>&1; then
-    if npx @armoriq/sdk login --help 2>&1 | grep -q -- '--product'; then
-      npx @armoriq/sdk login --product "${product}" && login_ok=1
-    else
-      ARMORIQ_PRODUCT="${product}" npx @armoriq/sdk login && login_ok=1
-    fi
+    npx @armoriq/sdk-dev login --product armorcodex && login_ok=1
   else
-    err "armoriq CLI not found."
+    err "armoriq-dev CLI not found."
     abort_install
   fi
 
-  if [[ "${login_ok}" -ne 1 ]] || [[ ! -f "$HOME/.armoriq/credentials.json" ]]; then
-    err "ArmorIQ login did not complete."
+  if [[ "${login_ok}" -ne 1 ]] || ! plugin_has_login; then
+    err "ArmorIQ login did not complete for ArmorCodex's backend."
     abort_install
   fi
 

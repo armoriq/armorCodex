@@ -1,3 +1,4 @@
+import { emitJson } from "./lib/hook-stdout.mjs";
 import { loadConfig } from "./lib/config.mjs";
 import { denyPermissionRequest, denyPreTool } from "./lib/hook-output.mjs";
 import {
@@ -12,6 +13,7 @@ import {
 } from "./lib/engine.mjs";
 import { ensurePrivateDir } from "./lib/fs-store.mjs";
 import { observeHook } from "./lib/observability.mjs";
+import { launchUsageSync, requestUsageSync } from "./lib/usage-sync-launch.mjs";
 
 let currentEvent = "";
 
@@ -21,10 +23,6 @@ async function readStdin() {
     chunks.push(chunk);
   }
   return Buffer.concat(chunks).toString("utf8");
-}
-
-function emitJson(value) {
-  process.stdout.write(`${JSON.stringify(value)}\n`);
 }
 
 function debugLog(config, message) {
@@ -92,6 +90,8 @@ async function main() {
   if (output) {
     emitJson(output);
   }
+  if (event === "SessionStart") launchUsageSync(config);
+  if (event === "Stop") requestUsageSync(config);
 
   // armorCodex has no daemon — this IS the only obs path (unlike armorClaude,
   // which has a daemon-resident bridge plus this same in-process fallback).

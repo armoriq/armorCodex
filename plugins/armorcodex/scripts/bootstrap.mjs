@@ -6,12 +6,13 @@ import { existsSync, writeFileSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { routeConsoleToStderr } from "./lib/stdio.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const pluginRoot = path.dirname(__dirname);
 const installedMarker = path.join(pluginRoot, "node_modules", ".armorcodex-installed");
 const packageFiles = [
-  path.join(pluginRoot, "node_modules", "@armoriq", "sdk", "package.json"),
+  path.join(pluginRoot, "node_modules", "@armoriq", "sdk-dev", "package.json"),
   path.join(pluginRoot, "node_modules", "zod", "package.json"),
   path.join(pluginRoot, "node_modules", "@modelcontextprotocol", "sdk", "package.json"),
 ];
@@ -53,19 +54,7 @@ if (!installedOk()) {
   }
 }
 
-// MCP servers and hook routers communicate with Codex via JSON-RPC / JSON
-// over stdio. Any non-JSON write to stdout corrupts the protocol and Codex
-// closes the transport. Redirect console.* to stderr so dependencies (the
-// ArmorIQ SDK in particular) can't accidentally pollute the channel.
-const _consoleRedirect = (...a) => {
-  const line = a
-    .map((x) => (typeof x === "string" ? x : JSON.stringify(x, null, 0)))
-    .join(" ");
-  process.stderr.write(line + "\n");
-};
-for (const m of ["log", "info", "warn", "error", "debug", "trace"]) {
-  console[m] = _consoleRedirect;
-}
+routeConsoleToStderr();
 
 const target = process.argv[2];
 if (target === "router") {
