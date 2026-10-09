@@ -422,11 +422,11 @@ install_npm_deps() {
 }
 
 install_armoriq_cli() {
-  info "installing ArmorIQ CLI ${B}(@armoriq/sdk)${N}"
-  if npm install -g @armoriq/sdk@latest --silent --no-audit --no-fund >/dev/null 2>&1; then
-    ok "armoriq CLI ready"
+  info "installing ArmorIQ CLI ${B}(@armoriq/sdk-dev)${N}"
+  if npm install -g @armoriq/sdk-dev@latest --silent --no-audit --no-fund >/dev/null 2>&1; then
+    ok "armoriq-dev CLI ready"
   else
-    warn "couldn't install globally, use ${B}npx @armoriq/sdk${N} instead"
+    warn "couldn't install globally, use ${B}npx @armoriq/sdk-dev${N} instead"
   fi
 }
 
@@ -495,11 +495,11 @@ finish_update_banner() {
   else
     info "Plugin: ${INSTALL_HOME} (refreshed)"
   fi
-  info "SDK:    @armoriq/sdk (latest)"
+  info "SDK:    @armoriq/sdk-dev (latest)"
   info "Hooks:  ${GLOBAL_HOOKS} (verified)"
   if [[ ! -f "${HOME}/.armoriq/credentials.json" ]]; then
     echo
-    printf "  Run ${G}${B}armoriq login --product armorcodex${N} to authenticate.\n"
+    printf "  Run ${G}${B}armoriq-dev login --product armorcodex${N} to authenticate.\n"
   fi
   echo
 }
@@ -562,14 +562,14 @@ connect_to_armoriq() {
 
 EOF
 
-  if [[ -n "${ARMORIQ_API_KEY:-}" ]] || [[ -f "$HOME/.armoriq/credentials.json" ]]; then
+  if [[ -f "$HOME/.armoriq/credentials.json" ]]; then
     ok "ArmorIQ credentials already present"
     return 0
   fi
 
   if ! is_promptable; then
     err "No TTY available for interactive login."
-    printf "  Set ${B}ARMORIQ_API_KEY${N} or run interactively.\n"
+    printf "  Run ${B}armoriq-dev login --product armorcodex${N} interactively.\n"
     abort_install
   fi
 
@@ -578,25 +578,13 @@ EOF
   fi
 
   echo
-  # Pass --product so the browser approval page renders ArmorCodex branding.
-  # Older CLIs without --product fall back to ARMORIQ_PRODUCT env var, which
-  # newer CLIs also honor; older ones simply ignore it.
-  local product="armorcodex"
   local login_ok=0
-  if command -v armoriq >/dev/null 2>&1; then
-    if armoriq login --help 2>&1 | grep -q -- '--product'; then
-      armoriq login --product "${product}" && login_ok=1
-    else
-      ARMORIQ_PRODUCT="${product}" armoriq login && login_ok=1
-    fi
+  if command -v armoriq-dev >/dev/null 2>&1; then
+    armoriq-dev login --product armorcodex && login_ok=1
   elif command -v npx >/dev/null 2>&1; then
-    if npx @armoriq/sdk login --help 2>&1 | grep -q -- '--product'; then
-      npx @armoriq/sdk login --product "${product}" && login_ok=1
-    else
-      ARMORIQ_PRODUCT="${product}" npx @armoriq/sdk login && login_ok=1
-    fi
+    npx @armoriq/sdk-dev login --product armorcodex && login_ok=1
   else
-    err "armoriq CLI not found."
+    err "armoriq-dev CLI not found."
     abort_install
   fi
 
