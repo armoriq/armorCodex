@@ -10,6 +10,8 @@ import {
   handleStop,
   handleUserPromptSubmit
 } from "./lib/engine.mjs";
+import { ensurePrivateDir } from "./lib/fs-store.mjs";
+import { observeHook } from "./lib/observability.mjs";
 
 let currentEvent = "";
 
@@ -34,6 +36,7 @@ function debugLog(config, message) {
 
 async function main() {
   const config = loadConfig();
+  await ensurePrivateDir(config.dataDir);
   const rawInput = await readStdin();
   if (!rawInput.trim()) {
     return;
@@ -89,6 +92,12 @@ async function main() {
   if (output) {
     emitJson(output);
   }
+
+  // armorCodex has no daemon — this IS the only obs path (unlike armorClaude,
+  // which has a daemon-resident bridge plus this same in-process fallback).
+  // Fail-open: observeHook never throws, and is awaited to completion before
+  // this short-lived process exits (no background timer will ever fire).
+  await observeHook(event, input, output, config);
 }
 
 main().catch((error) => {

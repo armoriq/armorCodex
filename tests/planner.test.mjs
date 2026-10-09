@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   extractPlanJsonBlock,
   parsePlanMarkdown
-} from "../scripts/lib/planner.mjs";
+} from "../plugins/armorcodex/scripts/lib/planner.mjs";
 
 test("extractPlanJsonBlock extracts fenced JSON from markdown", () => {
   const md = `# My plan

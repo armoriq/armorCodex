@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createIapService } from "../scripts/lib/iap-service.mjs";
+import { createIapService } from "../plugins/armorcodex/scripts/lib/iap-service.mjs";
 
 function buildConfig(overrides = {}) {
   return {

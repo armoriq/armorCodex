@@ -9,7 +9,7 @@
 
 import { z } from "zod";
 
-export const PLAN_STEP_SCHEMA = z.object({
+const PLAN_STEP_TARGET = z.object({
   action: z.string().min(1).describe("Tool name (e.g. Read, Edit, Bash, mcp__server__tool)"),
   description: z.string().optional().describe("Why this step is needed"),
   metadata: z
@@ -21,6 +21,32 @@ export const PLAN_STEP_SCHEMA = z.object({
     })
     .optional()
 });
+
+// Tolerate the near-miss shapes models commonly emit so a slightly-off plan
+// doesn't get rejected at the MCP boundary and force a re-registration
+// round-trip (observed: gpt-5.x sending `{tool, rationale}` instead of
+// `{action, description}`). We normalize before validation:
+//   `tool`                     -> action   (mirrors the tool-call field name)
+//   `rationale` / `reason` / `why` -> description
+//   top-level `inputs`         -> metadata.inputs
+export const PLAN_STEP_SCHEMA = z.preprocess((val) => {
+  if (!val || typeof val !== "object" || Array.isArray(val)) {
+    return val;
+  }
+  const v = { ...val };
+  if (v.action == null && typeof v.tool === "string") {
+    v.action = v.tool;
+  }
+  if (v.description == null) {
+    if (typeof v.rationale === "string") v.description = v.rationale;
+    else if (typeof v.reason === "string") v.description = v.reason;
+    else if (typeof v.why === "string") v.description = v.why;
+  }
+  if (v.metadata == null && v.inputs && typeof v.inputs === "object") {
+    v.metadata = { inputs: v.inputs };
+  }
+  return v;
+}, PLAN_STEP_TARGET);
 
 export const INTENT_PLAN_ZOD = z.object({
   goal: z.string().min(1).describe("One-line summary of what the plan accomplishes"),

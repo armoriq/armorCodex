@@ -1,0 +1,28 @@
+name: HOL Plugin Scanner
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: HOL Plugin Scanner
+        # v1.2.491 references plugin-scanner 2.0.1092, which is not on PyPI.
+        # Pin the last published scanner bundle until the upstream tag is fixed.
+        uses: hashgraph-online/ai-plugin-scanner-action@b427d0e5c30fa6ac4235aae37960dab0a3449538 # v1.2.490 / scanner 2.0.1091
+        with:
+          plugin_dir: plugins/armorcodex
+          mode: scan
+          min_score: 80
+          fail_on_severity: high
+          format: sarif
+          upload_sarif: true

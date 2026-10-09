@@ -3,10 +3,11 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import path from "node:path";
 import { z } from "zod";
 import { loadConfig } from "./lib/config.mjs";
-import { writeJson } from "./lib/fs-store.mjs";
+import { ensurePrivateDir, writeJson } from "./lib/fs-store.mjs";
 import { extractAllowedActions, requestIntent } from "./lib/intent.mjs";
 import { INTENT_PLAN_ZOD, PLAN_STEP_SCHEMA, normalizeIntentPlan } from "./lib/intent-schema.mjs";
 import { applyPolicyCommand, computePolicyHash, loadPolicyState, parsePolicyTextCommand } from "./lib/policy.mjs";
+import { handleArmorPolicyCommand } from "./lib/armor-policy-commands.mjs";
 import { createAuditWal } from "./lib/audit-wal.mjs";
 import { createIapService } from "./lib/iap-service.mjs";
 
@@ -86,6 +87,7 @@ async function loadStateAndConfig() {
 }
 
 async function run() {
+  await ensurePrivateDir(loadConfig().dataDir);
   const server = new McpServer({
     name: "armorcodex-policy",
     version: "0.1.0"
@@ -99,6 +101,12 @@ async function run() {
       inputSchema: {
         text: z.string().optional(),
         update: POLICY_UPDATE_SCHEMA.optional()
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false
       }
     },
     async (args) => {
@@ -145,12 +153,49 @@ async function run() {
   );
 
   server.registerTool(
+    "policy_command",
+    {
+      title: "Policy Command",
+      description:
+        "Run a structured ArmorCodex /armor policy command. Read and stage are allowed (e.g. 'policy list', 'policy view', 'policy add deny bash', 'policy default deny', 'policy template lockdown'). Applying is human-only: 'confirm'/'yes' are rejected here and must be done from the terminal with /armor yes.",
+      inputSchema: {
+        command: z.string().min(1)
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false
+      }
+    },
+    async (args) => {
+      const config = loadConfig();
+      if (!config.policyUpdateEnabled) {
+        return toTextResult("ArmorCodex policy updates are disabled.");
+      }
+      const raw = typeof args.command === "string" ? args.command.trim() : "";
+      if (!raw) {
+        return toTextResult("Provide a command, e.g. 'policy list' or 'policy add deny bash'.");
+      }
+      const prompt = /^\/?armor\b/i.test(raw) ? raw : `/armor ${raw}`;
+      const response = await handleArmorPolicyCommand(prompt, config, "mcp", { allowConfirm: false });
+      return toTextResult(response || "No policy command recognized.");
+    }
+  );
+
+  server.registerTool(
     "policy_read",
     {
       title: "Policy Read",
       description: "Read current ArmorCodex policy state",
       inputSchema: {
         id: z.string().optional()
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false
       }
     },
     async (args) => {
@@ -194,6 +239,12 @@ async function run() {
           .describe("Ordered list of tool calls (array, or JSON-stringified array)"),
         plan: z.union([INTENT_PLAN_ZOD, z.string().min(1)]).optional()
           .describe("Alternative: pass the whole plan as an object or JSON string")
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false
       }
     },
     async (args) => {
@@ -304,8 +355,32 @@ async function run() {
     }
   }, 5000);
   flusher.unref?.();
-  process.on("SIGTERM", () => clearInterval(flusher));
-  process.on("SIGINT", () => clearInterval(flusher));
+
+  async function flushAndExit(signal) {
+    clearInterval(flusher);
+    try {
+      const config = loadConfig();
+      if (config.apiKey) {
+        const wal = createAuditWal({ dataDir: config.dataDir });
+        const { rows, endOffset } = await wal.readBatch(500);
+        if (rows.length > 0) {
+          const iapService = createIapService(config);
+          await iapService.shipAuditBatch(rows);
+          await wal.advanceOffset(endOffset);
+          process.stderr.write(
+            `[armorcodex-policy] ${signal}: flushed ${rows.length} remaining audit rows\n`
+          );
+        }
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`[armorcodex-policy] ${signal} flush error: ${msg}\n`);
+    }
+    process.exit(0);
+  }
+
+  process.on("SIGTERM", () => flushAndExit("SIGTERM"));
+  process.on("SIGINT", () => flushAndExit("SIGINT"));
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

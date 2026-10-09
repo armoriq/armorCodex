@@ -3,9 +3,9 @@ import assert from "node:assert/strict";
 import { mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { handlePreToolUse, handleUserPromptSubmit } from "../scripts/lib/engine.mjs";
-import { checkToolAgainstPlan } from "../scripts/lib/intent.mjs";
-import { evaluatePolicy } from "../scripts/lib/policy.mjs";
+import { handlePreToolUse, handleUserPromptSubmit } from "../plugins/armorcodex/scripts/lib/engine.mjs";
+import { checkToolAgainstPlan } from "../plugins/armorcodex/scripts/lib/intent.mjs";
+import { evaluatePolicy } from "../plugins/armorcodex/scripts/lib/policy.mjs";
 
 function buildConfig(tmpDir, overrides = {}) {
   return {
@@ -243,4 +243,19 @@ test("handleUserPromptSubmit adds context hints for normal prompts", async () =>
   );
   assert.equal(output?.hookSpecificOutput?.hookEventName, "UserPromptSubmit");
   assert.match(output?.hookSpecificOutput?.additionalContext || "", /policy_update/i);
+});
+
+test("evaluatePolicy: trailing-* glob scopes a tool family; exact match unchanged", () => {
+  const policy = {
+    rules: [
+      { id: "p1", action: "deny", tool: "mcp__github__*" },
+      { id: "p2", action: "deny", tool: "bash" }
+    ]
+  };
+  const ev = (tool) => evaluatePolicy({ policy, toolName: tool, toolParams: {} }).allowed;
+  assert.equal(ev("mcp__github__search"), false); // glob prefix
+  assert.equal(ev("mcp__github__create_pr"), false); // glob prefix
+  assert.equal(ev("mcp__gitlab__search"), true); // different server, not matched
+  assert.equal(ev("bash"), false); // exact match, unchanged
+  assert.equal(ev("apply_patch"), true); // no rule -> default allow
 });

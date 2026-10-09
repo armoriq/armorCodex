@@ -7,7 +7,7 @@
   },
   "metadata": {
     "description": "ArmorIQ marketplace: intent-based security enforcement for OpenAI Codex (ArmorCodex) and other agentic harnesses.",
-    "version": "0.2.0"
+    "version": "0.3.2"
   },
   "interface": {
     "displayName": "ArmorIQ"
@@ -20,7 +20,7 @@
         "path": "./plugins/armorcodex"
       },
       "description": "Intent-based security enforcement for OpenAI Codex: declared plans, policy rules, intent-drift blocking, optional CSRG cryptographic proofs, and audit logging.",
-      "version": "0.2.0",
+      "version": "0.3.2",
       "category": "Security",
       "tags": ["security", "policy", "audit", "intent", "armoriq", "mcp", "hooks"],
       "homepage": "https://armoriq.ai",

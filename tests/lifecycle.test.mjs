@@ -9,7 +9,7 @@ import {
   handleStop,
   handlePostToolUse,
   handlePostToolUseFailure
-} from "../scripts/lib/engine.mjs";
+} from "../plugins/armorcodex/scripts/lib/engine.mjs";
 
 function buildConfig(tmpDir, overrides = {}) {
   return {

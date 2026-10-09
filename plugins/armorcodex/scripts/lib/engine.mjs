@@ -1,3 +1,4 @@
+import armoriqSdk from "@armoriq/sdk";
 import { isPlainObject, normalizeToolName, nowEpochSeconds, redactSecrets, sanitizeParams } from "./common.mjs";
 import { addPromptContext, blockPrompt, denyPermissionRequest, denyPreTool } from "./hook-output.mjs";
 import {
@@ -5,6 +6,7 @@ import {
   checkToolAgainstPlan,
   extractAllowedActions,
   findPlanStepIndices,
+  getSdkClient,
   getSessionTokenUsedStepIndices,
   parseCsrgProofHeaders,
   recordSessionTokenUsedStepIndices,
@@ -20,6 +22,8 @@ import {
   loadPolicyState,
   parsePolicyTextCommand
 } from "./policy.mjs";
+import { handleArmorPolicyCommand, isArmorPolicyCommand } from "./armor-policy-commands.mjs";
+import { summarizeCodexTranscriptUsage } from "./token-usage.mjs";
 import { readJson } from "./fs-store.mjs";
 import { unlink } from "node:fs/promises";
 import path from "node:path";
@@ -174,7 +178,20 @@ export async function handleUserPromptSubmit(input, config) {
     return null;
   }
 
-  // --- Policy command handling ---
+  // --- Structured /armor policy commands (staged proposal -> confirm) ---
+  if (isArmorPolicyCommand(prompt)) {
+    const allowed = isPolicyUpdateAllowed(config, input);
+    if (!allowed.allowed) {
+      return blockPrompt(allowed.reason || "ArmorCodex policy update denied");
+    }
+    const actor = actorCandidates(input)[0] || "unknown";
+    const response = await handleArmorPolicyCommand(prompt, config, actor);
+    if (response !== null) {
+      return blockPrompt(response);
+    }
+  }
+
+  // --- Natural-language `Policy ...` commands (immediate; back-compat) ---
   if (policyCommandLooksLikePrompt(prompt)) {
     const allowed = isPolicyUpdateAllowed(config, input);
     if (!allowed.allowed) {
@@ -207,7 +224,12 @@ export async function handleUserPromptSubmit(input, config) {
   const parts = [];
   if (config.planningEnabled) {
     parts.push(
-      "ArmorCodex active. Call `register_intent_plan` first; step `action` = tool name, `metadata.inputs` = `{}` matches by name only."
+      "ArmorCodex active. Before using any tool, call `register_intent_plan` once, " +
+        "listing every tool you expect to use as a step (register them all up front). " +
+        "For each step set `action` to the canonical tool name: use `Bash` for shell / " +
+        "command execution (not `exec_command`), `apply_patch` for file edits, and the " +
+        "exact MCP tool name for MCP calls. Set `metadata.inputs` to `{}` to match by " +
+        "tool name only."
     );
   }
   if (config.contextHintsEnabled && config.policyUpdateEnabled) {
@@ -714,13 +736,45 @@ export async function handleStop(input, config) {
   const session = getSession(runtimeState, sessionId);
   if (!session) return null;
 
+  // --- Capture token usage via the SDK (single cross-tool path shared by
+  // ArmorClaude/Codex/Copilot). Best-effort; requires apiKey. Codex fires Stop
+  // every turn, so debounce: parse the cumulative transcript total and POST only
+  // when it changed since the last Stop. The backend upsert keeps it idempotent.
+  if (config.apiKey) {
+    try {
+      // Codex CLI's rollout transcript uses a different shape than Claude Code,
+      // so parse it with the Codex-specific summarizer, then post via the shared
+      // SDK transport (client.recordTokenUsage).
+      const entries = summarizeCodexTranscriptUsage(input.transcript_path);
+      const total = entries.reduce(
+        (s, e) => s + e.inputTokens + e.outputTokens + e.cacheReadTokens + e.cacheWriteTokens,
+        0
+      );
+      if (total > 0 && total !== session.lastTokenTotal) {
+        const result = await getSdkClient(config).recordTokenUsage({
+          product: config.productSlug,
+          sessionId,
+          entries
+        });
+        if (result.ok) session.lastTokenTotal = total;
+        debugLog(
+          config,
+          `token usage: ${entries.length} model(s) total=${total} ${result.ok ? "ok" : "failed:" + (result.reason || "")}`
+        );
+      }
+    } catch (err) {
+      debugLog(config, `token usage capture failed: ${err?.message ?? err}`);
+    }
+  }
+
   // Check if token expired mid-turn
   if (Number.isFinite(session.expiresAt) && nowEpochSeconds() > session.expiresAt) {
     debugLog(config, "intent token expired during turn");
   }
 
   upsertSession(runtimeState, sessionId, {
-    lastStopAt: nowEpochSeconds()
+    lastStopAt: nowEpochSeconds(),
+    lastTokenTotal: session.lastTokenTotal
   });
   await saveRuntimeState(config.runtimeFile, runtimeState);
   return null;
