@@ -7,6 +7,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   statSync,
@@ -21,6 +22,8 @@ import { loadSyncState, syncUsage } from "../plugins/armorcodex/scripts/lib/usag
 import {
   launchUsageSync,
   requestUsageSync,
+  syncBasePath,
+  userStatePath,
 } from "../plugins/armorcodex/scripts/lib/usage-sync-launch.mjs";
 
 const SCRIPTS = path.join(
@@ -429,23 +432,44 @@ test("a fork's copied token_usage_records count nothing", async () => {
   ]);
 });
 
-function fakeBackend() {
+const keyOf = (req) =>
+  /^Bearer (.+)$/.exec(req.headers.authorization ?? "")?.[1] ?? req.headers["x-api-key"];
+const userOf = (key) => `user-of-${key}`;
+
+function fakeBackend(answer = async () => true) {
   const posts = [];
+  const postedBy = [];
   const server = createServer((req, res) => {
     let body = "";
     req.on("data", (chunk) => (body += chunk));
-    req.on("end", () => {
-      if (req.method === "POST" && req.url === "/dashboard/token-usage") {
+    req.on("end", async () => {
+      const key = keyOf(req);
+      let reply = { ok: true };
+      let status = 200;
+      if (req.method === "POST" && req.url === "/iap/validate-key") {
+        [status, reply] = key?.startsWith("ak_test_unknown")
+          ? [401, {}]
+          : [200, key?.startsWith("ak_test_nouser") ? {} : { userId: userOf(key) }];
+      } else if (req.method === "POST" && req.url === "/dashboard/token-usage") {
         posts.push(JSON.parse(body));
+        postedBy.push(userOf(key));
+        await answer(posts.at(-1));
       }
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end('{"ok":true}');
+      res.writeHead(status, { "content-type": "application/json" });
+      res.end(JSON.stringify(reply));
     });
   });
   return new Promise((resolve) =>
-    server.listen(0, "127.0.0.1", () => resolve({ server, posts, port: server.address().port }))
+    server.listen(0, "127.0.0.1", () => resolve({ server, posts, postedBy, port: server.address().port }))
   );
 }
+
+const userState = (dataDir, port, key) =>
+  userStatePath(dataDir, {
+    backend: `http://127.0.0.1:${port}`,
+    product: "armorcodex",
+    userId: userOf(key),
+  });
 
 function baseEnv(home, port) {
   return {
@@ -542,7 +566,7 @@ test("the launcher starts no sync and writes no request while the usage sync is 
     });
     assert.equal(requestUsageSync(cfg), false, name);
     assert.equal(launchUsageSync(cfg), false, name);
-    assert.equal(existsSync(path.join(dataDir, "usage-sync-state.json.request")), false, name);
+    assert.equal(existsSync(`${syncBasePath(dataDir)}.request`), false, name);
     assert.equal(existsSync(path.join(dataDir, "usage-sync.log")), false, name);
   }
 });
@@ -559,7 +583,7 @@ test("usage-sync posts nothing while observability or the usage sync is off", as
       });
       assert.equal(res.status, 0, res.stderr);
       assert.match(res.stderr, /usage sync is off .*nothing synced/, name);
-      assert.equal(existsSync(path.join(home, "data", "usage-sync-state.json")), false, name);
+      assert.equal(existsSync(syncBasePath(path.join(home, "data"))), false, name);
     }
     assert.equal(posts.length, 0);
 
@@ -594,8 +618,9 @@ const readLastRun = (statePath) => {
 
 test("SessionStart and Stop hooks run the sync, which posts each session-hour with its date and hour", async () => {
   const home = fixtureHome();
-  const statePath = path.join(home, "data", "usage-sync-state.json");
   const { server, posts, port } = await fakeBackend();
+  const statePath = userState(path.join(home, "data"), port, KEY);
+  const base = syncBasePath(path.join(home, "data"));
   const env = { ...baseEnv(home, port), CODEX_PLUGIN_OPTION_API_KEY: KEY };
   const hook = (event, toggles = {}) =>
     node(
@@ -609,13 +634,13 @@ test("SessionStart and Stop hooks run the sync, which posts each session-hour wi
       })
     );
   const settled = (after) => () =>
-    readLastRun(statePath) !== after && !existsSync(`${statePath}.lock`);
+    readLastRun(statePath) !== after && !existsSync(`${base}.lock`);
   try {
     for (const [name, toggles] of TOGGLES) {
       await hook("SessionStart", toggles);
       await hook("Stop", toggles);
-      assert.equal(existsSync(`${statePath}.request`), false, name);
-      assert.equal(existsSync(`${statePath}.lock`), false, name);
+      assert.equal(existsSync(`${base}.request`), false, name);
+      assert.equal(existsSync(`${base}.lock`), false, name);
     }
     await new Promise((r) => setTimeout(r, 3000));
     assert.equal(posts.length, 0);
@@ -652,35 +677,23 @@ test("the hooks leave the usage sync log, request marker, lock and state owner-o
   const modeOf = (file) => statSync(file).mode & 0o777;
   const home = fixtureHome();
   const dataDir = path.join(home, "data");
-  const statePath = path.join(dataDir, "usage-sync-state.json");
+  const base = syncBasePath(dataDir);
   const logPath = path.join(dataDir, "usage-sync.log");
   mkdirSync(dataDir, { mode: 0o755 });
   chmodSync(dataDir, 0o755);
-  for (const file of [logPath, `${statePath}.request`]) {
+  for (const file of [logPath, `${base}.request`]) {
     writeFileSync(file, "old");
     chmodSync(file, 0o644);
   }
 
-  const posts = [];
   let release;
   const held = new Promise((resolve) => (release = resolve));
-  const server = createServer((req, res) => {
-    let body = "";
-    req.on("data", (chunk) => (body += chunk));
-    req.on("end", async () => {
-      if (req.method === "POST" && req.url === "/dashboard/token-usage") {
-        posts.push(JSON.parse(body));
-        await held;
-      }
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end('{"ok":true}');
-    });
-  });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { server, posts, port } = await fakeBackend(() => held);
+  const statePath = userState(dataDir, port, KEY);
   try {
     const stop = await node(
       [ROUTER],
-      { ...baseEnv(home, server.address().port), CODEX_PLUGIN_OPTION_API_KEY: KEY },
+      { ...baseEnv(home, port), CODEX_PLUGIN_OPTION_API_KEY: KEY },
       JSON.stringify({
         hook_event_name: "Stop",
         session_id: S2,
@@ -690,15 +703,97 @@ test("the hooks leave the usage sync log, request marker, lock and state owner-o
     );
     assert.equal(stop.status, 0, stop.stderr);
     await until(() => posts.length > 0, "the first post");
-    assert.equal(modeOf(`${statePath}.lock`), 0o600);
+    assert.equal(modeOf(`${base}.lock`), 0o600);
     release();
-    await until(() => readLastRun(statePath) !== undefined && !existsSync(`${statePath}.lock`), "the pass");
+    await until(() => readLastRun(statePath) !== undefined && !existsSync(`${base}.lock`), "the pass");
     assert.equal(modeOf(dataDir), 0o700);
-    for (const file of [statePath, logPath, `${statePath}.request`]) {
+    assert.equal(modeOf(path.dirname(statePath)), 0o700);
+    for (const file of [statePath, logPath, `${base}.request`]) {
       assert.equal(modeOf(file), 0o600, file);
     }
   } finally {
     release();
     server.close();
   }
+});
+
+const KEY_A = "ak_test_codex_user_a";
+const KEY_B = "ak_test_codex_user_b";
+const syncAs = (home, port, key) =>
+  node([SYNC], { ...baseEnv(home, port), CODEX_PLUGIN_OPTION_API_KEY: key });
+
+function stateFiles(home) {
+  const dir = syncBasePath(path.join(home, "data"));
+  if (!existsSync(dir)) return {};
+  return Object.fromEntries(
+    readdirSync(dir)
+      .filter((f) => f.endsWith(".json"))
+      .map((f) => [f, readFileSync(path.join(dir, f), "utf8")])
+  );
+}
+
+test("each API key's user keeps its own sync state and leaves the other's untouched", async () => {
+  const { server, port } = await fakeBackend();
+  try {
+    const home = fixtureHome();
+    const a = await syncAs(home, port, KEY_A);
+    assert.equal(a.status, 0, a.stderr);
+    const afterA = stateFiles(home);
+    assert.deepEqual(Object.keys(afterA), [path.basename(userState(path.join(home, "data"), port, KEY_A))]);
+    const b = await syncAs(home, port, KEY_B);
+    assert.equal(b.status, 0, b.stderr);
+    const afterB = stateFiles(home);
+    for (const [file, text] of Object.entries(afterA)) assert.equal(afterB[file], text, file);
+    assert.ok(afterB[path.basename(userState(path.join(home, "data"), port, KEY_B))]);
+  } finally {
+    server.close();
+  }
+});
+
+test("a key whose user the backend cannot resolve syncs nothing and writes no state", async () => {
+  const { server, posts, port } = await fakeBackend();
+  try {
+    for (const [key, reason] of [
+      ["ak_test_unknown_codex", "validate-key returned 401"],
+      ["ak_test_nouser_codex", "validate-key returned no userId"],
+    ]) {
+      const home = fixtureHome();
+      const res = await syncAs(home, port, key);
+      assert.equal(res.status, 1, key);
+      assert.ok(res.stderr.includes(`could not resolve the API key's user (${reason}), nothing synced`), res.stderr);
+      assert.deepEqual(stateFiles(home), {}, key);
+    }
+    assert.equal(posts.length, 0);
+  } finally {
+    server.close();
+  }
+});
+
+test("a sync running for one key leaves a pass requested with another key to that key", async () => {
+  let release;
+  const gate = new Promise((resolve) => (release = resolve));
+  const { server, posts, port } = await fakeBackend(() => (posts.length === 1 ? gate : true));
+  try {
+    const home = fixtureHome();
+    const a = syncAs(home, port, KEY_A);
+    await until(() => posts.length === 1, "user A's first post");
+    const asB = loadConfig({ ...baseEnv(home, port), CODEX_PLUGIN_OPTION_API_KEY: KEY_B });
+    assert.equal(requestUsageSync(asB), true);
+    release();
+    const done = await a;
+    assert.equal(done.status, 0, done.stderr);
+    assert.match(done.stderr, /a pass was requested for another API key/);
+    assert.ok(existsSync(`${syncBasePath(path.join(home, "data"))}.request`));
+  } finally {
+    release();
+    server.close();
+  }
+});
+
+test("a backend URL with a trailing slash keys the same state", () => {
+  const who = { product: "armorcodex", userId: "user-1" };
+  assert.equal(
+    userStatePath("/data", { ...who, backend: "http://127.0.0.1:9/" }),
+    userStatePath("/data", { ...who, backend: "http://127.0.0.1:9" })
+  );
 });

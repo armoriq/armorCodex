@@ -9,19 +9,29 @@
 // --dry-run : print each row instead of posting it. Needs no API key, ignores
 //             the observability and usage sync switches, and keeps its own
 //             state file, so it never changes what a real run posts.
-// --state   : state file to read and update.
+// --state   : state file to read and update. Without it, each API key's user
+//             keeps its own state per backend and product.
 
 import { homedir } from "node:os";
 import { readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { loadConfig } from "./lib/config.mjs";
+import { keyOwner } from "./lib/key-owner.mjs";
 import { deviceIdentity } from "./lib/device.mjs";
 import { ensurePrivateDir, PRIVATE_FILE_MODE, writeJson } from "./lib/fs-store.mjs";
 import { getSdkClient } from "./lib/intent.mjs";
 import { loadRuntimeState } from "./lib/runtime-state.mjs";
 import { loadSyncState, syncUsage } from "./lib/usage-sync.mjs";
-import { defaultStatePath, isAlive, requestedAt, syncPaths } from "./lib/usage-sync-launch.mjs";
+import {
+  isAlive,
+  keyFingerprint,
+  requestedAt,
+  requestedFor,
+  syncBasePath,
+  syncPaths,
+  userStatePath,
+} from "./lib/usage-sync-launch.mjs";
 
 const BUDGET_MS = 90_000;
 const HARD_STOP_MS = BUDGET_MS + 30_000;
@@ -59,7 +69,27 @@ async function debounce(requestPath, deadline) {
   if (wait > 0) await sleep(wait);
 }
 
+async function ownStatePath(config) {
+  const owner = await keyOwner(config);
+  if (!owner.ok) {
+    log(`could not resolve the API key's user (${owner.reason}), nothing synced`);
+    return null;
+  }
+  return userStatePath(config.dataDir, {
+    backend: config.backendEndpoint,
+    product: config.productSlug,
+    userId: owner.userId,
+  });
+}
+
+async function chooseStatePath(config) {
+  if (stateIdx >= 0) return { statePath: path.resolve(argv[stateIdx + 1]), fixed: true };
+  if (DRY) return { statePath: path.join(config.dataDir, "usage-sync-dry-run.json"), fixed: true };
+  return { statePath: await ownStatePath(config), fixed: false };
+}
+
 async function syncPass({ config, statePath, deadline }) {
+  await ensurePrivateDir(path.dirname(statePath));
   const state = await loadSyncState(statePath);
   const runtime = await loadRuntimeState(config.runtimeFile);
   const { deviceId, deviceName } = deviceIdentity();
@@ -95,6 +125,33 @@ async function syncPass({ config, statePath, deadline }) {
   if (report.failed) process.exitCode = 1;
 }
 
+async function runPasses({ config, statePath, paths, deadline }) {
+  const mine = keyFingerprint(config.apiKey);
+  let passStart = -Infinity;
+  // A Stop can touch the request marker after the last pass began but see
+  // the lock still held, so the marker is checked again once it is released.
+  while (Date.now() < deadline) {
+    const release = await acquireLock(paths.lock);
+    if (!release) {
+      if (passStart === -Infinity) log("another sync holds the lock, skipping");
+      return;
+    }
+    try {
+      do {
+        await debounce(paths.request, deadline);
+        passStart = Date.now();
+        await syncPass({ config, statePath, deadline });
+      } while (requestedFor(paths.request, mine) >= passStart && Date.now() < deadline);
+    } finally {
+      await release();
+    }
+    if (requestedFor(paths.request, mine) < passStart) {
+      if (requestedAt(paths.request) >= passStart) log("a pass was requested for another API key");
+      return;
+    }
+  }
+}
+
 async function main() {
   const config = loadConfig(process.env);
   if (!DRY && !config.apiKey) {
@@ -105,13 +162,12 @@ async function main() {
     log("usage sync is off (observability disabled or disable_usage_sync set), nothing synced");
     return;
   }
-  const statePath =
-    stateIdx >= 0
-      ? path.resolve(argv[stateIdx + 1])
-      : DRY
-        ? path.join(config.dataDir, "usage-sync-dry-run.json")
-        : defaultStatePath(config.dataDir);
-  const paths = syncPaths(statePath);
+  const { statePath, fixed } = await chooseStatePath(config);
+  if (!statePath) {
+    process.exitCode = 1;
+    return;
+  }
+  const paths = syncPaths(fixed ? statePath : syncBasePath(config.dataDir));
   const deadline = Date.now() + BUDGET_MS;
   const hardStop = setTimeout(() => {
     log(`still running after ${HARD_STOP_MS}ms, exiting`);
@@ -119,26 +175,7 @@ async function main() {
   }, HARD_STOP_MS);
   hardStop.unref();
   try {
-    let passStart = -Infinity;
-    // A Stop can touch the request marker after the last pass began but see
-    // the lock still held, so the marker is checked again once it is released.
-    while (Date.now() < deadline) {
-      const release = await acquireLock(paths.lock);
-      if (!release) {
-        if (passStart === -Infinity) log("another sync holds the lock, skipping");
-        return;
-      }
-      try {
-        do {
-          await debounce(paths.request, deadline);
-          passStart = Date.now();
-          await syncPass({ config, statePath, deadline });
-        } while (requestedAt(paths.request) >= passStart && Date.now() < deadline);
-      } finally {
-        await release();
-      }
-      if (requestedAt(paths.request) < passStart) return;
-    }
+    await runPasses({ config, statePath, paths, deadline });
   } finally {
     clearTimeout(hardStop);
   }
