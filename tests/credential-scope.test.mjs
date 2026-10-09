@@ -11,9 +11,20 @@ const requireSdk = createRequire(
 );
 const { saveLoginProfile, saveProfile, loadLoginContext } =
   requireSdk("@armoriq/sdk-dev");
-const PROD = "https://api.armoriq.ai";
+const build = requireSdk("@armoriq/sdk-dev/dist/_build_env.js");
+const DEFAULT_BACKEND = build.ENDPOINTS[build.ARMORIQ_ENV].backend;
 const LOCAL = "http://127.0.0.1:3920";
 const KEY = "ak_test_savedlogin0000000000000000";
+
+test("with ARMORIQ_ENV unset, the login the SDK's CLI saves by default is loaded", () => {
+  withLogins([{ backend: DEFAULT_BACKEND }], () => {
+    const config = loadConfig({});
+    assert.equal(config.backendEndpoint, DEFAULT_BACKEND);
+    assert.equal(config.apiKey, KEY);
+    assert.equal(config.userId, "user-A");
+    assert.ok(config.loginHistory?.events?.length);
+  });
+});
 
 test("the manifest offers no API-key setting alongside the login profile", () => {
   const manifest = JSON.parse(
@@ -35,7 +46,7 @@ function withLogins(records, fn) {
     for (const record of records) {
       saveLoginProfile({
         apiKey: KEY,
-        backend: PROD,
+        backend: DEFAULT_BACKEND,
         product: "armorcodex",
         email: "user@example.test",
         userId: "user-A",
@@ -63,7 +74,7 @@ function assertUnavailable(config) {
 
 test("config exposes the accepted login key, owner, org and exact history snapshot", () => {
   withLogins([{}], () => {
-    const login = loadLoginContext({ backend: PROD, product: "armorcodex" });
+    const login = loadLoginContext({ backend: DEFAULT_BACKEND, product: "armorcodex" });
     const config = loadConfig({});
     assert.equal(config.apiKey, KEY);
     assert.equal(config.orgId, login.profile.orgId);
@@ -76,10 +87,10 @@ test("config exposes the accepted login key, owner, org and exact history snapsh
 
 test("backend scope uses the shared URL-origin comparison", () => {
   for (const backend of [
-    `${PROD}/`,
-    "HTTPS://API.ARMORIQ.AI",
-    `${PROD}:443/`,
-    `${PROD}/api?query=1`,
+    `${DEFAULT_BACKEND}/`,
+    DEFAULT_BACKEND.toUpperCase(),
+    `${DEFAULT_BACKEND}:443/`,
+    `${DEFAULT_BACKEND}/api?query=1`,
   ]) {
     withLogins([{ backend }], () =>
       assert.equal(loadConfig({}).apiKey, KEY, backend),
@@ -104,11 +115,11 @@ test("another active backend or product cannot replace the Codex profile", () =>
   );
 });
 
-test("local, other-product and lookalike-host logins are unavailable on production", () => {
+test("local, other-product and lookalike-host logins are unavailable on the default backend", () => {
   for (const record of [
     { backend: LOCAL },
     { product: "armorclaude" },
-    { backend: "https://api.armoriq.ai.evil.test" },
+    { backend: `${DEFAULT_BACKEND}.evil.test` },
   ]) {
     withLogins([record], () => assertUnavailable(loadConfig({})));
   }
@@ -198,7 +209,7 @@ test("A to B to A and same-user rotation retain every login transition", () => {
 
 test("a non-login rewrite preserves the exposed login instant and history", () => {
   withLogins([{}], () => {
-    const login = loadLoginContext({ backend: PROD, product: "armorcodex" });
+    const login = loadLoginContext({ backend: DEFAULT_BACKEND, product: "armorcodex" });
     saveProfile({
       ...login.profile,
       apiKey: "ak_test_rotated",
