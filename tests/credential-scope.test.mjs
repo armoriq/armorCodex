@@ -98,6 +98,22 @@ test("backend scope uses the shared URL-origin comparison", () => {
   }
 });
 
+test("a credentials file that can't be read counts as no saved login", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "armorcodex-unreadable-"));
+  fs.mkdirSync(path.join(home, ".armoriq", "credentials.json"), { recursive: true });
+  const original = os.homedir;
+  os.homedir = () => home;
+  syncBuiltinESMExports();
+  try {
+    assert.ok(os.homedir().startsWith(os.tmpdir()), os.homedir());
+    assertUnavailable(loadConfig({}));
+  } finally {
+    os.homedir = original;
+    syncBuiltinESMExports();
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("another active backend or product cannot replace the Codex profile", () => {
   withLogins(
     [
