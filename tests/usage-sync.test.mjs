@@ -676,7 +676,7 @@ test("the hooks leave the usage sync log, request marker, lock and state owner-o
   try {
     const stop = await node(
       [ROUTER],
-      { ...baseEnv(home, server.address().port), CODEX_PLUGIN_OPTION_API_KEY: KEY },
+      baseEnv(signIn(home, { backend: `http://127.0.0.1:${server.address().port}`, apiKey: KEY }), server.address().port),
       JSON.stringify({
         hook_event_name: "Stop",
         session_id: S2,
