@@ -1,28 +1,15 @@
 import armoriqSdk from "@armoriq/sdk-dev";
+import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import path from "node:path";
 import { parseBoolean, parseInteger, parseList } from "./common.mjs";
 
-const ENDPOINTS = {
-  production: {
-    backend: "https://api.armoriq.ai",
-    iap: "https://iap.armoriq.ai",
-    proxy: "https://proxy.armoriq.ai",
-  },
-  staging: {
-    backend: "https://staging-api.armoriq.ai",
-    iap: "https://iap-staging.armoriq.ai",
-    proxy: "https://cloud-run-proxy.armoriq.io",
-  },
-  local: {
-    backend: "http://127.0.0.1:3000",
-    iap: "http://127.0.0.1:8080",
-    proxy: "http://127.0.0.1:3001",
-  },
-};
+const { ARMORIQ_ENV: BUILD_ENV, ENDPOINTS } = createRequire(import.meta.url)(
+  "@armoriq/sdk-dev/dist/_build_env.js",
+);
 
 const ENV_NAMES = {
-  "": "production",
+  "": BUILD_ENV,
   production: "production",
   prod: "production",
   staging: "staging",
