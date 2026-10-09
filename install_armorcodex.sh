@@ -553,6 +553,12 @@ abort_install() {
   exit 1
 }
 
+plugin_has_login() {
+  node --input-type=module -e \
+    'const { loadConfig } = await import(process.argv[1]); process.exit(loadConfig().apiKey ? 0 : 1);' \
+    "${INSTALL_HOME}/${PLUGIN_SUBDIR}/scripts/lib/config.mjs" >/dev/null 2>&1
+}
+
 connect_to_armoriq() {
   section "Connect to ArmorIQ"
   cat <<EOF
@@ -562,8 +568,8 @@ connect_to_armoriq() {
 
 EOF
 
-  if [[ -f "$HOME/.armoriq/credentials.json" ]]; then
-    ok "ArmorIQ credentials already present"
+  if plugin_has_login; then
+    ok "ArmorIQ login for ArmorCodex found"
     return 0
   fi
 
@@ -588,8 +594,8 @@ EOF
     abort_install
   fi
 
-  if [[ "${login_ok}" -ne 1 ]] || [[ ! -f "$HOME/.armoriq/credentials.json" ]]; then
-    err "ArmorIQ login did not complete."
+  if [[ "${login_ok}" -ne 1 ]] || ! plugin_has_login; then
+    err "ArmorIQ login did not complete for ArmorCodex's backend."
     abort_install
   fi
 
