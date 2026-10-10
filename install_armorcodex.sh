@@ -16,15 +16,13 @@ set -euo pipefail
 #   3. ~/.codex/hooks.json with absolute paths  (so hooks fire from any folder)
 #   4. plugin npm dependencies                  (so the first hook fire is fast)
 #
-# Idempotent: re-running won't double-write any block. Will not overwrite a
-# user's existing global hooks file unless --force-hooks is passed; updates do
-# repair missing ArmorCodex lifecycle hooks without replacing other entries.
+# Idempotent: re-running won't double-write any block. ArmorCodex hooks are
+# merged into an existing global hooks file, keeping other tools' hooks.
 # If the plugin and credentials are already in place, the script runs in update
 # mode (refresh checkout + SDK + npm deps, skip the login prompt).
 #
 # Flags:
 #   --uninstall       remove ArmorCodex blocks
-#   --force-hooks     overwrite existing ~/.codex/hooks.json
 #   --force-install   force the full install flow even if already installed
 #   --update          force update mode even without credentials
 #
@@ -84,7 +82,6 @@ BOOTSTRAP_PATH="${PLUGIN_PATH}/scripts/bootstrap.mjs"
 MARK_BEGIN="# >>> ArmorCodex managed block (do not edit manually) >>>"
 MARK_END="# <<< ArmorCodex managed block <<<"
 
-FORCE_HOOKS=0
 DO_UNINSTALL=0
 FORCE_MODE=""
 if [[ "${ARMORIQ_FORCE_INSTALL:-0}" == "1" ]]; then
@@ -92,7 +89,6 @@ if [[ "${ARMORIQ_FORCE_INSTALL:-0}" == "1" ]]; then
 fi
 for arg in "$@"; do
   case "$arg" in
-    --force-hooks) FORCE_HOOKS=1 ;;
     --uninstall) DO_UNINSTALL=1 ;;
     --force-install) FORCE_MODE="install" ;;
     --update) FORCE_MODE="update" ;;
@@ -283,12 +279,11 @@ EOF
 }
 
 ensure_global_hooks() {
-  if [[ -f "${GLOBAL_HOOKS}" && "${FORCE_HOOKS}" -eq 0 ]]; then
-    if grep -q "ArmorCodex" "${GLOBAL_HOOKS}" 2>/dev/null; then
-      local repair_result
-      if ! repair_result="$(node --input-type=module - "${GLOBAL_HOOKS}" "${BOOTSTRAP_PATH}" <<'NODE'
+  local result
+  if ! result="$(node --input-type=module - "${GLOBAL_HOOKS}" "${BOOTSTRAP_PATH}" <<'NODE'
 import {
   chmodSync,
+  existsSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -300,24 +295,36 @@ const [hooksPath, bootstrapPath] = process.argv.slice(2);
 const tempPath = `${hooksPath}.armorcodex.tmp-${process.pid}`;
 
 try {
-  const config = JSON.parse(readFileSync(hooksPath, "utf8"));
+  const existed = existsSync(hooksPath);
+  const config = existed ? JSON.parse(readFileSync(hooksPath, "utf8")) : { hooks: {} };
   if (!config.hooks || typeof config.hooks !== "object" || Array.isArray(config.hooks)) {
     throw new Error("top-level hooks must be an object");
   }
 
   const command = `node ${bootstrapPath} router`;
+  const hook = (extra) => ({ type: "command", command, ...extra });
+  const groups = {
+    SessionStart: { matcher: "startup|resume", hooks: [hook({ statusMessage: "Starting ArmorCodex" })] },
+    UserPromptSubmit: { hooks: [hook({ statusMessage: "Loading ArmorCodex intent policy" })] },
+    PreToolUse: { matcher: "*", hooks: [hook({ statusMessage: "Checking ArmorCodex policy" })] },
+    PermissionRequest: { matcher: "*", hooks: [hook({ statusMessage: "Checking ArmorCodex approval policy" })] },
+    PostToolUse: { matcher: "*", hooks: [hook({ statusMessage: "Auditing ArmorCodex command" })] },
+    Stop: { hooks: [hook({ timeout: 30 })] },
+    SessionEnd: { hooks: [hook({ timeout: 30 })] },
+  };
+  const ours = (entry) => entry?.type === "command"
+    && typeof entry.command === "string"
+    && entry.command.endsWith("bootstrap.mjs router")
+    && /armorcodex/i.test(`${entry.command} ${entry.statusMessage ?? ""}`);
+
   const added = [];
-  for (const event of ["Stop", "SessionEnd"]) {
+  for (const [event, group] of Object.entries(groups)) {
     if (config.hooks[event] !== undefined && !Array.isArray(config.hooks[event])) {
       throw new Error(`hooks.${event} must be an array`);
     }
     const entries = config.hooks[event] ?? [];
-    const present = entries.some((entry) =>
-      Array.isArray(entry?.hooks)
-        && entry.hooks.some((hook) => hook?.type === "command" && hook.command === command),
-    );
-    if (present) continue;
-    entries.push({ hooks: [{ type: "command", command, timeout: 30 }] });
+    if (entries.some((entry) => Array.isArray(entry?.hooks) && entry.hooks.some(ours))) continue;
+    entries.push(group);
     config.hooks[event] = entries;
     added.push(event);
   }
@@ -325,9 +332,9 @@ try {
     process.stdout.write("present");
   } else {
     writeFileSync(tempPath, `${JSON.stringify(config, null, 2)}\n`, { flag: "wx" });
-    chmodSync(tempPath, statSync(hooksPath).mode);
+    if (existed) chmodSync(tempPath, statSync(hooksPath).mode);
     renameSync(tempPath, hooksPath);
-    process.stdout.write(`repaired:${added.join(", ")}`);
+    process.stdout.write(existed ? `repaired:${added.join(", ")}` : "created");
   }
 } catch (error) {
   rmSync(tempPath, { force: true });
@@ -335,84 +342,16 @@ try {
   process.exit(1);
 }
 NODE
-      )"; then
-        warn "couldn't safely repair existing ArmorCodex hooks"
-        info "leaving ${GLOBAL_HOOKS} unchanged"
-        return 0
-      fi
-      if [[ "${repair_result}" == repaired:* ]]; then
-        ok "added missing ArmorCodex ${repair_result#repaired:} hook(s) to ${GLOBAL_HOOKS}"
-      else
-        ok "global hooks already reference ArmorCodex"
-      fi
-      return 0
-    fi
-    warn "global ${GLOBAL_HOOKS} exists and is unrelated"
-    info "skipping (re-run with --force-hooks to overwrite)"
-    info "or merge ${PLUGIN_ROOT}/.codex/hooks.json into it manually"
+  )"; then
+    warn "couldn't safely merge ArmorCodex hooks into ${GLOBAL_HOOKS}"
+    info "leaving ${GLOBAL_HOOKS} unchanged"
     return 0
   fi
-
-  cat > "${GLOBAL_HOOKS}" <<EOF
-{
-  "hooks": {
-    "SessionStart": [
-      {
-        "matcher": "startup|resume",
-        "hooks": [
-          { "type": "command", "command": "node ${BOOTSTRAP_PATH} router", "statusMessage": "Starting ArmorCodex" }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          { "type": "command", "command": "node ${BOOTSTRAP_PATH} router", "statusMessage": "Loading ArmorCodex intent policy" }
-        ]
-      }
-    ],
-    "PreToolUse": [
-      {
-        "matcher": "*",
-        "hooks": [
-          { "type": "command", "command": "node ${BOOTSTRAP_PATH} router", "statusMessage": "Checking ArmorCodex policy" }
-        ]
-      }
-    ],
-    "PermissionRequest": [
-      {
-        "matcher": "*",
-        "hooks": [
-          { "type": "command", "command": "node ${BOOTSTRAP_PATH} router", "statusMessage": "Checking ArmorCodex approval policy" }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "*",
-        "hooks": [
-          { "type": "command", "command": "node ${BOOTSTRAP_PATH} router", "statusMessage": "Auditing ArmorCodex command" }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          { "type": "command", "command": "node ${BOOTSTRAP_PATH} router", "timeout": 30 }
-        ]
-      }
-    ],
-    "SessionEnd": [
-      {
-        "hooks": [
-          { "type": "command", "command": "node ${BOOTSTRAP_PATH} router", "timeout": 30 }
-        ]
-      }
-    ]
-  }
-}
-EOF
-  ok "installed global ArmorCodex hooks at ${GLOBAL_HOOKS}"
+  case "${result}" in
+    created) ok "installed global ArmorCodex hooks at ${GLOBAL_HOOKS}" ;;
+    repaired:*) ok "added missing ArmorCodex ${result#repaired:} hook(s) to ${GLOBAL_HOOKS}" ;;
+    *) ok "global hooks already reference ArmorCodex" ;;
+  esac
 }
 
 install_npm_deps() {
@@ -637,7 +576,6 @@ EOF
   cat <<EOF
 
   ${D}bash $(realpath "${SCRIPT_PATH}" 2>/dev/null || echo install_armorcodex.sh) --uninstall${N}
-  ${D}bash $(realpath "${SCRIPT_PATH}" 2>/dev/null || echo install_armorcodex.sh) --force-hooks${N}
 
   Hooks: ${C}${GLOBAL_HOOKS}${N}
   Config: ${C}${CONFIG_TOML}${N}

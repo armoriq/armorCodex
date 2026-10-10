@@ -83,7 +83,46 @@ test("a normal update adds the Stop and SessionEnd hooks to an existing ArmorCod
     updatedHooks.hooks.SessionEnd[0].hooks[0].command,
     /armorcodex\/scripts\/bootstrap\.mjs router/i,
   );
-  assert.match(result.stdout, /added missing ArmorCodex Stop, SessionEnd hook\(s\)/);
+  assert.match(
+    result.stdout,
+    /added missing ArmorCodex UserPromptSubmit, PreToolUse, PermissionRequest, PostToolUse, Stop, SessionEnd hook\(s\)/,
+  );
+});
+
+test("an existing hooks.json with only another tool's hooks keeps them and gains all seven ArmorCodex hooks", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "armorcodex-other-hooks-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const binDir = join(root, "bin");
+  const hooksPath = join(home, ".codex", "hooks.json");
+  mkdirSync(join(home, ".codex"), { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  const other = [{ hooks: [{ type: "command", command: "/opt/other-tool/bridge --source codex" }] }];
+  writeFileSync(hooksPath, `${JSON.stringify({ hooks: { SessionStart: other, PostToolUse: other } }, null, 2)}\n`);
+  for (const [name, body] of [
+    ["codex", "#!/bin/sh\necho 'codex-cli 0.142.0'\n"],
+    ["npm", "#!/bin/sh\nexit 0\n"],
+  ]) {
+    writeFileSync(join(binDir, name), body);
+    chmodSync(join(binDir, name), 0o755);
+  }
+
+  const result = spawnSync("bash", [new URL("../install_armorcodex.sh", import.meta.url).pathname, "--update"], {
+    cwd: root,
+    encoding: "utf8",
+    env: { ...process.env, HOME: home, PATH: `${binDir}${delimiter}${process.env.PATH}`, NO_COLOR: "1" },
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const { hooks } = JSON.parse(readFileSync(hooksPath, "utf8"));
+  const ours = (event) => (hooks[event] ?? []).filter((group) =>
+    group.hooks.some((hook) => /armorcodex\/scripts\/bootstrap\.mjs router$/i.test(hook.command)));
+  for (const event of ["SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "Stop", "SessionEnd"]) {
+    assert.equal(ours(event).length, 1, `${event} should have one ArmorCodex hook`);
+  }
+  assert.deepEqual(hooks.SessionStart[0], other[0]);
+  assert.deepEqual(hooks.PostToolUse[0], other[0]);
+  assert.doesNotMatch(result.stdout, /unrelated|--force-hooks/);
 });
 
 test("an environment key cannot skip login or appear in installer instructions", (t) => {

@@ -48,7 +48,7 @@ Improvements added during the Codex port that haven't been backported to ArmorCl
 | **Robust JSON-block extraction** | `scripts/lib/planner.mjs` (`extractPlanJsonBlock`) | Returns the last block with a `steps` array, so example/illustration blocks earlier in the file aren't accidentally parsed as the plan. |
 | **Fail-closed on malformed payloads** | `scripts/hook-router.mjs` | Invalid JSON or missing `tool_name` on a `PreToolUse` payload denies in enforce mode instead of silently allowing. |
 | **Version-aware install marker** | `scripts/bootstrap.mjs` | `node_modules/.armorcodex-installed` records the package version; mismatched versions trigger reinstall. Prevents partial-install crashes. |
-| **`--uninstall` and `--force-hooks` installer flags** | `install_armorcodex.sh` | Clean removal and explicit overwrite paths. |
+| **`--uninstall` installer flag** | `install_armorcodex.sh` | Clean removal path. |
 | **Idempotent managed-block markers** | `install_armorcodex.sh` | `# >>> ArmorCodex managed block` markers in `~/.codex/config.toml` mean re-running the installer replaces in place — no duplicate growth. |
 | **Auto-clone fallback in installer** | `install_armorcodex.sh` | Runs cleanly via `curl ... \| bash` (clones to `~/.armoriq/armorCodex`) without requiring the user to clone first. |
 
