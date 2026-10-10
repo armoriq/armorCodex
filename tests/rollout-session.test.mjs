@@ -194,8 +194,9 @@ test("a fork without turn ids leaves out the history it copied, and reports a mi
       .map((l) => JSON.parse(l)),
   );
   const alone = await capture(orphanHome, orphan, F1);
+  assert.deepEqual(alone.problems, []);
   assert.deepEqual(
-    alone.problems.map((p) => p.reason),
+    alone.warnings.map((w) => w.reason),
     ["fork_original_missing"],
   );
 });

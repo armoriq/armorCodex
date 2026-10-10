@@ -197,3 +197,22 @@ test("a history run with one hour the backend refuses for good completes with th
     assert.equal(sessionBatches(b, kept.id).length > 0, true);
   });
 });
+
+test("a history request completes when a session is a fork whose original is gone, counting the fork in full", async () => {
+  await withBackend(at(30), async (b, h) => {
+    const id = randomUUID();
+    const file = rolloutPath(h, at(5), id);
+    writeRollout(file, [
+      meta(at(5), { id, session_id: id, forked_from_id: randomUUID() }),
+      model(at(5), "gpt-5.5"),
+      count(at(5), 50),
+      count(at(10), 80),
+    ]);
+    b.requestId = randomUUID();
+    const { stderr } = await runWorker(h, b);
+    assert.equal(reportsOf(b, "history").at(-1).phase, "complete");
+    assert.equal(b.requestId, null);
+    assert.deepEqual(sessionBatches(b, id).map(total), [80]);
+    assert.match(stderr, /fork_original_missing/);
+  });
+});

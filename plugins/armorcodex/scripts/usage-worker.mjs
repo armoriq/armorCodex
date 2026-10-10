@@ -95,6 +95,7 @@ async function scan(job, run, sessions, generation, save) {
     if (!plan) continue;
     const taken = await captureChanges(job, { ...session, cutoff: plan.cutoff, generation });
     for (const p of taken.problems) log(`not read ${p.path} (${p.reason})`);
+    for (const w of taken.warnings) log(`counted ${w.path} in full (${w.reason})`);
     found.snapshots.push(...taken.snapshots);
     if (taken.problems.length) unread += 1;
     else if (plan.seen) found.seen[session.sessionId] = plan.seen;

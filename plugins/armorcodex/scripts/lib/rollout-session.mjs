@@ -143,7 +143,7 @@ function copiedPrefix({ events, records }, originalPath) {
   };
 }
 
-function forkCopied(rollout, roots, problems, file) {
+function forkCopied(rollout, roots, warnings, file) {
   const forkedFrom = rollout.meta?.forked_from_id;
   if (typeof forkedFrom !== "string" || !forkedFrom || hasTurnIds(rollout))
     return {};
@@ -152,7 +152,7 @@ function forkCopied(rollout, roots, problems, file) {
     .flatMap((root) => listRollouts(root))
     .find((f) => rolloutOf(f).id === id);
   if (original) return copiedPrefix(rollout, original);
-  problems.push({ path: file, reason: "fork_original_missing" });
+  warnings.push({ path: file, reason: "fork_original_missing" });
   return {};
 }
 
@@ -177,6 +177,7 @@ export async function captureCodexSession({
   indexPath,
 }) {
   const problems = [];
+  const warnings = [];
   const hours = {};
   let repo;
   const files = await sessionRollouts({
@@ -195,7 +196,7 @@ export async function captureCodexSession({
     }
     if (file === transcript && typeof rollout.meta?.cwd === "string")
       repo = rollout.meta.cwd;
-    const copied = forkCopied(rollout, roots, problems, file);
+    const copied = forkCopied(rollout, roots, warnings, file);
     addHours(hours, rolloutUsage(rollout, copied, (t) => t >= cutoff).hours);
   }
   const snapshots = Object.keys(hours)
@@ -205,5 +206,5 @@ export async function captureCodexSession({
       usageHour: Number(key.slice(11, 13)),
       entries: Object.values(hours[key]),
     }));
-  return { hours: snapshots, ...(repo ? { repo } : {}), problems };
+  return { hours: snapshots, ...(repo ? { repo } : {}), problems, warnings };
 }

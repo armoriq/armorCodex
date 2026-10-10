@@ -25,6 +25,7 @@ async function uploadOnce(job) {
     const generation = await streamGeneration(job, attempt > 0);
     const taken = await captureChanges(job, { ...job.session, cutoff: job.cutoff, generation });
     for (const p of taken.problems) log(`not read ${p.path} (${p.reason})`);
+    for (const w of taken.warnings) log(`counted ${w.path} in full (${w.reason})`);
     await enqueue(job.queueDir, toItems(taken.snapshots, { generation, ...job }));
     const { outcome, sent, refused, result } = await drain(job);
     for (const reason of refused) log(`set aside a batch the backend refused: ${reason}`);
