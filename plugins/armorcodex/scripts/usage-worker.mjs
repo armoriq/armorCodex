@@ -132,6 +132,14 @@ async function openRuns(job) {
   return [state.discovery, state.history].filter(Boolean);
 }
 
+function forgetRefused(job, batches) {
+  for (const batch of batches) {
+    const run = [job.state.discovery, job.state.history].find((r) => r?.runId === batch.runId);
+    const refused = new Set(batch.snapshots.map(hourOf));
+    if (run) run.hours = run.hours.filter((hour) => !refused.has(hour));
+  }
+}
+
 async function drainRuns(job, historyRefused) {
   let dropped = cancelled(historyRefused ?? {});
   const result = await drain(job, (res, item) => {
@@ -140,6 +148,7 @@ async function drainRuns(job, historyRefused) {
     return cancelled(res) || (current && dropped);
   });
   for (const reason of result.refused) log(`set aside a batch the backend refused: ${reason}`);
+  forgetRefused(job, result.aside);
   if (result.sent) log(`sent ${result.sent} session-hour(s)`);
   if (result.outcome === "kept") log(`kept the rest for the next run: ${describe(result.result)}`);
   if (dropped) job.state.history = null;

@@ -178,3 +178,22 @@ test("a history request stays open while one of its sessions cannot be read, and
     assert.equal(total(sessionBatches(b, s.id).at(-1)), 14);
   });
 });
+
+test("a history run with one hour the backend refuses for good completes with the remaining hours", async () => {
+  await withBackend(at(30), async (b, h) => {
+    const kept = session(h, at(5), [count(at(10), 10)]);
+    const refused = session(h, at(6), [count(at(12), 7)]);
+    b.onBatch = (res, body) => {
+      if (!body.snapshots.some((s) => s.sessionId === refused.id)) return false;
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ message: "entries are invalid" }));
+      return true;
+    };
+    b.requestId = randomUUID();
+    await runWorker(h, b);
+    const done = reportsOf(b, "history").at(-1);
+    assert.deepEqual([done.phase, done.total], ["complete", 1]);
+    assert.equal(b.requestId, null);
+    assert.equal(sessionBatches(b, kept.id).length > 0, true);
+  });
+});

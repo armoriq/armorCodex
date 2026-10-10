@@ -100,7 +100,7 @@ async function setAside(job, { file, ...item }, result) {
   await writeJson(path.join(job.queueDir, "refused", path.basename(file)), { ...item, refused });
   await updateSessions(job.dir, item.batch.snapshots, refuse);
   await settle(file);
-  return `${item.batch.snapshots.length} session-hour(s), ${describe(result)}`;
+  return { note: `${item.batch.snapshots.length} session-hour(s), ${describe(result)}`, batch: item.batch };
 }
 
 async function retryAlone(job, { file, ...item }) {
@@ -132,9 +132,16 @@ async function refuseBatch(job, item, result) {
 export async function drain(job, dropped = () => false) {
   let sent = 0;
   const refused = [];
+  const done = (outcome, result) => ({
+    outcome,
+    sent,
+    refused: refused.map((r) => r.note),
+    aside: refused.map((r) => r.batch),
+    result,
+  });
   for (const item of await queued(job.queueDir)) {
     const result = await job.client.recordTokenUsageBatch(item.batch);
-    if (fenced(result)) return { outcome: "fenced", sent, refused, result };
+    if (fenced(result)) return done("fenced", result);
     if (!result.ok && dropped(result, item)) {
       await settle(item.file);
       continue;
@@ -145,12 +152,12 @@ export async function drain(job, dropped = () => false) {
       refused.push(...alone.refused);
       continue;
     }
-    if (!result.ok) return { outcome: "kept", sent, refused, result };
+    if (!result.ok) return done("kept", result);
     await recordAcks(job.dir, item);
     await settle(item.file);
     sent += item.batch.snapshots.length;
   }
-  return { outcome: "drained", sent, refused };
+  return done("drained");
 }
 
 export async function clearQueue(queueDir) {
