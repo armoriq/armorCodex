@@ -1,9 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { appendFileSync, rmSync, statSync } from "node:fs";
+import { appendFileSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
+import { loadConfig } from "../plugins/armorcodex/scripts/lib/config.mjs";
 import { liveTranscript } from "../plugins/armorcodex/scripts/lib/live-usage.mjs";
+import { signIn, withHome } from "./helpers/login.mjs";
 import {
   backend,
   closeBackend,
@@ -12,11 +15,12 @@ import {
   GENERATION,
   home,
   isoAgo,
+  KEY,
   meta,
   model,
   rolloutPath,
   run,
-  SCANNER,
+  WORKER,
   sessionBatches,
   settled,
   stop,
@@ -63,11 +67,13 @@ const line = (record) => JSON.stringify(record) + "\n";
 const entryOf = (e) => [e.model, e.inputTokens, e.outputTokens, e.cacheReadTokens, e.reasoningOutputTokens];
 const modeOf = (file) => statSync(file).mode & 0o777;
 
-test("a Stop posts its own session while the scanner is held on a backlog", async () => {
+test("a Stop posts its own session while the usage worker is held on a backlog", async () => {
   await withSession(isoAgo(3 * 3_600_000), async (b, h) => {
+    const held = [];
+    b.onBatch = (res, body) => Boolean(body.runId) && held.push(res) > 0;
     for (let i = 0; i < 30; i++) session(h, isoAgo(2 * 3_600_000 + i * 1000), [count(isoAgo(2 * 3_600_000), 3, 1)]);
-    const scan = run(SCANNER, env(h, b.url));
-    await until(() => b.singles.length > 0, "the scanner's first held post");
+    const scan = run(WORKER, env(h, b.url));
+    await until(() => held.length > 0, "the worker's first held batch");
     const at = isoAgo(60_000);
     const target = session(h, at, [count(at, 20_000, 500, 12_000, 100), count(at, 50_000, 1790, 40_000, 400)]);
     await stop(h, b.url, target.id, target.file);
@@ -75,8 +81,8 @@ test("a Stop posts its own session while the scanner is held on a backlog", asyn
     const [hour] = sessionBatches(b, target.id);
     assert.deepEqual([hour.usageDate, hour.usageHour, total(hour)], [at.slice(0, 10), Number(at.slice(11, 13)), 51_790]);
     assert.equal(b.batches[0].generation, GENERATION);
-    assert.equal(b.singles.some((s) => s.sessionId === target.id), false);
-    b.release();
+    assert.equal(b.batches.filter((x) => x.runId).flatMap((x) => x.snapshots).length, 30);
+    for (const res of held) res.socket.destroy();
     await scan;
   });
 });
@@ -216,3 +222,33 @@ test("a batch refused for good is retried hour by hour, only the refused hour is
     assert.deepEqual(b.batches.slice(sentBefore).flatMap((x) => x.snapshots).map(total), [11]);
   });
 });
+
+const OBS_OFF = { CODEX_PLUGIN_OPTION_DISABLE_OBSERVABILITY: "true" };
+const SYNC_OFF = { CODEX_PLUGIN_OPTION_DISABLE_USAGE_SYNC: "true" };
+
+test("usageSyncEnabled needs observability on and disable_usage_sync unset", () => {
+  const cases = [
+    [{}, true, true],
+    [
+      {
+        CODEX_PLUGIN_OPTION_DISABLE_OBSERVABILITY: "false",
+        CODEX_PLUGIN_OPTION_DISABLE_USAGE_SYNC: "false",
+      },
+      true,
+      true,
+    ],
+    [OBS_OFF, false, false],
+    [SYNC_OFF, true, false],
+    [{ ...OBS_OFF, ...SYNC_OFF }, false, false],
+    [{ ARMORCODEX_USAGE_SYNC_DISABLED: "1" }, true, false],
+    [{ ARMORCODEX_OBSERVABILITY_DISABLED: "yes" }, false, false],
+  ];
+  for (const [env, observability, usageSync] of cases) {
+    const home = mkdtempSync(path.join(tmpdir(), "acx-config-"));
+    signIn(home, { backend: loadConfig({}).backendEndpoint, apiKey: KEY });
+    const cfg = withHome(home, () => loadConfig(env));
+    assert.equal(cfg.observabilityEnabled, observability, JSON.stringify(env));
+    assert.equal(cfg.usageSyncEnabled, usageSync, JSON.stringify(env));
+  }
+});
+

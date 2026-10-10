@@ -9,7 +9,7 @@ import { signIn } from "./login.mjs";
 
 const SCRIPTS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "plugins", "armorcodex", "scripts");
 export const ROUTER = path.join(SCRIPTS, "hook-router.mjs");
-export const SCANNER = path.join(SCRIPTS, "usage-sync.mjs");
+export const WORKER = path.join(SCRIPTS, "usage-worker.mjs");
 export const KEY = "ak_test_codex_live_0001";
 export const USER = `user-of-${KEY}`;
 export const GENERATION = randomUUID();
