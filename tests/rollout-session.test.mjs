@@ -9,7 +9,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { captureCodexSession } from "../plugins/armorcodex/scripts/lib/rollout-session.mjs";
+import { captureCodexSession, listSessions } from "../plugins/armorcodex/scripts/lib/rollout-session.mjs";
+import { sessionFingerprint } from "../plugins/armorcodex/scripts/lib/live-usage.mjs";
 
 const S1 = "019e0000-0000-7000-8000-000000000001";
 const S2 = "019e0000-0000-7000-8000-000000000002";
@@ -219,4 +220,25 @@ test("a subagent rollout that cannot be read is reported and the rest still coun
     taken.hours.map((h) => h.entries[0].inputTokens),
     [12],
   );
+});
+
+test("one listing gives every session its subagent rollouts, so fingerprints read no index", async () => {
+  const home = codexHome();
+  const roots = [path.join(home, "sessions"), path.join(home, "archived_sessions")];
+  const indexPath = path.join(home, "index.json");
+  const ids = Array.from({ length: 40 }, (_, i) => `019e0000-0000-7000-8000-${String(i).padStart(12, "0")}`);
+  for (const id of ids) {
+    writeRollout(rolloutPath(home, "2026-09-20", id), [meta("2026-09-20T09:00:00Z", { id, session_id: id }), count("2026-09-20T09:01:00Z", 1)]);
+  }
+  const sub = rolloutPath(home, "2026-09-21", A1);
+  writeRollout(sub, [meta("2026-09-21T09:00:00Z", { id: A1, session_id: ids[0] }), count("2026-09-21T09:01:00Z", 2)]);
+  const sessions = await listSessions({ roots, indexPath });
+  chmodSync(indexPath, 0o000);
+  assert.equal(sessions.length, ids.length);
+  assert.deepEqual(sessions.find((s) => s.sessionId === ids[0]).members.map((f) => path.basename(f)), [
+    path.basename(rolloutPath(home, "2026-09-20", ids[0])),
+    path.basename(sub),
+  ]);
+  const prints = new Set(sessions.map((s) => sessionFingerprint(s, 0)));
+  assert.equal(prints.size, ids.length);
 });

@@ -71,7 +71,7 @@ async function flush(job, run, found, generation) {
 async function capturedSince(job, session, history, awaitingHistory) {
   if (!history && awaitingHistory.has(session.sessionId)) return null;
   const { admitted } = await readJson(sessionFile(job.dir, session.sessionId), {});
-  const seen = history ? null : await sessionFingerprint(job.dir, session, admitted || job.cutoff);
+  const seen = history ? null : sessionFingerprint(session, admitted || job.cutoff);
   if (seen && job.state.seen[session.sessionId] === seen) return null;
   return { seen, cutoff: history ? -Infinity : job.cutoff };
 }

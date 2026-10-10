@@ -112,7 +112,14 @@ export async function listSessions({ roots, indexPath }) {
     if (entry && entry.id === entry.sessionId) sessions.push({ sessionId: entry.id, transcript: file });
   }
   if (added) await writeJson(indexPath, index);
-  return sessions;
+  const subagents = new Map();
+  for (const [file, entry] of Object.entries(index))
+    if (entry && entry.id !== entry.sessionId)
+      subagents.set(entry.sessionId, [...(subagents.get(entry.sessionId) ?? []), file]);
+  return sessions.map((s) => ({
+    ...s,
+    members: [s.transcript, ...(subagents.get(s.sessionId) ?? []).sort()],
+  }));
 }
 
 const leading = (items, has) => {
