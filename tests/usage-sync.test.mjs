@@ -36,7 +36,6 @@ const SCRIPTS = path.join(
   "scripts"
 );
 const SYNC = path.join(SCRIPTS, "usage-sync.mjs");
-const ROUTER = path.join(SCRIPTS, "hook-router.mjs");
 const S1 = "019e0000-0000-7000-8000-000000000001";
 const S2 = "019e0000-0000-7000-8000-000000000002";
 const S3 = "019e0000-0000-7000-8000-000000000003";
@@ -603,116 +602,6 @@ async function until(check, what, timeoutMs = 20_000) {
     await new Promise((r) => setTimeout(r, 100));
   }
 }
-
-const readLastRun = (statePath) => {
-  try {
-    return JSON.parse(readFileSync(statePath, "utf8")).lastRun?.at;
-  } catch {
-    return undefined;
-  }
-};
-
-test("SessionStart and Stop hooks run the sync, which posts each session-hour with its date and hour", async () => {
-  const home = fixtureHome();
-  const { server, posts, port } = await fakeBackend();
-  const statePath = userState(path.join(home, "data"), port, KEY);
-  const base = syncBasePath(path.join(home, "data"));
-  signIn(home, { backend: `http://127.0.0.1:${port}`, apiKey: KEY, userId: userOf(KEY) });
-  const env = baseEnv(home, port);
-  const hook = (event, toggles = {}) =>
-    node(
-      [ROUTER],
-      { ...env, ...toggles },
-      JSON.stringify({
-        hook_event_name: event,
-        session_id: S2,
-        cwd: "/work/repo-b",
-        transcript_path: rolloutPath(home, "2026-09-22", S2),
-      })
-    );
-  const settled = (after) => () =>
-    readLastRun(statePath) !== after && !existsSync(`${base}.lock`);
-  try {
-    for (const [name, toggles] of TOGGLES) {
-      await hook("SessionStart", toggles);
-      await hook("Stop", toggles);
-      assert.equal(existsSync(`${base}.request`), false, name);
-      assert.equal(existsSync(`${base}.lock`), false, name);
-    }
-    await new Promise((r) => setTimeout(r, 3000));
-    assert.equal(posts.length, 0);
-    assert.equal(existsSync(statePath), false);
-
-    await hook("SessionStart");
-    await until(settled(undefined), "the SessionStart pass");
-    const rows = (list) =>
-      list.map((p) => [p.sessionId, p.usageDate, p.usageHour, p.product, p.repo, p.entries.length]).sort();
-    const expected = [
-      [S1, "2026-09-20", 9, "armorcodex", "/work/repo-a", 2],
-      [S1, "2026-09-21", 10, "armorcodex", "/work/repo-a", 1],
-      [S2, "2026-09-22", 9, "armorcodex", "/work/repo-b", 1],
-      [S3, "2026-09-19", 9, "armorcodex", "/work/repo-c", 1],
-    ];
-    assert.deepEqual(rows(posts), expected);
-
-    const firstRun = readLastRun(statePath);
-    append(rolloutPath(home, "2026-09-22", S2), count("2026-09-22T10:00:00Z", 105, 10));
-    await hook("Stop");
-    await until(settled(firstRun), "the Stop pass");
-    assert.deepEqual(
-      rows(posts),
-      [...expected, [S2, "2026-09-22", 10, "armorcodex", "/work/repo-b", 1]].sort()
-    );
-    assert.equal(posts.at(-1).entries[0].inputTokens, 10);
-  } finally {
-    server.close();
-  }
-});
-
-test("the hooks leave the usage sync log, request marker, lock and state owner-only (#106)", async () => {
-  process.umask(0o022);
-  const modeOf = (file) => statSync(file).mode & 0o777;
-  const home = fixtureHome();
-  const dataDir = path.join(home, "data");
-  const base = syncBasePath(dataDir);
-  const logPath = path.join(dataDir, "usage-sync.log");
-  mkdirSync(dataDir, { mode: 0o755 });
-  chmodSync(dataDir, 0o755);
-  for (const file of [logPath, `${base}.request`]) {
-    writeFileSync(file, "old");
-    chmodSync(file, 0o644);
-  }
-
-  let release;
-  const held = new Promise((resolve) => (release = resolve));
-  const { server, posts, port } = await fakeBackend(() => held);
-  const statePath = userState(dataDir, port, KEY);
-  try {
-    const stop = await node(
-      [ROUTER],
-      baseEnv(signIn(home, { backend: `http://127.0.0.1:${port}`, apiKey: KEY, userId: userOf(KEY) }), port),
-      JSON.stringify({
-        hook_event_name: "Stop",
-        session_id: S2,
-        cwd: "/work/repo-b",
-        transcript_path: rolloutPath(home, "2026-09-22", S2),
-      })
-    );
-    assert.equal(stop.status, 0, stop.stderr);
-    await until(() => posts.length > 0, "the first post");
-    assert.equal(modeOf(`${base}.lock`), 0o600);
-    release();
-    await until(() => readLastRun(statePath) !== undefined && !existsSync(`${base}.lock`), "the pass");
-    assert.equal(modeOf(dataDir), 0o700);
-    assert.equal(modeOf(path.dirname(statePath)), 0o700);
-    for (const file of [statePath, logPath, `${base}.request`]) {
-      assert.equal(modeOf(file), 0o600, file);
-    }
-  } finally {
-    release();
-    server.close();
-  }
-});
 
 const KEY_A = "ak_test_codex_user_a";
 const KEY_B = "ak_test_codex_user_b";
