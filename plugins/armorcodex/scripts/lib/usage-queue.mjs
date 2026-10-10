@@ -9,6 +9,7 @@ import {
   knownDigests,
   newBatchId,
   packBatches,
+  refuse,
   setGeneration,
   storedGeneration,
   withFileLock,
@@ -66,22 +67,52 @@ export const toItems = (snapshots, { generation, deviceName }) =>
     batch: { generation, batchId: newBatchId(), deviceName, snapshots: group },
   }));
 
-async function recordAcks(dir, { batch }) {
+async function updateSessions(dir, snapshots, change) {
   const bySession = new Map();
-  for (const s of batch.snapshots)
-    bySession.set(s.sessionId, [...(bySession.get(s.sessionId) ?? []), s]);
-  for (const [sessionId, snapshots] of bySession) {
+  for (const s of snapshots) bySession.set(s.sessionId, [...(bySession.get(s.sessionId) ?? []), s]);
+  for (const [sessionId, own] of bySession) {
     const file = sessionFile(dir, sessionId);
     await withFileLock(path.join(dir, `${sessionId}.ack.lock`), async () => {
-      await writeJson(file, acknowledge(await readJson(file, {}), batch.generation, snapshots));
+      await writeJson(file, change(await readJson(file, {}), own));
     });
   }
 }
 
-async function setAside(queueDir, { file, ...item }, result) {
+const recordAcks = (dir, { batch }) =>
+  updateSessions(dir, batch.snapshots, (state, own) => acknowledge(state, batch.generation, own));
+
+async function setAside(job, { file, ...item }, result) {
   const refused = { status: result.status ?? null, reason: result.reason };
-  await writeJson(path.join(queueDir, "refused", path.basename(file)), { ...item, refused });
+  await writeJson(path.join(job.queueDir, "refused", path.basename(file)), { ...item, refused });
+  await updateSessions(job.dir, item.batch.snapshots, refuse);
   await settle(file);
+  return `${item.batch.snapshots.length} session-hour(s), ${describe(result)}`;
+}
+
+async function retryAlone(job, { file, ...item }) {
+  const singles = item.batch.snapshots.map((s) => ({
+    ...item,
+    batch: { ...item.batch, batchId: newBatchId(), snapshots: [s] },
+  }));
+  await enqueue(job.queueDir, singles);
+  await settle(file);
+  const ids = new Set(singles.map((s) => s.batch.batchId));
+  const outcome = { sent: 0, refused: [] };
+  for (const single of (await queued(job.queueDir)).filter((q) => ids.has(q.batch.batchId))) {
+    const result = await job.client.recordTokenUsageBatch(single.batch);
+    if (result.ok) {
+      await recordAcks(job.dir, single);
+      await settle(single.file);
+      outcome.sent += 1;
+    } else if (result.retryable === false)
+      outcome.refused.push(await setAside(job, single, result));
+  }
+  return outcome;
+}
+
+async function refuseBatch(job, item, result) {
+  if (item.batch.snapshots.length > 1) return retryAlone(job, item);
+  return { sent: 0, refused: [await setAside(job, item, result)] };
 }
 
 export async function drain(job, dropped = () => false) {
@@ -95,8 +126,9 @@ export async function drain(job, dropped = () => false) {
       continue;
     }
     if (!result.ok && result.retryable === false) {
-      await setAside(job.queueDir, item, result);
-      refused.push(`${item.batch.snapshots.length} session-hour(s), ${describe(result)}`);
+      const alone = await refuseBatch(job, item, result);
+      sent += alone.sent;
+      refused.push(...alone.refused);
       continue;
     }
     if (!result.ok) return { outcome: "kept", sent, refused, result };

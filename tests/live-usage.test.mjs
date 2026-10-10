@@ -191,3 +191,28 @@ test("a Stop uploads nothing while the usage sync is off, and keeps its state an
       assert.equal(modeOf(file), 0o600, file);
   });
 });
+
+test("a batch refused for good is retried hour by hour, only the refused hour is set aside, and it is sent again only once it changes", async () => {
+  await withSession(isoAgo(3 * 3_600_000), async (b, h) => {
+    const bad = isoAgo(2 * 3_600_000);
+    const isBad = (s) => s.usageDate === bad.slice(0, 10) && s.usageHour === Number(bad.slice(11, 13));
+    b.onBatch = (res, body) => {
+      if (!body.snapshots.some(isBad)) return false;
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ message: "usageHour must be a UTC hour" }));
+      return true;
+    };
+    const s = session(h, bad, [count(bad, 4), count(isoAgo(60_000), 10)]);
+    await stop(h, b.url, s.id, s.file);
+    const alone = (x) => x.snapshots.length === 1 && !isBad(x.snapshots[0]);
+    await until(() => b.batches.some(alone), "the good hour alone");
+    const files = await settled(h, s.id);
+    assert.deepEqual(files.refused().map((r) => r.batch.snapshots.map(total)), [[4]]);
+    const sentBefore = b.batches.length;
+    appendFileSync(s.file, line(count(isoAgo(30_000), 15)));
+    await stop(h, b.url, s.id, s.file);
+    await until(() => b.batches.length > sentBefore, "the next capture");
+    await settled(h, s.id);
+    assert.deepEqual(b.batches.slice(sentBefore).flatMap((x) => x.snapshots).map(total), [11]);
+  });
+});

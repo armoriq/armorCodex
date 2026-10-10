@@ -111,7 +111,7 @@ const acknowledgedIn = (state, generation) =>
   state.generation === generation ? (state.acknowledged ?? {}) : {};
 
 export function knownDigests(state, generation, pendingBatches, sessionId) {
-  const known = { ...acknowledgedIn(state, generation) };
+  const known = { ...state.refused, ...acknowledgedIn(state, generation) };
   for (const batch of pendingBatches.filter((b) => b.generation === generation))
     for (const s of batch.snapshots)
       if (s.sessionId === sessionId) known[hourKey(s)] = digest(s.entries);
@@ -136,6 +136,12 @@ export function acknowledge(state, generation, snapshots) {
   const acknowledged = { ...acknowledgedIn(state, generation) };
   for (const s of snapshots) acknowledged[hourKey(s)] = digest(s.entries);
   return { ...state, generation, acknowledged };
+}
+
+export function refuse(state, snapshots) {
+  const refused = { ...state.refused };
+  for (const s of snapshots) refused[hourKey(s)] = digest(s.entries);
+  return { ...state, refused };
 }
 
 const encoded = (snapshot) => Buffer.byteLength(JSON.stringify(snapshot));
