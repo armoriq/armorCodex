@@ -28,8 +28,10 @@ export function loginCutoff(config) {
   return accepted ? Date.parse(config.loggedInAt) : null;
 }
 
+export const isSessionId = (id) => typeof id === "string" && SESSION_ID.test(id);
+
 export function liveTranscript(sessionsRoot, sessionId, transcriptPath) {
-  if (typeof sessionId !== "string" || !SESSION_ID.test(sessionId)) return null;
+  if (!isSessionId(sessionId)) return null;
   if (typeof transcriptPath !== "string" || !path.isAbsolute(transcriptPath)) return null;
   const resolved = path.resolve(transcriptPath);
   const inside = resolved.startsWith(path.resolve(sessionsRoot) + path.sep);

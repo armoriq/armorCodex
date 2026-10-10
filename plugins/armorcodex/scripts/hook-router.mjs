@@ -13,7 +13,7 @@ import {
 } from "./lib/engine.mjs";
 import { ensurePrivateDir } from "./lib/fs-store.mjs";
 import { observeHook } from "./lib/observability.mjs";
-import { launchLiveUsage } from "./lib/usage-sync-launch.mjs";
+import { launchLiveUsage, trackUsageSession } from "./lib/usage-sync-launch.mjs";
 
 let currentEvent = "";
 
@@ -54,6 +54,7 @@ async function main() {
   const event = typeof input.hook_event_name === "string" ? input.hook_event_name : "";
   currentEvent = event;
   debugLog(config, `hook=${event}`);
+  await trackUsageSession(event, input, config);
 
   let output;
 

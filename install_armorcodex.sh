@@ -305,30 +305,29 @@ try {
     throw new Error("top-level hooks must be an object");
   }
 
-  const stopCommand = `node ${bootstrapPath} router`;
-  if (config.hooks.Stop !== undefined && !Array.isArray(config.hooks.Stop)) {
-    throw new Error("hooks.Stop must be an array");
+  const command = `node ${bootstrapPath} router`;
+  const added = [];
+  for (const event of ["Stop", "SessionEnd"]) {
+    if (config.hooks[event] !== undefined && !Array.isArray(config.hooks[event])) {
+      throw new Error(`hooks.${event} must be an array`);
+    }
+    const entries = config.hooks[event] ?? [];
+    const present = entries.some((entry) =>
+      Array.isArray(entry?.hooks)
+        && entry.hooks.some((hook) => hook?.type === "command" && hook.command === command),
+    );
+    if (present) continue;
+    entries.push({ hooks: [{ type: "command", command, timeout: 30 }] });
+    config.hooks[event] = entries;
+    added.push(event);
   }
-
-  const stopEntries = config.hooks.Stop ?? [];
-  const hasCurrentStopHook = stopEntries.some((entry) =>
-    Array.isArray(entry?.hooks)
-      && entry.hooks.some((hook) => hook?.type === "command" && hook.command === stopCommand),
-  );
-  if (hasCurrentStopHook) {
+  if (added.length === 0) {
     process.stdout.write("present");
   } else {
-    stopEntries.push({
-      hooks: [
-        { type: "command", command: stopCommand, timeout: 30 },
-      ],
-    });
-    config.hooks.Stop = stopEntries;
-
     writeFileSync(tempPath, `${JSON.stringify(config, null, 2)}\n`, { flag: "wx" });
     chmodSync(tempPath, statSync(hooksPath).mode);
     renameSync(tempPath, hooksPath);
-    process.stdout.write("repaired");
+    process.stdout.write(`repaired:${added.join(", ")}`);
   }
 } catch (error) {
   rmSync(tempPath, { force: true });
@@ -341,8 +340,8 @@ NODE
         info "leaving ${GLOBAL_HOOKS} unchanged"
         return 0
       fi
-      if [[ "${repair_result}" == "repaired" ]]; then
-        ok "added missing ArmorCodex Stop hook to ${GLOBAL_HOOKS}"
+      if [[ "${repair_result}" == repaired:* ]]; then
+        ok "added missing ArmorCodex ${repair_result#repaired:} hook(s) to ${GLOBAL_HOOKS}"
       else
         ok "global hooks already reference ArmorCodex"
       fi
@@ -397,6 +396,13 @@ NODE
       }
     ],
     "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node ${BOOTSTRAP_PATH} router", "timeout": 30 }
+        ]
+      }
+    ],
+    "SessionEnd": [
       {
         "hooks": [
           { "type": "command", "command": "node ${BOOTSTRAP_PATH} router", "timeout": 30 }

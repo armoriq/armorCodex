@@ -1,10 +1,13 @@
 #!/usr/bin/env node
 import { randomUUID } from "node:crypto";
+import { readFileSync, unlinkSync } from "node:fs";
 import path from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { pendingHistorySync } from "./lib/history-request.mjs";
 import { readJson, writeJson } from "./lib/fs-store.mjs";
 import { allSessions, sessionFingerprint, tryFileLock } from "./lib/live-usage.mjs";
 import { prepareUsage } from "./lib/usage-context.mjs";
+import { anySessionAnswers, liveSessions } from "./lib/usage-sessions.mjs";
 import {
   captureChanges,
   clearQueue,
@@ -13,13 +16,18 @@ import {
   enqueue,
   queued,
   sessionFile,
+  settle,
   streamGeneration,
   toItems,
 } from "./lib/usage-queue.mjs";
 
+const SERVE = process.argv.includes("--serve");
 const BUDGET_MS = 75_000;
 const HARD_STOP_MS = 120_000;
-const deadline = Date.now() + BUDGET_MS;
+const INTERVAL_MS = 60_000;
+const RETRY_MIN_MS = 30_000;
+const RETRY_MAX_MS = 15 * 60_000;
+const WATCH_MS = 2_000;
 
 function log(message) {
   process.stderr.write(`[usage-worker] ${new Date().toISOString()} ${message}\n`);
@@ -37,7 +45,7 @@ const newRun = (mode, requestId) => ({
   manifestDone: false,
 });
 
-async function report(job, run, phase, errorCode) {
+async function report(job, run, phase, errorCode, retryAt) {
   run.sequence += 1;
   const res = await job.client.reportUsageRun(run.runId, {
     mode: run.mode,
@@ -46,6 +54,7 @@ async function report(job, run, phase, errorCode) {
     phase,
     discovered: run.hours.length,
     ...(run.manifestDone ? { total: run.hours.length } : {}),
+    ...(retryAt ? { retryAt } : {}),
     ...(errorCode ? { errorCode } : {}),
   });
   if (!res.ok) log(`could not report the ${run.mode} run (${describe(res)})`);
@@ -87,7 +96,7 @@ async function scan(job, run, sessions, generation, save) {
   let unread = 0;
   let finished = true;
   for (const session of sessions) {
-    if (Date.now() > deadline) {
+    if (Date.now() > job.deadline) {
       finished = false;
       break;
     }
@@ -114,12 +123,46 @@ function phaseOf({ unread, finished }, left, outcome) {
   return [failed ? "retrying" : "uploading", unread ? "source_unreadable" : failed];
 }
 
+const retryAtFor = (job, phase) =>
+  job.serve && phase === "retrying" && job.retryInMs !== null
+    ? new Date(Date.now() + job.retryInMs).toISOString()
+    : undefined;
+
+function logCompletion(run, res) {
+  if (run.mode !== "history") return;
+  log(
+    res.value?.historyCompleted
+      ? `completed the history request ${run.requestId}`
+      : `the history request ${run.requestId} was replaced or cancelled before it completed`
+  );
+}
+
 async function settleRun(job, run, scanned, outcome) {
   const left = (await queued(job.queueDir)).some((i) => i.batch.runId === run.runId);
   if (run.mode === "discovery" && run.sequence === 0 && !left) return;
   const [phase, errorCode] = phaseOf(scanned, left, outcome);
-  const res = await report(job, run, phase, errorCode);
-  if (res.ok && phase === "complete") job.state[run.mode] = null;
+  const res = await report(job, run, phase, errorCode, retryAtFor(job, phase));
+  if (!res.ok || phase !== "complete") return;
+  logCompletion(run, res);
+  job.state[run.mode] = null;
+}
+
+function planRetry(job, outcome, result) {
+  if (outcome !== "kept") {
+    job.failures = 0;
+    job.retryInMs = null;
+    return;
+  }
+  job.retryInMs = result?.retryAfterMs ?? Math.min(RETRY_MIN_MS * 2 ** job.failures, RETRY_MAX_MS);
+  job.failures += 1;
+}
+
+async function replaceHistory(job, requestId) {
+  const old = job.state.history;
+  if ((old?.requestId ?? null) === requestId) return;
+  for (const item of await queued(job.queueDir))
+    if (old && item.batch.runId === old.runId) await settle(item.file);
+  job.state.history = requestId ? newRun("history", requestId) : null;
 }
 
 async function openRuns(job) {
@@ -127,8 +170,7 @@ async function openRuns(job) {
   const request = await pendingHistorySync(job.config, job.deviceId);
   if (!request.ok) log(`could not read the history request (${request.reason})`);
   const requestId = request.ok ? request.requestId : (state.history?.requestId ?? null);
-  if ((state.history?.requestId ?? null) !== requestId)
-    state.history = requestId ? newRun("history", requestId) : null;
+  await replaceHistory(job, requestId);
   state.discovery = { ...(state.discovery ?? newRun("discovery")), manifestDone: false };
   return [state.discovery, state.history].filter(Boolean);
 }
@@ -153,6 +195,7 @@ async function drainRuns(job, historyRefused) {
   if (result.sent) log(`sent ${result.sent} session-hour(s)`);
   if (result.outcome === "kept") log(`kept the rest for the next run: ${describe(result.result)}`);
   if (dropped) job.state.history = null;
+  planRetry(job, result.outcome, result.result);
   return result.outcome;
 }
 
@@ -172,32 +215,89 @@ async function pass(job, generation) {
   return outcome;
 }
 
+async function runPasses(job) {
+  job.deadline = Date.now() + BUDGET_MS;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const outcome = await pass(job, await streamGeneration(job, attempt > 0));
+    if (outcome !== "fenced") return;
+    await clearQueue(job.queueDir);
+    job.state = { seen: {} };
+    await writeJson(job.statePath, job.state);
+    log("the usage stream has a new generation, starting over");
+  }
+}
+
+async function tick(job) {
+  try {
+    await runPasses(job);
+  } catch (err) {
+    log(`pass failed: ${err?.message ?? err}`);
+    planRetry(job, "kept");
+  }
+  return job.retryInMs ?? INTERVAL_MS;
+}
+
+function exitWhenClosed(job, lockPath) {
+  if (anySessionAnswers(job.dir)) return;
+  log("the last session closed, exiting");
+  try {
+    if (readFileSync(lockPath, "utf8").trim() === String(process.pid)) unlinkSync(lockPath);
+  } finally {
+    process.exit(0);
+  }
+}
+
+async function sameLogin(job) {
+  const current = await prepareUsage(log);
+  if (current?.dir !== job.dir) return false;
+  Object.assign(job, { config: current.config, client: current.client, cutoff: current.cutoff });
+  return true;
+}
+
+async function serve(job, lockPath) {
+  const watch = setInterval(() => exitWhenClosed(job, lockPath), WATCH_MS);
+  try {
+    for (;;) {
+      if (!(await liveSessions(job.dir))) return log("no live session left, exiting");
+      if (!(await sameLogin(job))) return log("the login changed, exiting");
+      await sleep(await tick(job));
+    }
+  } finally {
+    clearInterval(watch);
+  }
+}
+
 async function main() {
   const context = await prepareUsage(log);
   if (!context) return;
-  const release = await tryFileLock(path.join(context.dir, "worker.lock"));
+  const lockPath = path.join(context.dir, "worker.lock");
+  const release = await tryFileLock(lockPath);
   if (!release) return log("another usage worker is running");
   try {
     const statePath = path.join(context.dir, "worker.json");
     const state = { seen: {}, ...(await readJson(statePath, {})) };
-    const job = { ...context, state, statePath, queueDir: path.join(context.dir, "worker.queue") };
-    for (let attempt = 0; attempt < 2; attempt++) {
-      if ((await pass(job, await streamGeneration(job, attempt > 0))) !== "fenced") return;
-      await clearQueue(job.queueDir);
-      job.state = { seen: {} };
-      await writeJson(statePath, job.state);
-      log("the usage stream has a new generation, starting over");
-    }
+    const queueDir = path.join(context.dir, "worker.queue");
+    const job = {
+      ...context,
+      state,
+      statePath,
+      queueDir,
+      serve: SERVE,
+      failures: 0,
+      retryInMs: null,
+    };
+    await (SERVE ? serve(job, lockPath) : runPasses(job));
   } finally {
     await release();
   }
 }
 
-const hardStop = setTimeout(() => {
-  log(`still running after ${HARD_STOP_MS}ms, exiting`);
-  process.exit(1);
-}, HARD_STOP_MS);
-hardStop.unref();
+if (!SERVE) {
+  setTimeout(() => {
+    log(`still running after ${HARD_STOP_MS}ms, exiting`);
+    process.exit(1);
+  }, HARD_STOP_MS).unref();
+}
 
 main().catch((err) => {
   log(`failed: ${err?.message ?? err}`);
