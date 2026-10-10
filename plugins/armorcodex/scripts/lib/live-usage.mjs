@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { statSync } from "node:fs";
 import { readFile, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -7,7 +8,7 @@ import armoriqSdk from "@armoriq/sdk-dev";
 import { ensurePrivateDir, PRIVATE_FILE_MODE, readJson, writeJson } from "./fs-store.mjs";
 import { validHistory } from "./login-ownership.mjs";
 import { isAlive } from "./usage-sync-launch.mjs";
-import { captureCodexSession, rolloutOf } from "./rollout-session.mjs";
+import { captureCodexSession, listSessions, rolloutOf, sessionRollouts } from "./rollout-session.mjs";
 
 const { MAX_BATCH_BYTES, MAX_BATCH_ENTRIES, MAX_BATCH_SNAPSHOTS } = armoriqSdk;
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -98,14 +99,22 @@ export async function storedGeneration(dir) {
 const hourKey = (h) => `${h.usageDate}T${String(h.usageHour).padStart(2, "0")}`;
 const digest = (entries) => createHash("sha256").update(JSON.stringify(entries)).digest("hex");
 
+const indexPath = (dir) => path.join(dir, "rollout-index.json");
+
 export const captureSession = ({ dir, transcript, sessionId, cutoff }) =>
-  captureCodexSession({
-    roots: codexRoots(),
-    transcript,
-    sessionId,
-    cutoff,
-    indexPath: path.join(dir, "rollout-index.json"),
+  captureCodexSession({ roots: codexRoots(), transcript, sessionId, cutoff, indexPath: indexPath(dir) });
+
+export const allSessions = (dir) => listSessions({ roots: codexRoots(), indexPath: indexPath(dir) });
+
+export async function sessionFingerprint(dir, { sessionId, transcript }, key) {
+  const sessionsRoot = codexRoots()[0];
+  const files = await sessionRollouts({ sessionsRoot, transcript, sessionId, indexPath: indexPath(dir) });
+  const stats = files.map((file) => {
+    const st = statSync(file, { throwIfNoEntry: false });
+    return [file, st?.size ?? null, st?.mtimeMs ?? null];
   });
+  return digest([key, stats]);
+}
 
 const acknowledgedIn = (state, generation) =>
   state.generation === generation ? (state.acknowledged ?? {}) : {};

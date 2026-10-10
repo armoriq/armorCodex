@@ -56,15 +56,26 @@ export const settle = (file) => unlink(file).catch(() => {});
 export async function captureChanges(job, { sessionId, transcript, cutoff, generation }) {
   const state = await readJson(sessionFile(job.dir, sessionId), {});
   const revision = await allocateRevision(job.dir);
-  const taken = await captureSession({ dir: job.dir, transcript, sessionId, cutoff });
+  const taken = await captureSession({
+    dir: job.dir,
+    transcript,
+    sessionId,
+    cutoff: state.admitted ? -Infinity : cutoff,
+  });
   const pending = (await queued(job.queueDir)).map((q) => q.batch);
   const known = knownDigests(state, generation, pending, sessionId);
   return { ...taken, snapshots: changedSnapshots({ capture: taken, sessionId, revision, known }) };
 }
 
-export const toItems = (snapshots, { generation, deviceName }) =>
+export const toItems = (snapshots, { generation, deviceName, runId }) =>
   packBatches(snapshots).map((group) => ({
-    batch: { generation, batchId: newBatchId(), deviceName, snapshots: group },
+    batch: {
+      generation,
+      batchId: newBatchId(),
+      ...(runId ? { runId } : {}),
+      deviceName,
+      snapshots: group,
+    },
   }));
 
 async function updateSessions(dir, snapshots, change) {
@@ -78,8 +89,11 @@ async function updateSessions(dir, snapshots, change) {
   }
 }
 
-const recordAcks = (dir, { batch }) =>
-  updateSessions(dir, batch.snapshots, (state, own) => acknowledge(state, batch.generation, own));
+const recordAcks = (dir, { batch, admits }) =>
+  updateSessions(dir, batch.snapshots, (state, own) => {
+    const acked = acknowledge(state, batch.generation, own);
+    return admits ? { ...acked, admitted: true } : acked;
+  });
 
 async function setAside(job, { file, ...item }, result) {
   const refused = { status: result.status ?? null, reason: result.reason };

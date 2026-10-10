@@ -21,6 +21,8 @@ export function backend() {
   let release;
   const released = new Promise((resolve) => (release = resolve));
   const b = { batches, singles, release, generation: GENERATION, onBatch: null };
+  Object.assign(b, { requestId: null, reports: [], runs: new Map(), acked: new Map() });
+  const stale = (run) => run?.mode === "history" && run.requestId !== b.requestId;
   const server = createServer((req, res) => {
     let raw = "";
     req.on("data", (c) => (raw += c));
@@ -31,12 +33,31 @@ export function backend() {
         res.end(JSON.stringify(data));
       };
       if (req.url === "/iap/validate-key") return reply(200, { userId: USER });
-      if (req.url.startsWith("/api-keys/device-history-sync")) return reply(200, { requestedAt: null });
+      if (req.url.startsWith("/api-keys/device-history-sync"))
+        return reply(200, { requestId: b.requestId, requestedAt: b.requestId && isoAgo(0) });
       if (req.url === "/dashboard/token-usage/stream") return reply(200, { generation: b.generation });
+      if (req.url.startsWith("/dashboard/token-usage/runs/")) {
+        const runId = req.url.split("/").at(-1);
+        b.reports.push({ runId, ...body });
+        if (stale(body)) return reply(409, { message: "History request is no longer current" });
+        if (body.phase === "complete" && !((b.acked.get(runId)?.size ?? 0) >= body.total))
+          return reply(409, { message: "Run has unacknowledged session-hours" });
+        b.runs.set(runId, body);
+        const historyCompleted = body.mode === "history" && body.phase === "complete";
+        if (historyCompleted) b.requestId = null;
+        return reply(200, { applied: true, historyCompleted, run: { runId } });
+      }
       if (req.url === "/dashboard/token-usage/batch") {
         if (body.generation !== b.generation) return reply(409, { message: "Usage stream generation changed" });
+        if (body.runId && !b.runs.has(body.runId)) return reply(409, { message: "Unknown usage sync run" });
+        if (stale(b.runs.get(body.runId))) return reply(409, { message: "History request is no longer current" });
         batches.push(body);
         if (b.onBatch?.(res, body)) return;
+        if (body.runId) {
+          const hours = b.acked.get(body.runId) ?? new Set();
+          for (const s of body.snapshots) hours.add(`${s.sessionId}|${s.usageDate}|${s.usageHour}`);
+          b.acked.set(body.runId, hours);
+        }
         const results = body.snapshots.map(({ sessionId, usageDate, usageHour }) => ({
           sessionId,
           usageDate,

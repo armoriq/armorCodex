@@ -99,6 +99,22 @@ export async function sessionRollouts({
   return [transcript, ...members];
 }
 
+export async function listSessions({ roots, indexPath }) {
+  const index = await readJson(indexPath, {});
+  let added = false;
+  const sessions = [];
+  for (const file of roots.flatMap((root) => listRollouts(root))) {
+    if (!Object.hasOwn(index, file)) {
+      index[file] = indexEntry(file);
+      added = true;
+    }
+    const entry = index[file];
+    if (entry && entry.id === entry.sessionId) sessions.push({ sessionId: entry.id, transcript: file });
+  }
+  if (added) await writeJson(indexPath, index);
+  return sessions;
+}
+
 const leading = (items, has) => {
   let n = 0;
   while (n < items.length && has(items[n])) n++;
