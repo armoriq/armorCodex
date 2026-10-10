@@ -2,6 +2,18 @@
 
 All notable changes to ArmorCodex are recorded here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.3.4] - 2026-10-10
+
+### Added
+- Each Stop uploads that Codex session's usage on its own, from the login time on, through a crash-safe local queue (batch upload with per-hour revisions).
+- A background worker runs while a Codex session is open (a pass every 60 s) to upload sessions that sent no Stop and an earlier-history request after you allow it in Tools. It stops after the last session ends. Codex asks you once in `/hooks` to trust the new SessionEnd hook.
+
+### Changed
+- Depends on `@armoriq/sdk-dev` ^0.8.13 for the batch upload client.
+
+### Removed
+- `scripts/usage-sync.mjs` and the hook launches of the old usage scanner.
+
 ## [0.3.3] - Unreleased
 
 ### Added
