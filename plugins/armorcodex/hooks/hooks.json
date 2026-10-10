@@ -68,6 +68,17 @@
           }
         ]
       }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ./scripts/bootstrap.mjs router",
+            "timeout": 30
+          }
+        ]
+      }
     ]
   }
 }

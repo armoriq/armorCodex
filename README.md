@@ -80,13 +80,20 @@ Core environment variables:
 
 ### Token usage sync
 
-While observability is on, `plugins/armorcodex/scripts/usage-sync.mjs` uploads token counts for
-every Codex session under `~/.codex/sessions` and `~/.codex/archived_sessions` (or
-`$CODEX_HOME`), including sessions that ran without ArmorCodex. It posts one row per session,
-model, UTC date and UTC hour, with the session's working directory and the device name. It sends no prompts
-or transcript text. The hook router starts it in the background on `SessionStart` and after each
-`Stop`. `node plugins/armorcodex/scripts/usage-sync.mjs --dry-run` prints the rows without
-posting them.
+While observability is on, ArmorCodex uploads token counts per session, model, UTC date and UTC
+hour, with the session's working directory and the device name. It sends no prompts or transcript
+text, and only usage dated after the current login unless the dashboard asks the device for its
+earlier history.
+
+- Each `Stop` uploads that session's usage (its rollout and its subagents' rollouts) on its own.
+- `plugins/armorcodex/scripts/usage-worker.mjs --serve` runs while at least one Codex session is
+  open: `SessionStart` registers the session and starts it, `SessionEnd` removes the session, and
+  it exits when none is left. Every 60 seconds it uploads sessions that changed without a `Stop`,
+  retries failed uploads, and handles the dashboard's earlier-history request.
+
+`SessionEnd` is a new hook. Codex runs a hook only after you trust it, so after updating run
+`/hooks` in Codex once and trust ArmorCodex's `SessionEnd` hook. The other ArmorCodex hooks are
+unchanged and keep their trust. Without it the worker still exits when Codex itself exits.
 
 ## Policy Commands
 

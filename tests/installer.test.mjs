@@ -13,7 +13,7 @@ import { spawnSync } from "node:child_process";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import test from "node:test";
 
-test("a normal update adds the Stop hook to an existing ArmorCodex hooks file", (t) => {
+test("a normal update adds the Stop and SessionEnd hooks to an existing ArmorCodex hooks file and leaves its other hooks unchanged", (t) => {
   const root = mkdtempSync(join(tmpdir(), "armorcodex-installer-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
 
@@ -78,6 +78,12 @@ test("a normal update adds the Stop hook to an existing ArmorCodex hooks file", 
     updatedHooks.hooks.Stop[0].hooks[0].command,
     /armorcodex\/scripts\/bootstrap\.mjs router/i,
   );
+  assert.deepEqual(updatedHooks.hooks.SessionStart, existingHooks.hooks.SessionStart);
+  assert.match(
+    updatedHooks.hooks.SessionEnd[0].hooks[0].command,
+    /armorcodex\/scripts\/bootstrap\.mjs router/i,
+  );
+  assert.match(result.stdout, /added missing ArmorCodex Stop, SessionEnd hook\(s\)/);
 });
 
 test("an environment key cannot skip login or appear in installer instructions", (t) => {
