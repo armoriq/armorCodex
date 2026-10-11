@@ -285,3 +285,19 @@ test("a turn latency post the backend refuses is sent again on the next run", as
     assert.deepEqual(latencyOf(b, s.id).map((p) => p.sampleCount), [1]);
   });
 });
+
+test("a hung latency endpoint stops the latency sync, after the usage runs are settled", async () => {
+  await withBackend(at(1), async (b, h) => {
+    const sessions = [1, 2, 3].map((n) => session(h, at(2), [count(at(3), 10 * n), turnDone(at(3), 1_000 * n)]));
+    const attempts = [];
+    b.onLatency = () => {
+      attempts.push(reportsOf(b, "discovery").map((r) => r.phase));
+      return true;
+    };
+    const result = await run(worker, env(h, b.url, { ARMORCODEX_TIMEOUT_MS: "300" }));
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(sessions.filter((s) => sessionBatches(b, s.id).length).length, 3);
+    assert.ok(attempts.length > 0 && attempts.length <= 2, `${attempts.length} latency attempts`);
+    assert.ok(attempts[0].includes("complete"), `latency started before the run settled: ${attempts[0]}`);
+  });
+});

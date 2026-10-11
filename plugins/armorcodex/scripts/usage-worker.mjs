@@ -209,6 +209,7 @@ async function sendLatency(job, session) {
     deviceName: job.deviceName,
   });
   for (const payload of payloads) {
+    if (Date.now() > job.deadline) return { reason: "out of time for this pass" };
     const res = await job.client.recordTokenLatency(payload);
     if (!res.ok) return res;
   }
@@ -222,8 +223,11 @@ async function syncLatency(job, sessions) {
     const seen = sessionFingerprint(session, "latency");
     if (sent[session.sessionId] === seen) continue;
     const failed = await sendLatency(job, session).catch((err) => ({ reason: err?.message ?? String(err) }));
-    if (failed) log(`could not send the turn latency of ${session.sessionId} (${describe(failed)})`);
-    else sent[session.sessionId] = seen;
+    if (!failed) sent[session.sessionId] = seen;
+    else {
+      log(`could not send the turn latency of ${session.sessionId} (${describe(failed)})`);
+      if (failed.unreachable) return;
+    }
   }
 }
 
@@ -237,9 +241,10 @@ async function pass(job, generation) {
   }
   const outcome = await drainRuns(job, scans.get(job.state.history)?.refused);
   if (outcome === "fenced") return outcome;
-  await syncLatency(job, sessions);
   for (const [run, scanned] of scans)
     if (job.state[run.mode] === run) await settleRun(job, run, scanned, outcome);
+  await save();
+  await syncLatency(job, sessions);
   await save();
   return outcome;
 }
