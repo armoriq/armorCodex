@@ -70,8 +70,8 @@ test("PreToolUse asks for a token on the registered plan, not a one-tool plan", 
   const { config, recorder } = await setup();
   try {
     const plan = normalizeIntentPlan({
-      goal: "check the time and the weather",
-      steps: [{ action: "Bash" }, { action: "clock__curr_time" }, { action: "web__run" }]
+      goal: "edit a file and track progress",
+      steps: [{ action: "Bash" }, { action: "apply_patch" }, { action: "update_plan" }]
     });
     await writeFile(
       path.join(config.dataDir, "pending-plan.s1.json"),
@@ -81,7 +81,7 @@ test("PreToolUse asks for a token on the registered plan, not a one-tool plan", 
     assert.equal(recorder.bodies.length, 1);
     assert.deepEqual(
       recorder.bodies[0].plan.steps.map((step) => step.action),
-      ["Bash", "clock__curr_time", "web__run"]
+      ["Bash", "apply_patch", "update_plan"]
     );
   } finally {
     recorder.server.close();
