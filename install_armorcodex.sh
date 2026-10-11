@@ -413,13 +413,9 @@ remove_codex_hooks() {
 
 install_npm_deps() {
   pushd "${PLUGIN_PATH}" >/dev/null
-  if [[ -d node_modules/@armoriq/sdk-dev && -d node_modules/zod && -d node_modules/@modelcontextprotocol/sdk ]]; then
-    info "npm dependencies already present"
-  else
-    info "installing npm dependencies (--omit=dev)"
-    npm install --omit=dev --silent --no-audit --no-fund >/dev/null
-    ok "npm dependencies installed"
-  fi
+  info "installing npm dependencies (--omit=dev)"
+  npm install --omit=dev --silent --no-audit --no-fund >/dev/null
+  ok "npm dependencies installed"
   popd >/dev/null
 }
 
