@@ -112,11 +112,13 @@ function readIntentTokenRaw(input, session) {
   return "";
 }
 
-function denyOrAllow(config, reason) {
-  if (shouldDeny(config)) {
-    return denyPreTool(reason);
-  }
-  return null;
+async function denyAndAudit(input, config, reason) {
+  await auditToolCall(input, config, { status: "blocked", output: null, error_message: reason }, null);
+  return denyPreTool(reason);
+}
+
+function denyOrAllow(input, config, reason) {
+  return shouldDeny(config) ? denyAndAudit(input, config, reason) : null;
 }
 
 function debugLog(config, message) {
@@ -125,18 +127,10 @@ function debugLog(config, message) {
   }
 }
 
-/**
- * Pick the best matching step index in the plan for a given tool call.
- * Prefers a step that matches BOTH tool name and parameters, falls back to
- * tool name only, then to step 0. Used to populate audit log step_index so
- * the backend can advance plan execution state to 'completed'.
- */
-function pickStepIndex(plan, toolName, toolInput) {
-  if (!plan || typeof plan !== "object") return 0;
+function matchedStepIndex(plan, toolName, toolInput) {
+  if (!plan || typeof plan !== "object") return undefined;
   const { matches, paramMatches } = findPlanStepIndices(plan, toolName, toolInput);
-  if (paramMatches.length > 0) return paramMatches[0];
-  if (matches.length > 0) return matches[0];
-  return 0;
+  return paramMatches[0] ?? matches[0];
 }
 
 // ---------------------------------------------------------------------------
@@ -257,7 +251,7 @@ export async function handlePreToolUse(input, config) {
   if (!toolName) {
     // Missing tool_name on a PreToolUse event means the payload shape is
     // unexpected. Fail-closed in enforce mode instead of silently allowing.
-    return denyOrAllow(config, "ArmorCodex: missing tool_name on PreToolUse");
+    return denyOrAllow(input, config, "ArmorCodex: missing tool_name on PreToolUse");
   }
 
   // --- Whitelist: ArmorCodex's own MCP tools must never be blocked,
@@ -315,7 +309,8 @@ export async function handlePreToolUse(input, config) {
     : null;
   const pending = pendingPath ? await readIssuedPlan(pendingPath) : null;
   if (pending?.status === "issuing") {
-    const deny = denyOrAllow(
+    const deny = await denyOrAllow(
+      input,
       config,
       "ArmorCodex intent token was not issued in time: call register_intent_plan again, then retry the tool"
     );
@@ -350,7 +345,7 @@ export async function handlePreToolUse(input, config) {
       if (cachedState?.policyDigest) {
         const check = cryptoService.verifyPolicyDigest(currentDigest, cachedState.policyDigest);
         if (!check.valid) {
-          return denyOrAllow(config, `ArmorCodex crypto policy mismatch: ${check.reason}`);
+          return denyOrAllow(input, config, `ArmorCodex crypto policy mismatch: ${check.reason}`);
         }
       }
     } catch (error) {
@@ -364,7 +359,7 @@ export async function handlePreToolUse(input, config) {
     toolParams: toolInput
   });
   if (!policyDecision.allowed) {
-    return denyPreTool(policyDecision.reason || "ArmorCodex policy denied");
+    return denyAndAudit(input, config, policyDecision.reason || "ArmorCodex policy denied");
   }
 
   // --- Intent token verification ---
@@ -390,7 +385,7 @@ export async function handlePreToolUse(input, config) {
     if (tokenCheck.matched) {
       tokenCheckMatched = true;
       if (tokenCheck.blockReason) {
-        return denyOrAllow(config, tokenCheck.blockReason);
+        return denyOrAllow(input, config, tokenCheck.blockReason);
       }
       localPlan = tokenCheck.plan || localPlan;
       remoteAllowed = true;
@@ -400,7 +395,7 @@ export async function handlePreToolUse(input, config) {
   // --- CSRG proof handling ---
   const parsedProofs = parseCsrgProofHeaders(input);
   if (parsedProofs.error) {
-    return denyOrAllow(config, parsedProofs.error);
+    return denyOrAllow(input, config, parsedProofs.error);
   }
   let csrgProofs = parsedProofs.proofs;
   if (!csrgProofs && intentTokenRaw && localPlan && typeof localPlan === "object") {
@@ -423,7 +418,7 @@ export async function handlePreToolUse(input, config) {
       Boolean(intentTokenRaw)
   );
   if (proofError) {
-    return denyOrAllow(config, proofError);
+    return denyOrAllow(input, config, proofError);
   }
 
   // --- Remote step verification ---
@@ -436,6 +431,7 @@ export async function handlePreToolUse(input, config) {
       }
       if (verifyResult.allowed === false) {
         return denyOrAllow(
+          input,
           config,
           verifyResult.reason || `ArmorCodex intent verification denied for ${toolName}`
         );
@@ -453,7 +449,7 @@ export async function handlePreToolUse(input, config) {
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      const deny = denyOrAllow(config, `ArmorCodex verify-step failed: ${message}`);
+      const deny = await denyOrAllow(input, config, `ArmorCodex verify-step failed: ${message}`);
       if (deny) {
         return deny;
       }
@@ -462,7 +458,8 @@ export async function handlePreToolUse(input, config) {
 
   // --- Expiry check ---
   if (Number.isFinite(localExpiresAt) && nowEpochSeconds() > localExpiresAt) {
-    const deny = denyOrAllow(
+    const deny = await denyOrAllow(
+      input,
       config,
       "ArmorCodex intent token expired — call register_intent_plan with your current plan to refresh, then retry the tool"
     );
@@ -485,7 +482,7 @@ export async function handlePreToolUse(input, config) {
     if (localCheck.allowed) {
       localPlanMatched = true;
     } else {
-      const deny = denyOrAllow(config, localCheck.reason || "ArmorCodex intent drift");
+      const deny = await denyOrAllow(input, config, localCheck.reason || "ArmorCodex intent drift");
       if (deny) {
         return deny;
       }
@@ -494,7 +491,8 @@ export async function handlePreToolUse(input, config) {
 
   // --- Enforce intent requirement ---
   if (config.intentRequired && !remoteAllowed && !tokenCheckMatched && !localPlanMatched) {
-    const deny = denyOrAllow(
+    const deny = await denyOrAllow(
+      input,
       config,
       "ArmorCodex intent plan missing for this session: call register_intent_plan first, then retry the tool"
     );
@@ -574,24 +572,27 @@ async function takeToolDuration(config, toolUseId) {
   return started > 0 ? Date.now() - started : undefined;
 }
 
-async function auditToolCall(input, config, outcome) {
-  const toolName = typeof input.tool_name === "string" ? input.tool_name : "";
-  if (!config.auditEnabled || !config.apiKey || !toolName) return;
+async function buildAuditRow(input, config, outcome, unknownStep) {
+  const toolName = input.tool_name;
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
+  const session = getSession(await loadRuntimeState(config.runtimeFile), sessionId) || {};
+  const inputs = sanitizeParams(input.tool_input, config.sanitize);
+  return fitAuditRow({
+    ...auditLink(config, sessionId, session.intentTokenRaw || ""),
+    step_index: matchedStepIndex(session.plan, toolName, inputs) ?? unknownStep,
+    action: toolName,
+    tool: toolName,
+    input: redactSecrets(inputs),
+    executed_at: new Date().toISOString(),
+    duration_ms: await takeToolDuration(config, input.tool_use_id),
+    ...outcome
+  });
+}
+
+async function auditToolCall(input, config, outcome, unknownStep = 0) {
+  if (!config.auditEnabled || !config.apiKey || typeof input.tool_name !== "string" || !input.tool_name) return;
   try {
-    const session = getSession(await loadRuntimeState(config.runtimeFile), sessionId) || {};
-    const inputs = sanitizeParams(input.tool_input, config.sanitize);
-    const row = fitAuditRow({
-      ...auditLink(config, sessionId, session.intentTokenRaw || ""),
-      step_index: pickStepIndex(session.plan, toolName, inputs),
-      action: toolName,
-      tool: toolName,
-      input: redactSecrets(inputs),
-      executed_at: new Date().toISOString(),
-      duration_ms: await takeToolDuration(config, input.tool_use_id),
-      ...outcome
-    });
-    await createIapService(config).enqueueAudit(row);
+    await createIapService(config).enqueueAudit(await buildAuditRow(input, config, outcome, unknownStep));
   } catch (error) {
     process.stderr.write(`[armorcodex] audit row rejected: ${error instanceof Error ? error.message : error}\n`);
   }
