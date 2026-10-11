@@ -20,8 +20,9 @@ import {
   parsePolicyTextCommand
 } from "./policy.mjs";
 import { handleArmorPolicyCommand, isArmorPolicyCommand } from "./armor-policy-commands.mjs";
-import { readJson } from "./fs-store.mjs";
-import { unlink } from "node:fs/promises";
+import { fitAuditRow } from "./audit-wal.mjs";
+import { readJson, writePrivateFile } from "./fs-store.mjs";
+import { readFile, unlink } from "node:fs/promises";
 import path from "node:path";
 import {
   getSession,
@@ -505,6 +506,7 @@ export async function handlePreToolUse(input, config) {
   // --- Record tool for discovery ---
   upsertDiscoveredTool(runtimeState, toolName);
   await saveRuntimeState(config.runtimeFile, runtimeState);
+  await recordToolStart(config, input.tool_use_id);
   return null;
 }
 
@@ -536,63 +538,70 @@ export async function handlePermissionRequest(input, config) {
 // PostToolUse — audit logging
 // ---------------------------------------------------------------------------
 
-export async function handlePostToolUse(input, config) {
-  if (!config.auditEnabled || !config.apiKey) {
-    return null;
-  }
-
-  const sessionId = typeof input.session_id === "string" ? input.session_id : "";
-  const toolName = typeof input.tool_name === "string" ? input.tool_name : "";
-  if (!toolName) return null;
-
+function auditLink(config, sessionId, intentTokenRaw) {
+  let planId;
   try {
-    const runtimeState = await loadRuntimeState(config.runtimeFile);
-    const session = getSession(runtimeState, sessionId) || {};
-    const iapService = createIapService(config);
+    planId = JSON.parse(intentTokenRaw).planId;
+  } catch {
+    planId = undefined;
+  }
+  return {
+    plan_id: planId,
+    session_id: sessionId,
+    user_id: config.userId,
+    agent_id: config.agentId,
+    client_id: config.mcpName || config.llmId
+  };
+}
 
-    const intentTokenRaw = session.intentTokenRaw || "";
-    let token = intentTokenRaw;
-    // Extract JWT if embedded in JSON envelope
-    if (intentTokenRaw.startsWith("{")) {
-      try {
-        const parsed = JSON.parse(intentTokenRaw);
-        token = parsed.jwtToken || parsed.jwt_token || intentTokenRaw;
-      } catch { /* use raw */ }
-    }
+const toolStartPath = (config, toolUseId) =>
+  typeof toolUseId === "string" && /^[A-Za-z0-9_-]+$/.test(toolUseId)
+    ? path.join(config.dataDir, "tool-starts", toolUseId)
+    : null;
 
-    // Compute the real step index from the registered plan so the backend's
-    // updateExecutionProgress can advance plan status to 'completed'.
+async function recordToolStart(config, toolUseId) {
+  const startPath = toolStartPath(config, toolUseId);
+  if (startPath && config.auditEnabled && config.apiKey) {
+    await writePrivateFile(startPath, String(Date.now())).catch(() => {});
+  }
+}
+
+async function takeToolDuration(config, toolUseId) {
+  const startPath = toolStartPath(config, toolUseId);
+  if (!startPath) return undefined;
+  const started = Number(await readFile(startPath, "utf8").catch(() => ""));
+  await unlink(startPath).catch(() => {});
+  return started > 0 ? Date.now() - started : undefined;
+}
+
+async function auditToolCall(input, config, outcome) {
+  const toolName = typeof input.tool_name === "string" ? input.tool_name : "";
+  if (!config.auditEnabled || !config.apiKey || !toolName) return;
+  const sessionId = typeof input.session_id === "string" ? input.session_id : "";
+  try {
+    const session = getSession(await loadRuntimeState(config.runtimeFile), sessionId) || {};
     const inputs = sanitizeParams(input.tool_input, config.sanitize);
-    const stepIdx = pickStepIndex(session.plan, toolName, inputs);
-
-    const dto = {
-      token,
-      step_index: stepIdx,
+    const row = fitAuditRow({
+      ...auditLink(config, sessionId, session.intentTokenRaw || ""),
+      step_index: pickStepIndex(session.plan, toolName, inputs),
       action: toolName,
       tool: toolName,
       input: redactSecrets(inputs),
-      output: redactSecrets(sanitizeParams(input.tool_response, config.sanitize)),
-      status: "success",
       executed_at: new Date().toISOString(),
-      duration_ms: 0
-    };
-
-    // Await the WAL disk write (~1-2ms) so the row is durable before the
-    // hook returns. Without the await a crash between read and write loses
-    // the audit row even though the WAL exists for exactly this reason.
-    // The slow HTTP ship to /iap/audit/batch still happens async via the
-    // embedded flusher in policy-mcp.mjs. Mirrors armorClaude#46 fix #5.
-    try {
-      await iapService.enqueueAudit(dto);
-    } catch (error) {
-      debugLog(config, `audit enqueue failed: ${error}`);
-    }
-    debugLog(config, `audit log enqueued for ${toolName} step=${stepIdx}`);
+      duration_ms: await takeToolDuration(config, input.tool_use_id),
+      ...outcome
+    });
+    await createIapService(config).enqueueAudit(row);
   } catch (error) {
-    // Audit is best-effort — don't block
-    debugLog(config, `audit log failed: ${error}`);
+    process.stderr.write(`[armorcodex] audit row rejected: ${error instanceof Error ? error.message : error}\n`);
   }
+}
 
+export async function handlePostToolUse(input, config) {
+  await auditToolCall(input, config, {
+    status: "success",
+    output: redactSecrets(sanitizeParams(input.tool_response, config.sanitize))
+  });
   return null;
 }
 
@@ -601,54 +610,11 @@ export async function handlePostToolUse(input, config) {
 // ---------------------------------------------------------------------------
 
 export async function handlePostToolUseFailure(input, config) {
-  if (!config.auditEnabled || !config.apiKey) {
-    return null;
-  }
-
-  const sessionId = typeof input.session_id === "string" ? input.session_id : "";
-  const toolName = typeof input.tool_name === "string" ? input.tool_name : "";
-  if (!toolName) return null;
-
-  try {
-    const runtimeState = await loadRuntimeState(config.runtimeFile);
-    const session = getSession(runtimeState, sessionId) || {};
-    const iapService = createIapService(config);
-
-    const intentTokenRaw = session.intentTokenRaw || "";
-    let token = intentTokenRaw;
-    if (intentTokenRaw.startsWith("{")) {
-      try {
-        const parsed = JSON.parse(intentTokenRaw);
-        token = parsed.jwtToken || parsed.jwt_token || intentTokenRaw;
-      } catch { /* use raw */ }
-    }
-
-    const inputs = sanitizeParams(input.tool_input, config.sanitize);
-    const stepIdx = pickStepIndex(session.plan, toolName, inputs);
-    const dto = {
-      token,
-      step_index: stepIdx,
-      action: toolName,
-      tool: toolName,
-      input: redactSecrets(inputs),
-      output: null,
-      status: "failed",
-      error_message: typeof input.error === "string" ? redactSecrets(input.error) : "Unknown error",
-      executed_at: new Date().toISOString(),
-      duration_ms: 0
-    };
-
-    // Same await rationale as the success path above — see armorClaude#46 fix #5.
-    try {
-      await iapService.enqueueAudit(dto);
-    } catch (error) {
-      debugLog(config, `audit enqueue (failure) failed: ${error}`);
-    }
-    debugLog(config, `audit log (failure) enqueued for ${toolName}`);
-  } catch (error) {
-    debugLog(config, `audit log (failure) failed: ${error}`);
-  }
-
+  await auditToolCall(input, config, {
+    status: "failed",
+    output: null,
+    error_message: typeof input.error === "string" ? redactSecrets(input.error) : "Unknown error"
+  });
   return null;
 }
 
