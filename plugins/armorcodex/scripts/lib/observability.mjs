@@ -128,7 +128,7 @@
  */
 import armoriqSdk from "@armoriq/sdk-dev";
 import { sanitizeParams, redactSecrets, sha256Hex } from "./common.mjs";
-import { summarizeCodexTurnUsage } from "./token-usage.mjs";
+import { codexTurnUsageCalls } from "./token-usage.mjs";
 import {
   appendNdjsonLine,
   readNdjsonLines,
@@ -382,14 +382,14 @@ async function replaySpan(session, span, toolStarts) {
   }
 }
 
-async function replayModel(session, entry, stoppedAt) {
+async function replayModel(session, call) {
   const usage = {
-    "gen_ai.usage.input_tokens": entry.inputTokens,
-    "gen_ai.usage.output_tokens": entry.outputTokens,
-    "gen_ai.usage.cache_read_tokens": entry.cacheReadTokens,
-    "gen_ai.usage.cache_write_tokens": entry.cacheWriteTokens,
+    "gen_ai.usage.input_tokens": call.inputTokens,
+    "gen_ai.usage.output_tokens": call.outputTokens,
+    "gen_ai.usage.cache_read_tokens": call.cacheReadTokens,
+    "gen_ai.usage.cache_write_tokens": call.cacheWriteTokens,
   };
-  await session.recordModel(entry.model, usage, endedAt(stoppedAt));
+  await session.recordModel(call.model, usage, endedAt(call.timestampMs), { spanId: sha256Hex(call.key).slice(0, 16) });
 }
 
 function parseTurnLog(lines) {
@@ -452,7 +452,7 @@ async function obsEndTurnAndShip(sessionId, config, transcriptPath) {
   try {
     const toolStarts = toolStartTimes(spans);
     for (const span of spans) await replaySpan(session, span, toolStarts);
-    for (const entry of summarizeCodexTurnUsage(transcriptPath)) await replayModel(session, entry, stoppedAt);
+    for (const call of codexTurnUsageCalls(transcriptPath)) await replayModel(session, call);
   } catch (err) {
     failure = err;
     process.stderr.write(`[armorcodex-obs] Stop could not replay the turn: ${err?.message ?? err}\n`);

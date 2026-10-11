@@ -6,7 +6,7 @@ import path from "node:path";
 import {
   readRollout,
   rolloutUsage,
-  summarizeCodexTurnUsage,
+  codexTurnUsageCalls,
 } from "../plugins/armorcodex/scripts/lib/token-usage.mjs";
 
 async function writeRollout(lines) {
@@ -27,88 +27,66 @@ const tokenCount = (total, last) => ({
   },
 });
 
-test("summarizes only the latest task across multiple token snapshots", async () => {
+const usageRecord = (timestamp, responseId, usage) => ({
+  timestamp,
+  type: "token_usage_record",
+  payload: { response_id: responseId, usage },
+});
+
+test("lists one call per model request of the latest task, with its response id and time", async () => {
   const file = await writeRollout([
     { type: "event_msg", payload: { type: "task_started" } },
-    { type: "turn_context", payload: { model: "gpt-4.1" } },
-    tokenCount({ input_tokens: 100, cached_input_tokens: 20, output_tokens: 10 }),
+    { type: "turn_context", payload: { model: "gpt-5.4" } },
+    usageRecord("2026-10-11T10:00:00.000Z", "resp_old", { input_tokens: 500, output_tokens: 5 }),
     { type: "event_msg", payload: { type: "task_complete" } },
     { type: "event_msg", payload: { type: "task_started" } },
-    { type: "turn_context", payload: { model: "gpt-4.1" } },
-    tokenCount(
-      { input_tokens: 160, cached_input_tokens: 40, output_tokens: 20 },
-      { input_tokens: 60, cached_input_tokens: 20, output_tokens: 10 },
-    ),
-    tokenCount(
-      { input_tokens: 220, cached_input_tokens: 70, output_tokens: 30 },
-      { input_tokens: 120, cached_input_tokens: 50, output_tokens: 20 },
-    ),
+    { type: "turn_context", payload: { model: "gpt-5.5" } },
+    tokenCount({ input_tokens: 900, cached_input_tokens: 100, output_tokens: 30 }),
+    usageRecord("2026-10-11T10:01:00.000Z", "resp_a", { input_tokens: 100, cached_input_tokens: 20, output_tokens: 10 }),
+    usageRecord("2026-10-11T10:01:05.000Z", "resp_b", {
+      input_tokens: 300,
+      cached_input_tokens: 50,
+      cache_write_input_tokens: 10,
+      output_tokens: 20,
+      reasoning_output_tokens: 5,
+    }),
   ]);
 
-  assert.deepEqual(summarizeCodexTurnUsage(file), [
+  assert.deepEqual(codexTurnUsageCalls(file), [
     {
-      model: "gpt-4.1",
-      inputTokens: 70,
+      model: "gpt-5.5",
+      inputTokens: 80,
+      outputTokens: 10,
+      cacheReadTokens: 20,
+      cacheWriteTokens: 0,
+      reasoningOutputTokens: 0,
+      key: "resp_a",
+      timestampMs: Date.parse("2026-10-11T10:01:00.000Z"),
+    },
+    {
+      model: "gpt-5.5",
+      inputTokens: 240,
       outputTokens: 20,
       cacheReadTokens: 50,
-      cacheWriteTokens: 0,
-      reasoningOutputTokens: 0,
+      cacheWriteTokens: 10,
+      reasoningOutputTokens: 5,
+      key: "resp_b",
+      timestampMs: Date.parse("2026-10-11T10:01:05.000Z"),
     },
   ]);
 });
 
-test("uses last_token_usage for an older rollout without task boundaries", async () => {
-  const file = await writeRollout([
-    { type: "turn_context", payload: { model: "gpt-4.1" } },
-    tokenCount({ input_tokens: 100, cached_input_tokens: 20, output_tokens: 10 }),
-    tokenCount(
-      { input_tokens: 180, cached_input_tokens: 50, output_tokens: 25 },
-      { input_tokens: 80, cached_input_tokens: 30, output_tokens: 15 },
-    ),
-  ]);
-
-  assert.deepEqual(summarizeCodexTurnUsage(file), [
-    {
-      model: "gpt-4.1",
-      inputTokens: 50,
-      outputTokens: 15,
-      cacheReadTokens: 30,
-      cacheWriteTokens: 0,
-      reasoningOutputTokens: 0,
-    },
-  ]);
-});
-
-test("falls back to cumulative delta for an older rollout without last usage", async () => {
-  const file = await writeRollout([
-    { type: "turn_context", payload: { model: "gpt-4.1" } },
-    tokenCount({ input_tokens: 100, cached_input_tokens: 20, output_tokens: 10 }),
-    tokenCount({ input_tokens: 180, cached_input_tokens: 50, output_tokens: 25 }),
-  ]);
-
-  assert.deepEqual(summarizeCodexTurnUsage(file), [
-    {
-      model: "gpt-4.1",
-      inputTokens: 50,
-      outputTokens: 15,
-      cacheReadTokens: 30,
-      cacheWriteTokens: 0,
-      reasoningOutputTokens: 0,
-    },
-  ]);
-});
-
-test("does not reuse the previous task when the latest task has no token count", async () => {
+test("lists no calls when the latest task has no model request yet", async () => {
   const file = await writeRollout([
     { type: "event_msg", payload: { type: "task_started" } },
-    { type: "turn_context", payload: { model: "gpt-4.1" } },
-    tokenCount({ input_tokens: 100, cached_input_tokens: 20, output_tokens: 10 }),
+    { type: "turn_context", payload: { model: "gpt-5.5" } },
+    usageRecord("2026-10-11T10:00:00.000Z", "resp_old", { input_tokens: 500, output_tokens: 5 }),
     { type: "event_msg", payload: { type: "task_complete" } },
     { type: "event_msg", payload: { type: "task_started" } },
-    { type: "turn_context", payload: { model: "gpt-4.1" } },
   ]);
 
-  assert.deepEqual(summarizeCodexTurnUsage(file), []);
+  assert.deepEqual(codexTurnUsageCalls(file), []);
+  assert.deepEqual(codexTurnUsageCalls(path.join(os.tmpdir(), "missing-rollout.jsonl")), []);
 });
 
 const at = (timestamp, line) => ({ timestamp, ...line });
@@ -333,7 +311,7 @@ test("readRollout returns each token_usage_record with its response id and model
     ]),
   );
   assert.deepEqual(records, [
-    { model: "gpt-5.5", usage: { input_tokens: 5 }, responseId: "resp-1", timestamp: "2026-09-08T09:00:00Z", turn: null },
+    { model: "gpt-5.5", usage: { input_tokens: 5 }, responseId: "resp-1", timestamp: "2026-09-08T09:00:00Z", turn: null, taskSequence: -1 },
   ]);
 });
 

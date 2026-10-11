@@ -73,6 +73,7 @@ function decodeSpans(body) {
         const status = field(span.bytes, 15)[0];
         spans.push({
           name: field(span.bytes, 5)[0]?.bytes.toString("utf8"),
+          spanId: field(span.bytes, 2)[0]?.bytes.toString("hex"),
           attributes,
           startMs: ms(7),
           endMs: ms(8),
@@ -141,20 +142,11 @@ function obsConfig(dataDir, endpoint) {
   };
 }
 
-function tokenCount(total, last) {
-  return {
-    type: "event_msg",
-    payload: {
-      type: "token_count",
-      info: {
-        total_token_usage: total,
-        last_token_usage: last,
-      },
-    },
-  };
+function usageRecord(timestamp, responseId, usage) {
+  return { timestamp, type: "token_usage_record", payload: { response_id: responseId, usage } };
 }
 
-test("Stop ships exactly one per-turn generation span without cumulative double count", async (t) => {
+test("Stop ships one generation span per model request of the turn, ending at the request's time", async (t) => {
   const dataDir = await mkdtemp(path.join(tmpdir(), "armorcodex-obs-"));
   const rolloutPath = path.join(dataDir, "rollout.jsonl");
   const ingest = await startIngestServer();
@@ -162,110 +154,49 @@ test("Stop ships exactly one per-turn generation span without cumulative double 
     await ingest.close();
     await rm(dataDir, { recursive: true, force: true });
   });
-
+  const base = Date.now() - 60_000;
+  t.mock.timers.enable({ apis: ["Date"], now: base });
+  const iso = (offsetMs) => new Date(base + offsetMs).toISOString();
   const sessionId = randomUUID();
   const config = obsConfig(dataDir, ingest.endpoint);
-  const firstTotals = {
-    input_tokens: 120,
-    cached_input_tokens: 20,
-    output_tokens: 10,
-    total_tokens: 130,
-  };
-  const firstTurn = [
+  const turn = (requests) => [
     { type: "event_msg", payload: { type: "task_started" } },
-    { type: "turn_context", payload: { model: "gpt-4.1" } },
-    tokenCount(firstTotals, firstTotals),
+    { type: "turn_context", payload: { model: "gpt-5.5" } },
+    ...requests,
     { type: "event_msg", payload: { type: "task_complete" } },
   ];
-  await writeFile(rolloutPath, firstTurn.map((line) => JSON.stringify(line)).join("\n"), "utf8");
+  const write = (lines) => appendFile(rolloutPath, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`, "utf8");
 
-  await observeHook(
-    "UserPromptSubmit",
-    { session_id: sessionId, prompt: "First turn" },
-    null,
-    config,
-  );
-  await observeHook(
-    "Stop",
-    { session_id: sessionId, transcript_path: rolloutPath },
-    null,
-    config,
-  );
+  await write(turn([usageRecord(iso(500), "resp_earlier", { input_tokens: 900, cached_input_tokens: 100, output_tokens: 9 })]));
+  await observeHook("UserPromptSubmit", { session_id: sessionId, prompt: "First turn" }, null, config);
+  t.mock.timers.setTime(base + 1_000);
+  await observeHook("Stop", { session_id: sessionId, transcript_path: rolloutPath }, null, config);
 
-  const secondTurnUsage = {
-    input_tokens: 80,
-    cached_input_tokens: 30,
-    output_tokens: 15,
-    total_tokens: 95,
-  };
-  const finalTotals = {
-    input_tokens: 200,
-    cached_input_tokens: 50,
-    output_tokens: 25,
-    total_tokens: 225,
-  };
-  const secondTurn = [
-    { type: "event_msg", payload: { type: "task_started" } },
-    { type: "turn_context", payload: { model: "gpt-4.1" } },
-    tokenCount(finalTotals, secondTurnUsage),
-    { type: "event_msg", payload: { type: "task_complete" } },
-  ];
-  await appendFile(
-    rolloutPath,
-    `\n${secondTurn.map((line) => JSON.stringify(line)).join("\n")}`,
-    "utf8",
+  t.mock.timers.setTime(base + 2_000);
+  await observeHook("UserPromptSubmit", { session_id: sessionId, prompt: "Second turn" }, null, config);
+  const inputs = [20_000, 25_000, 28_000, 30_000, 34_000, 40_680];
+  await write(
+    turn(inputs.map((input, i) =>
+      usageRecord(iso(3_000 + i * 1_000), `resp_${i}`, { input_tokens: input, cached_input_tokens: 15_000, output_tokens: 100 }),
+    )),
   );
+  t.mock.timers.setTime(base + 10_000);
+  await observeHook("Stop", { session_id: sessionId, transcript_path: rolloutPath }, null, config);
 
-  await observeHook(
-    "UserPromptSubmit",
-    { session_id: sessionId, prompt: "Second turn" },
-    null,
-    config,
-  );
-  await observeHook(
-    "Stop",
-    { session_id: sessionId, transcript_path: rolloutPath },
-    null,
-    config,
-  );
-
-  const usage = (span) => ({
-    inputTokens: span.attributes["gen_ai.usage.input_tokens"],
-    outputTokens: span.attributes["gen_ai.usage.output_tokens"],
-    cacheReadTokens: span.attributes["gen_ai.usage.cache_read_tokens"],
-  });
-  const generationSpans = ingest.exports
-    .flatMap((e) => e.spans)
-    .filter((span) => span.name === "gen_ai.chat");
-  assert.equal(generationSpans.length, 2);
-  for (const span of generationSpans) {
+  const generations = ingest.exports.flatMap((e) => e.spans).filter((span) => span.name === "gen_ai.chat");
+  assert.equal(generations.length, 7);
+  const second = generations.slice(1);
+  assert.deepEqual(second.map((span) => span.endMs - base), [3_000, 4_000, 5_000, 6_000, 7_000, 8_000]);
+  assert.equal(new Set(generations.map((span) => span.spanId)).size, 7);
+  const total = (key) => second.reduce((sum, span) => sum + span.attributes[key], 0);
+  assert.equal(total("gen_ai.usage.input_tokens") + total("gen_ai.usage.cache_read_tokens"), 177_680);
+  assert.equal(total("gen_ai.usage.output_tokens"), 600);
+  for (const span of generations) {
     assert.equal(span.attributes["gen_ai.usage.cost_usd"], undefined);
     assert.equal(span.attributes["armoriq.cost.provenance"], undefined);
-    assert.equal(span.attributes["armoriq.session_id"], sessionId);
     assert.equal(span.attributes["armoriq.timing.provenance"], "reported");
+    assert.equal(span.attributes["armoriq.session_id"], sessionId);
   }
-
-  assert.deepEqual(
-    generationSpans.map(usage),
-    [
-      { inputTokens: 100, outputTokens: 10, cacheReadTokens: 20 },
-      { inputTokens: 50, outputTokens: 15, cacheReadTokens: 30 },
-    ],
-  );
-
-  const summed = generationSpans.reduce(
-    (totals, span) => ({
-      inputTokens: totals.inputTokens + usage(span).inputTokens,
-      outputTokens: totals.outputTokens + usage(span).outputTokens,
-      cacheReadTokens: totals.cacheReadTokens + usage(span).cacheReadTokens,
-    }),
-    { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 },
-  );
-  assert.deepEqual(summed, {
-    inputTokens: finalTotals.input_tokens - finalTotals.cached_input_tokens,
-    outputTokens: finalTotals.output_tokens,
-    cacheReadTokens: finalTotals.cached_input_tokens,
-  });
 });
 
 test("Stop still ships the turn and logs the error when a model span fails", async (t) => {
@@ -287,13 +218,12 @@ test("Stop still ships the turn and logs the error when a model span fails", asy
 
   const sessionId = randomUUID();
   const config = obsConfig(dataDir, ingest.endpoint);
-  const totals = { input_tokens: 120, cached_input_tokens: 20, output_tokens: 10, total_tokens: 130 };
   await writeFile(
     rolloutPath,
     [
       { type: "event_msg", payload: { type: "task_started" } },
       { type: "turn_context", payload: { model: "gpt-4.1" } },
-      tokenCount(totals, totals),
+      usageRecord(new Date().toISOString(), "resp_1", { input_tokens: 120, cached_input_tokens: 20, output_tokens: 10 }),
     ]
       .map((line) => JSON.stringify(line))
       .join("\n"),
