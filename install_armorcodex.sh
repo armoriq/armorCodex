@@ -482,10 +482,6 @@ finish_update_banner() {
   fi
   info "SDK:    @armoriq/sdk-dev (latest)"
   info "Hooks:  ${GLOBAL_HOOKS} (verified)"
-  if [[ ! -f "${HOME}/.armoriq/credentials.json" ]]; then
-    echo
-    printf "  Run ${G}${B}armoriq-dev login --product armorcodex${N} to authenticate.\n"
-  fi
   echo
 }
 
@@ -539,7 +535,7 @@ abort_install() {
 plugin_has_login() {
   node --input-type=module -e \
     'const { loadConfig } = await import(process.argv[1]); process.exit(loadConfig().apiKey ? 0 : 1);' \
-    "${INSTALL_HOME}/${PLUGIN_SUBDIR}/scripts/lib/config.mjs" >/dev/null 2>&1
+    "${PLUGIN_PATH}/scripts/lib/config.mjs" >/dev/null 2>&1
 }
 
 connect_to_armoriq() {
@@ -663,6 +659,7 @@ main() {
     section "Updating ArmorCodex"
     run_update_path
     verify_install
+    connect_to_armoriq
     finish_update_banner
     exit 0
   fi

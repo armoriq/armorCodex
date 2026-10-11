@@ -13,6 +13,46 @@ import { spawnSync } from "node:child_process";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import test from "node:test";
 
+function stubTools(binDir) {
+  for (const [name, body] of [
+    ["codex", "#!/bin/sh\necho 'codex-cli 0.142.0'\n"],
+    ["npm", "#!/bin/sh\nexit 0\n"],
+  ]) {
+    writeFileSync(join(binDir, name), body);
+    chmodSync(join(binDir, name), 0o755);
+  }
+}
+
+function saveCodexLogin(home, product = "armorcodex") {
+  const requireSdk = createRequire(new URL("../plugins/armorcodex/package.json", import.meta.url));
+  const { saveLoginProfile } = requireSdk("@armoriq/sdk-dev");
+  const build = requireSdk("@armoriq/sdk-dev/dist/_build_env.js");
+  const real = os.homedir;
+  os.homedir = () => home;
+  syncBuiltinESMExports();
+  try {
+    saveLoginProfile({
+      backend: build.ENDPOINTS[build.ARMORIQ_ENV].backend,
+      product,
+      apiKey: "ak_test_update",
+      email: "a@example.test",
+      userId: "user-a",
+      orgId: "org-a",
+    });
+  } finally {
+    os.homedir = real;
+    syncBuiltinESMExports();
+  }
+}
+
+function runUpdate(root, home, binDir) {
+  return spawnSync("bash", [new URL("../install_armorcodex.sh", import.meta.url).pathname, "--update"], {
+    cwd: root,
+    encoding: "utf8",
+    env: { ...process.env, HOME: home, PATH: `${binDir}${delimiter}${process.env.PATH}`, NO_COLOR: "1" },
+  });
+}
+
 test("a normal update adds the Stop and SessionEnd hooks to an existing ArmorCodex hooks file and leaves its other hooks unchanged", (t) => {
   const root = mkdtempSync(join(tmpdir(), "armorcodex-installer-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -49,14 +89,8 @@ test("a normal update adds the Stop and SessionEnd hooks to an existing ArmorCod
   };
   writeFileSync(hooksPath, `${JSON.stringify(existingHooks, null, 2)}\n`);
 
-  for (const [name, body] of [
-    ["codex", "#!/bin/sh\necho 'codex-cli 0.142.0'\n"],
-    ["npm", "#!/bin/sh\nexit 0\n"],
-  ]) {
-    const path = join(binDir, name);
-    writeFileSync(path, body);
-    chmodSync(path, 0o755);
-  }
+  stubTools(binDir);
+  saveCodexLogin(home);
 
   const installer = new URL("../install_armorcodex.sh", import.meta.url);
   const result = spawnSync("bash", [installer.pathname, "--update"], {
@@ -99,13 +133,8 @@ test("an existing hooks.json with only another tool's hooks keeps them and gains
   mkdirSync(binDir, { recursive: true });
   const other = [{ hooks: [{ type: "command", command: "/opt/other-tool/bridge --source codex" }] }];
   writeFileSync(hooksPath, `${JSON.stringify({ hooks: { SessionStart: other, PostToolUse: other } }, null, 2)}\n`);
-  for (const [name, body] of [
-    ["codex", "#!/bin/sh\necho 'codex-cli 0.142.0'\n"],
-    ["npm", "#!/bin/sh\nexit 0\n"],
-  ]) {
-    writeFileSync(join(binDir, name), body);
-    chmodSync(join(binDir, name), 0o755);
-  }
+  stubTools(binDir);
+  saveCodexLogin(home);
 
   const result = spawnSync("bash", [new URL("../install_armorcodex.sh", import.meta.url).pathname, "--update"], {
     cwd: root,
@@ -133,6 +162,45 @@ test("an existing hooks.json with only another tool's hooks keeps them and gains
   assert.deepEqual(JSON.parse(readFileSync(hooksPath, "utf8")), { hooks: { SessionStart: other, PostToolUse: other } });
 });
 
+test("an update with an old-format credentials.json reaches the login step", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "armorcodex-update-v1-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const binDir = join(root, "bin");
+  mkdirSync(join(home, ".armoriq"), { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  stubTools(binDir);
+  writeFileSync(
+    join(home, ".armoriq", "credentials.json"),
+    JSON.stringify({ apiKey: "ak_test_flat", product: "armorcodex", backend: "https://staging-api.armoriq.ai" }),
+  );
+
+  const result = runUpdate(root, home, binDir);
+
+  assert.match(result.stdout, /Connect to ArmorIQ/);
+  assert.match(result.stderr + result.stdout, /No TTY available for interactive login/);
+  assert.doesNotMatch(result.stdout, /ArmorCodex is up to date/);
+  assert.notEqual(result.status, 0);
+});
+
+test("an update with an armorcodex login the plugin loads does not prompt", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "armorcodex-update-v2-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const binDir = join(root, "bin");
+  mkdirSync(home, { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  stubTools(binDir);
+  saveCodexLogin(home);
+
+  const result = runUpdate(root, home, binDir);
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /ArmorIQ login for ArmorCodex found/);
+  assert.doesNotMatch(result.stdout, /Connect your ArmorIQ account now|to authenticate/);
+  assert.match(result.stdout, /ArmorCodex is up to date/);
+});
+
 test("an environment key cannot skip login or appear in installer instructions", (t) => {
   const root = mkdtempSync(join(tmpdir(), "armorcodex-login-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -144,8 +212,7 @@ test("an environment key cannot skip login or appear in installer instructions",
     ok() { printf '%s\\n' "$1"; }
     is_promptable() { return 1; }
     abort_install() { exit 17; }
-    INSTALL_HOME="${new URL("..", import.meta.url).pathname}"
-    PLUGIN_SUBDIR="plugins/armorcodex"
+    PLUGIN_PATH="${new URL("../plugins/armorcodex", import.meta.url).pathname}"
     ${connectStep()}
     connect_to_armoriq
   `], {
@@ -171,8 +238,7 @@ function runConnect(home) {
     ok() { printf '%s\\n' "$1"; }
     is_promptable() { return 1; }
     abort_install() { exit 17; }
-    INSTALL_HOME="${new URL("..", import.meta.url).pathname}"
-    PLUGIN_SUBDIR="plugins/armorcodex"
+    PLUGIN_PATH="${new URL("../plugins/armorcodex", import.meta.url).pathname}"
     ${connectStep()}
     connect_to_armoriq
   `], { encoding: "utf8", env: { PATH: process.env.PATH, HOME: home } });
