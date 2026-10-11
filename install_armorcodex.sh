@@ -278,71 +278,102 @@ EOF
   ok "wired config.toml: hooks + mcp_servers.armorcodex-policy"
 }
 
-ensure_global_hooks() {
-  local result
-  if ! result="$(node --input-type=module - "${GLOBAL_HOOKS}" "${BOOTSTRAP_PATH}" <<'NODE'
-import {
-  chmodSync,
-  existsSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+codex_hooks_json() {
+  node --input-type=module - "$1" "${GLOBAL_HOOKS}" "${BOOTSTRAP_PATH}" <<'NODE'
+import { chmodSync, existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 
-const [hooksPath, bootstrapPath] = process.argv.slice(2);
+const [mode, hooksPath, bootstrapPath] = process.argv.slice(2);
 const tempPath = `${hooksPath}.armorcodex.tmp-${process.pid}`;
+const command = `node ${bootstrapPath} router`;
+const hook = (extra) => ({ type: "command", command, ...extra });
+const GROUPS = {
+  SessionStart: { matcher: "startup|resume", hooks: [hook({ statusMessage: "Starting ArmorCodex" })] },
+  UserPromptSubmit: { hooks: [hook({ statusMessage: "Loading ArmorCodex intent policy" })] },
+  PreToolUse: { matcher: "*", hooks: [hook({ statusMessage: "Checking ArmorCodex policy" })] },
+  PermissionRequest: { matcher: "*", hooks: [hook({ statusMessage: "Checking ArmorCodex approval policy" })] },
+  PostToolUse: { matcher: "*", hooks: [hook({ statusMessage: "Auditing ArmorCodex command" })] },
+  Stop: { hooks: [hook({ timeout: 30 })] },
+  SessionEnd: { hooks: [hook({ timeout: 30 })] },
+};
 
-try {
-  const existed = existsSync(hooksPath);
-  const config = existed ? JSON.parse(readFileSync(hooksPath, "utf8")) : { hooks: {} };
+const ours = (entry) => entry?.type === "command"
+  && typeof entry.command === "string"
+  && entry.command.endsWith("bootstrap.mjs router")
+  && /armorcodex/i.test(`${entry.command} ${entry.statusMessage ?? ""}`);
+const hasOurs = (group) => Array.isArray(group?.hooks) && group.hooks.some(ours);
+
+function readConfig() {
+  const config = JSON.parse(readFileSync(hooksPath, "utf8"));
   if (!config.hooks || typeof config.hooks !== "object" || Array.isArray(config.hooks)) {
     throw new Error("top-level hooks must be an object");
   }
-
-  const command = `node ${bootstrapPath} router`;
-  const hook = (extra) => ({ type: "command", command, ...extra });
-  const groups = {
-    SessionStart: { matcher: "startup|resume", hooks: [hook({ statusMessage: "Starting ArmorCodex" })] },
-    UserPromptSubmit: { hooks: [hook({ statusMessage: "Loading ArmorCodex intent policy" })] },
-    PreToolUse: { matcher: "*", hooks: [hook({ statusMessage: "Checking ArmorCodex policy" })] },
-    PermissionRequest: { matcher: "*", hooks: [hook({ statusMessage: "Checking ArmorCodex approval policy" })] },
-    PostToolUse: { matcher: "*", hooks: [hook({ statusMessage: "Auditing ArmorCodex command" })] },
-    Stop: { hooks: [hook({ timeout: 30 })] },
-    SessionEnd: { hooks: [hook({ timeout: 30 })] },
-  };
-  const ours = (entry) => entry?.type === "command"
-    && typeof entry.command === "string"
-    && entry.command.endsWith("bootstrap.mjs router")
-    && /armorcodex/i.test(`${entry.command} ${entry.statusMessage ?? ""}`);
-
-  const added = [];
-  for (const [event, group] of Object.entries(groups)) {
-    if (config.hooks[event] !== undefined && !Array.isArray(config.hooks[event])) {
-      throw new Error(`hooks.${event} must be an array`);
-    }
-    const entries = config.hooks[event] ?? [];
-    if (entries.some((entry) => Array.isArray(entry?.hooks) && entry.hooks.some(ours))) continue;
-    entries.push(group);
-    config.hooks[event] = entries;
-    added.push(event);
+  for (const [event, groups] of Object.entries(config.hooks)) {
+    if (!Array.isArray(groups)) throw new Error(`hooks.${event} must be an array`);
   }
-  if (added.length === 0) {
-    process.stdout.write("present");
-  } else {
-    writeFileSync(tempPath, `${JSON.stringify(config, null, 2)}\n`, { flag: "wx" });
-    if (existed) chmodSync(tempPath, statSync(hooksPath).mode);
-    renameSync(tempPath, hooksPath);
-    process.stdout.write(existed ? `repaired:${added.join(", ")}` : "created");
+  return config;
+}
+
+function addMissing(hooks) {
+  const added = Object.keys(GROUPS).filter((event) => !(hooks[event] ?? []).some(hasOurs));
+  for (const event of added) hooks[event] = [...(hooks[event] ?? []), GROUPS[event]];
+  return added;
+}
+
+function stripGroup(group) {
+  return hasOurs(group) ? { ...group, hooks: group.hooks.filter((entry) => !ours(entry)) } : group;
+}
+
+function removeOurs(hooks) {
+  let removed = 0;
+  for (const [event, groups] of Object.entries(hooks)) {
+    const kept = groups.map(stripGroup).filter((group) => !Array.isArray(group?.hooks) || group.hooks.length > 0);
+    removed += groups.filter(hasOurs).length;
+    if (kept.length > 0) hooks[event] = kept;
+    else delete hooks[event];
   }
+  return removed;
+}
+
+function save(config, existed) {
+  writeFileSync(tempPath, `${JSON.stringify(config, null, 2)}\n`, { flag: "wx" });
+  if (existed) chmodSync(tempPath, statSync(hooksPath).mode & 0o7777);
+  renameSync(tempPath, hooksPath);
+}
+
+function add() {
+  const existed = existsSync(hooksPath);
+  const config = existed ? readConfig() : { hooks: {} };
+  const added = addMissing(config.hooks);
+  if (added.length === 0) return "present";
+  save(config, existed);
+  return existed ? `repaired:${added.join(", ")}` : "created";
+}
+
+function remove() {
+  if (!existsSync(hooksPath)) return "absent";
+  const config = readConfig();
+  if (removeOurs(config.hooks) === 0) return "absent";
+  if (Object.keys(config.hooks).length === 0 && Object.keys(config).length === 1) {
+    rmSync(hooksPath, { force: true });
+    return "removed";
+  }
+  save(config, true);
+  return "stripped";
+}
+
+try {
+  process.stdout.write(mode === "remove" ? remove() : add());
 } catch (error) {
   rmSync(tempPath, { force: true });
   console.error(error instanceof Error ? error.message : String(error));
   process.exit(1);
 }
 NODE
-  )"; then
+}
+
+ensure_global_hooks() {
+  local result
+  if ! result="$(codex_hooks_json add)"; then
     warn "couldn't safely merge ArmorCodex hooks into ${GLOBAL_HOOKS}"
     info "leaving ${GLOBAL_HOOKS} unchanged"
     return 0
@@ -351,6 +382,15 @@ NODE
     created) ok "installed global ArmorCodex hooks at ${GLOBAL_HOOKS}" ;;
     repaired:*) ok "added missing ArmorCodex ${result#repaired:} hook(s) to ${GLOBAL_HOOKS}" ;;
     *) ok "global hooks already reference ArmorCodex" ;;
+  esac
+}
+
+remove_codex_hooks() {
+  local result
+  result="$(codex_hooks_json remove)" || { warn "couldn't safely remove ArmorCodex hooks from ${GLOBAL_HOOKS}"; return 0; }
+  case "${result}" in
+    removed) info "removed ${GLOBAL_HOOKS}" ;;
+    stripped) info "removed the ArmorCodex hooks from ${GLOBAL_HOOKS}" ;;
   esac
 }
 
@@ -487,9 +527,7 @@ abort_install() {
   if [[ -f "${CONFIG_TOML}" ]]; then
     strip_managed_block "${CONFIG_TOML}" 2>/dev/null && info "removed managed block from ${CONFIG_TOML}" || true
   fi
-  if [[ -f "${GLOBAL_HOOKS}" ]] && grep -q "ArmorCodex" "${GLOBAL_HOOKS}" 2>/dev/null; then
-    rm -f "${GLOBAL_HOOKS}" && info "removed ${GLOBAL_HOOKS}" || true
-  fi
+  remove_codex_hooks
   if [[ -d "${INSTALL_HOME}" ]]; then
     rm -rf "${INSTALL_HOME}" && info "removed plugin source ${INSTALL_HOME}" || true
   fi
@@ -594,10 +632,7 @@ uninstall() {
     strip_managed_block "${CONFIG_TOML}"
     ok "removed managed block from ${CONFIG_TOML}"
   fi
-  if [[ -f "${GLOBAL_HOOKS}" ]] && grep -q "ArmorCodex" "${GLOBAL_HOOKS}" 2>/dev/null; then
-    rm -f "${GLOBAL_HOOKS}"
-    ok "removed ${GLOBAL_HOOKS}"
-  fi
+  remove_codex_hooks
   ok "uninstalled. ArmorCodex marketplace registration (if any) left in place."
   info "to remove that too: codex plugin marketplace remove armorcodex"
 }

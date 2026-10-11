@@ -123,6 +123,14 @@ test("an existing hooks.json with only another tool's hooks keeps them and gains
   assert.deepEqual(hooks.SessionStart[0], other[0]);
   assert.deepEqual(hooks.PostToolUse[0], other[0]);
   assert.doesNotMatch(result.stdout, /unrelated|--force-hooks/);
+
+  const uninstall = spawnSync("bash", [new URL("../install_armorcodex.sh", import.meta.url).pathname, "--uninstall"], {
+    cwd: root,
+    encoding: "utf8",
+    env: { ...process.env, HOME: home, PATH: `${binDir}${delimiter}${process.env.PATH}`, NO_COLOR: "1" },
+  });
+  assert.equal(uninstall.status, 0, uninstall.stderr || uninstall.stdout);
+  assert.deepEqual(JSON.parse(readFileSync(hooksPath, "utf8")), { hooks: { SessionStart: other, PostToolUse: other } });
 });
 
 test("an environment key cannot skip login or appear in installer instructions", (t) => {
