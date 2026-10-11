@@ -106,3 +106,9 @@ test("per-endpoint overrides still win over the staging table", () => {
     csrgEndpoint: "http://127.0.0.1:3931",
   });
 });
+
+test("token validity is capped at the 3600 s CSRG accepts", () => {
+  assert.equal(loadConfig({ ARMORCODEX_VALIDITY_SECONDS: "7200" }).validitySeconds, 3600);
+  assert.equal(loadConfig({ ARMORCODEX_VALIDITY_SECONDS: "600" }).validitySeconds, 600);
+  assert.equal(loadConfig({}).validitySeconds, 3600);
+});
