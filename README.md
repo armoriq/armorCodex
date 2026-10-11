@@ -33,6 +33,8 @@ Bash result -> PostToolUse -> audit log to ArmorIQ IAP
 
 ## Install
 
+Requirements: Codex 0.162 or newer and Node.js 20 or newer. Older Codex sends no session id with MCP calls, so ArmorCodex rejects every plan registration. The installer checks both versions and stops if either is too old.
+
 ### From This Checkout
 
 ```bash

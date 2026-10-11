@@ -152,6 +152,23 @@ check_node_version() {
   fi
 }
 
+check_codex_version() {
+  local raw major minor
+  raw="$(codex --version 2>/dev/null | head -1 || true)"
+  if [[ ! "${raw}" =~ ([0-9]+)\.([0-9]+)\.[0-9]+ ]]; then
+    err "could not read the Codex version (got: ${raw:-no output}); Codex 0.162 or newer is required"
+    exit 1
+  fi
+  major="${BASH_REMATCH[1]}"
+  minor="${BASH_REMATCH[2]}"
+  if (( major == 0 && minor < 162 )); then
+    err "Codex 0.162 or newer is required (found ${raw})"
+    echo "  ArmorCodex needs the session id that Codex 0.162 and later send with MCP calls." 1>&2
+    echo "  Update Codex (https://developers.openai.com/codex) and run this installer again." 1>&2
+    exit 1
+  fi
+}
+
 is_promptable() {
   [[ -e /dev/tty ]] || return 1
   (: < /dev/tty) 2>/dev/null || return 1
@@ -651,6 +668,7 @@ main() {
   require_cmd npm
   require_cmd git
   check_node_version
+  check_codex_version
   ok "prerequisites OK ($(codex --version 2>/dev/null | head -1), $(node --version))"
 
   local mode
