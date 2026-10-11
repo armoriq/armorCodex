@@ -540,7 +540,9 @@ export async function requestIntent(config, payload) {
     ...payload.metadata
   };
   const capture = client.capturePlan(config.llmId, payload.prompt || "", plan, metadata);
-  const token = await client.getIntentToken(capture, payload.policy, payload.validitySeconds);
+  const token = await client.getIntentToken(capture, payload.policy, payload.validitySeconds, {
+    contextId: payload.session_id
+  });
   const tokenRaw = JSON.stringify(token);
   const parsedFromToken = extractPlanFromIntentToken(tokenRaw);
   return {
