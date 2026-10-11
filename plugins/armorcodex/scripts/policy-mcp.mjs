@@ -80,6 +80,19 @@ function coercePlanArgs(args) {
   return args;
 }
 
+async function settleWithin(promise, ms) {
+  if (ms <= 0) return undefined;
+  let timer;
+  const deadline = new Promise((resolve) => {
+    timer = setTimeout(resolve, ms);
+  });
+  try {
+    return await Promise.race([promise, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function codexSessionId(extra) {
   const id = extra?._meta?.sessionId;
   return typeof id === "string" && /^[A-Za-z0-9_-]+$/.test(id) ? id : "";
@@ -271,15 +284,13 @@ async function run() {
       const plan = normalizeIntentPlan(parsed.data);
 
       // Write the local plan to the session's pending plan file IMMEDIATELY so PreToolUse
-      // has something to enforce against. The SDK call (if any) runs entirely
-      // in the background and updates that file with the signed
-      // token when it resolves.
+      // has something to enforce against. The SDK call (if any) then updates
+      // that file with the signed token when it resolves.
       //
-      // Why fire-and-forget: Codex's MCP transport closes its stdio pipe
-      // around the ~1s mark. Any await we do here (loadPolicyState, the
-      // SDK round-trip, even cold-start latency) eats into that budget.
-      // Awaiting nothing on the network path keeps the MCP response under
-      // ~100ms regardless of backend conditions.
+      // Codex's MCP transport closes its stdio pipe around the ~1s mark, so
+      // we wait for the token only up to config.intentDeadlineMs. A missed
+      // deadline is not a cancel (the SDK takes no abort signal): the call
+      // keeps running and still writes the token when it lands.
       const pendingPath = path.join(config.dataDir, `pending-plan.${sessionId}.json`);
       await writeJson(pendingPath, {
         plan,
@@ -290,12 +301,11 @@ async function run() {
       });
 
       let backendWillIssue = false;
+      let issueOutcome;
       if (config.intentEndpoint || (config.useSdkIntent && config.apiKey)) {
         backendWillIssue = true;
-        // Kick off the SDK call. When it resolves with a signed token, update
-        // the session's pending plan file so PreToolUse picks up the token on subsequent
-        // calls. Errors are logged to stderr and otherwise swallowed.
-        (async () => {
+        // Errors are logged to stderr and otherwise swallowed.
+        const issuing = (async () => {
           try {
             const policyState = await loadPolicyState(config.policyFile);
             const result = await requestIntent(config, {
@@ -318,17 +328,24 @@ async function run() {
               process.stderr.write(
                 `[armorcodex] backend token issued, tokenLen=${result.tokenRaw.length}\n`
               );
+              return "issued";
             }
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             process.stderr.write(`[armorcodex] intent capture failed: ${msg}\n`);
           }
+          return "failed";
         })();
+        issueOutcome = await settleWithin(issuing, config.intentDeadlineMs);
       }
 
-      const tokenInfo = backendWillIssue
-        ? `Plan registered; ArmorIQ token issuing in background.`
-        : "Plan stored locally (no ArmorIQ backend configured).";
+      const tokenInfo = !backendWillIssue
+        ? "Plan stored locally (no ArmorIQ backend configured)."
+        : issueOutcome === "issued"
+          ? "Plan registered; ArmorIQ token issued."
+          : issueOutcome === "failed"
+            ? "Plan stored locally; ArmorIQ token request failed."
+            : "Plan registered; ArmorIQ token issuing in background.";
 
       return toTextResult(
         `Intent registered: ${plan.steps.length} steps. ${tokenInfo}`,

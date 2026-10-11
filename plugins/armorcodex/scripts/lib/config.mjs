@@ -207,6 +207,14 @@ export function loadSettings(env = process.env) {
       30,
     ),
     timeoutMs,
+    // How long register_intent_plan waits for the backend token before
+    // answering with the local plan. Must stay under Codex's ~1s MCP
+    // transport timeout; 0 never waits. The upper clamp is setTimeout's
+    // limit, past which Node fires the timer immediately.
+    intentDeadlineMs: Math.min(
+      Math.max(0, parseInteger(env.ARMORCODEX_INTENT_DEADLINE_MS, 500)),
+      2 ** 31 - 1
+    ),
     // One attempt per tool call is usually right — a hung backend shouldn't
     // stall Codex for timeout * retries. Users who really want retries can
     // opt in via ARMORCODEX_MAX_RETRIES.

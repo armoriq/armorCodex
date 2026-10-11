@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
-import { loadConfig } from "../plugins/armorcodex/scripts/lib/config.mjs";
+import { loadConfig, loadSettings } from "../plugins/armorcodex/scripts/lib/config.mjs";
 
 const { ARMORIQ_ENV: BUILD_ENV } = createRequire(
   new URL("../plugins/armorcodex/package.json", import.meta.url),
@@ -105,4 +105,11 @@ test("per-endpoint overrides still win over the staging table", () => {
     proxyEndpoint: "http://127.0.0.1:3932",
     csrgEndpoint: "http://127.0.0.1:3931",
   });
+});
+
+test("intent deadline defaults to 500ms and clamps to setTimeout's range", () => {
+  assert.equal(loadSettings({}).intentDeadlineMs, 500);
+  assert.equal(loadSettings({ ARMORCODEX_INTENT_DEADLINE_MS: "250" }).intentDeadlineMs, 250);
+  assert.equal(loadSettings({ ARMORCODEX_INTENT_DEADLINE_MS: "-1" }).intentDeadlineMs, 0);
+  assert.equal(loadSettings({ ARMORCODEX_INTENT_DEADLINE_MS: "3000000000" }).intentDeadlineMs, 2 ** 31 - 1);
 });
