@@ -7,8 +7,7 @@ import {
   parseStepIndex,
   postJson,
   readString,
-  sha256Hex,
-  stepToolNames
+  sha256Hex
 } from "./common.mjs";
 import { requireEndpoint } from "./config.mjs";
 
@@ -107,7 +106,7 @@ function stepAction(step) {
 }
 
 function stepMatchesTool(step, normalizedTool) {
-  return isPlainObject(step) && stepToolNames(stepAction(step)).includes(normalizedTool);
+  return isPlainObject(step) && normalizeToolName(stepAction(step)) === normalizedTool;
 }
 
 export function extractAllowedActions(plan) {
@@ -115,16 +114,10 @@ export function extractAllowedActions(plan) {
   const steps = Array.isArray(plan?.steps) ? plan.steps : [];
   for (const step of steps) {
     if (isPlainObject(step) && stepAction(step).trim()) {
-      stepToolNames(stepAction(step)).forEach((name) => allowed.add(name));
+      allowed.add(normalizeToolName(stepAction(step)));
     }
   }
   return allowed;
-}
-
-function findPlanStep(plan, toolName) {
-  const steps = Array.isArray(plan?.steps) ? plan.steps : [];
-  const normalizedTool = normalizeToolName(toolName);
-  return steps.find((step) => stepMatchesTool(step, normalizedTool)) || null;
 }
 
 function getStepInputCandidates(step) {

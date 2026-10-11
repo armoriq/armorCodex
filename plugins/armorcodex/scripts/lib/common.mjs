@@ -19,16 +19,15 @@ const TOOL_ALIASES = {
   "container.exec": "bash",
 };
 
-export function normalizeToolName(name) {
-  if (typeof name !== "string") return "";
-  const normalized = name.trim().toLowerCase();
-  return TOOL_ALIASES[normalized] ?? normalized;
+export function codexHookName(name) {
+  const trimmed = name.trim();
+  return /^mcp__/i.test(trimmed) ? trimmed : trimmed.replace("__", "");
 }
 
-export function stepToolNames(action) {
-  const declared = normalizeToolName(action);
-  if (declared.startsWith("mcp__") || !declared.includes("__")) return [declared];
-  return [declared, declared.replace("__", "")];
+export function normalizeToolName(name) {
+  if (typeof name !== "string") return "";
+  const normalized = codexHookName(name).toLowerCase();
+  return TOOL_ALIASES[normalized] ?? normalized;
 }
 
 export function parseBoolean(value, defaultValue = false) {
