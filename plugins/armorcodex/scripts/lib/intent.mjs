@@ -48,26 +48,6 @@ export function getSdkClient(config) {
   return client;
 }
 
-function buildFallbackPlan(payload) {
-  const goal = typeof payload.prompt === "string" ? payload.prompt : "ArmorCodex intent";
-  const plan = { steps: [], metadata: { goal, source: "codex" } };
-  if (typeof payload.toolName === "string" && payload.toolName.trim()) {
-    plan.steps.push({
-      action: payload.toolName.trim(),
-      mcp: payload.mcpName || "codex",
-      metadata: isPlainObject(payload.toolInput) ? { inputs: payload.toolInput } : {}
-    });
-  }
-  return plan;
-}
-
-function resolvePlan(payload) {
-  if (isPlainObject(payload.plan)) {
-    return payload.plan;
-  }
-  return buildFallbackPlan(payload);
-}
-
 export function extractPlanFromIntentToken(raw) {
   if (typeof raw !== "string" || !raw.trim()) {
     return null;
@@ -98,44 +78,24 @@ export function extractPlanFromIntentToken(raw) {
   return { plan: planCandidate, expiresAt };
 }
 
+function stepAction(step) {
+  if (typeof step.action === "string") return step.action;
+  return typeof step.tool === "string" ? step.tool : "";
+}
+
+function stepMatchesTool(step, normalizedTool) {
+  return isPlainObject(step) && normalizeToolName(stepAction(step)) === normalizedTool;
+}
+
 export function extractAllowedActions(plan) {
   const allowed = new Set();
   const steps = Array.isArray(plan?.steps) ? plan.steps : [];
   for (const step of steps) {
-    if (!isPlainObject(step)) {
-      continue;
-    }
-    const action =
-      typeof step.action === "string"
-        ? step.action
-        : typeof step.tool === "string"
-          ? step.tool
-          : "";
-    if (action.trim()) {
-      allowed.add(normalizeToolName(action));
+    if (isPlainObject(step) && stepAction(step).trim()) {
+      allowed.add(normalizeToolName(stepAction(step)));
     }
   }
   return allowed;
-}
-
-function findPlanStep(plan, toolName) {
-  const steps = Array.isArray(plan?.steps) ? plan.steps : [];
-  const normalizedTool = normalizeToolName(toolName);
-  for (const step of steps) {
-    if (!isPlainObject(step)) {
-      continue;
-    }
-    const action =
-      typeof step.action === "string"
-        ? step.action
-        : typeof step.tool === "string"
-          ? step.tool
-          : "";
-    if (normalizeToolName(action) === normalizedTool) {
-      return step;
-    }
-  }
-  return null;
 }
 
 function getStepInputCandidates(step) {
@@ -159,16 +119,7 @@ export function findPlanStepIndices(plan, toolName, toolParams) {
   const paramMatches = [];
   for (let idx = 0; idx < steps.length; idx += 1) {
     const step = steps[idx];
-    if (!isPlainObject(step)) {
-      continue;
-    }
-    const action =
-      typeof step.action === "string"
-        ? step.action
-        : typeof step.tool === "string"
-          ? step.tool
-          : "";
-    if (normalizeToolName(action) !== normalizedTool) {
+    if (!stepMatchesTool(step, normalizedTool)) {
       continue;
     }
     matches.push(idx);
@@ -188,21 +139,7 @@ export function checkToolAgainstPlan({ plan, toolName, toolInput }) {
   if (!steps.length) {
     return { allowed: false, reason: "ArmorCodex intent plan is empty" };
   }
-  const matches = [];
-  for (const step of steps) {
-    if (!isPlainObject(step)) {
-      continue;
-    }
-    const action =
-      typeof step.action === "string"
-        ? step.action
-        : typeof step.tool === "string"
-          ? step.tool
-          : "";
-    if (normalizeToolName(action) === normalizedTool) {
-      matches.push(step);
-    }
-  }
+  const matches = steps.filter((step) => stepMatchesTool(step, normalizedTool));
   if (!matches.length) {
     return { allowed: false, reason: `ArmorCodex intent drift: tool not in plan (${toolName})` };
   }
@@ -552,6 +489,9 @@ export function validateCsrgProofHeaders(proofs, required) {
 }
 
 export async function requestIntent(config, payload) {
+  if (!isPlainObject(payload.plan)) {
+    throw new Error("ArmorCodex requests an intent token only for a registered plan");
+  }
   if (config.intentEndpoint) {
     const response = await postJson(
       config.intentEndpoint,
@@ -592,7 +532,7 @@ export async function requestIntent(config, payload) {
     return { skipped: true };
   }
   const client = getSdkClient(config);
-  const plan = resolvePlan({ ...payload, mcpName: config.mcpName });
+  const plan = payload.plan;
   const metadata = {
     source: "codex",
     session_id: payload.session_id,
