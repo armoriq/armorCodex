@@ -242,6 +242,49 @@ export async function handleUserPromptSubmit(input, config) {
 // PreToolUse
 // ---------------------------------------------------------------------------
 
+function canRequestIntent(config) {
+  return Boolean(config.intentEndpoint || (config.useSdkIntent && config.apiKey));
+}
+
+function tokenStateFrom(merged, current) {
+  const intentTokenRaw = typeof merged.intentTokenRaw === "string" ? merged.intentTokenRaw : "";
+  return {
+    intentTokenRaw,
+    localPlan: merged.plan || current.localPlan,
+    localExpiresAt: merged.expiresAt || current.localExpiresAt,
+    usedStepIndices: intentTokenRaw ? getSessionTokenUsedStepIndices(merged, intentTokenRaw) : undefined
+  };
+}
+
+async function acquireTokenForPlan(config, context, current) {
+  if (current.intentTokenRaw || !isPlainObject(current.localPlan) || !canRequestIntent(config)) {
+    return current;
+  }
+  const { runtimeState, session, sessionId, toolName, toolInput, policy } = context;
+  try {
+    const intentResponse = await requestIntent(config, {
+      prompt: session.lastPrompt || `Use tool ${toolName}`,
+      plan: current.localPlan,
+      session_id: sessionId,
+      toolName,
+      toolInput,
+      policy_hash: computePolicyHash(policy),
+      policy,
+      validitySeconds: config.validitySeconds,
+      metadata: { source: "codex", trigger: "pre_tool_use" }
+    });
+    const merged = mergeIntentIntoSession(session, intentResponse);
+    upsertSession(runtimeState, sessionId, merged);
+    return tokenStateFrom(merged, current);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (config.intentRequired && shouldDeny(config)) {
+      return { deny: denyPreTool(`ArmorCodex intent planning failed: ${message}`) };
+    }
+    return current;
+  }
+}
+
 export async function handlePreToolUse(input, config) {
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   const toolName = typeof input.tool_name === "string" ? input.tool_name : "";
@@ -384,7 +427,7 @@ export async function handlePreToolUse(input, config) {
     isPlainObject(localPlan) &&
     Number.isFinite(localExpiresAt) &&
     localExpiresAt - nowEpochSeconds() < refreshThreshold &&
-    (config.intentEndpoint || (config.useSdkIntent && config.apiKey))
+    canRequestIntent(config)
   ) {
     try {
       const policyHash = computePolicyHash(policyState.policy);
@@ -416,40 +459,15 @@ export async function handlePreToolUse(input, config) {
     }
   }
 
-  // If no token, try to acquire one
-  if (!intentTokenRaw && (config.intentEndpoint || (config.useSdkIntent && config.apiKey))) {
-    try {
-      const policyHash = computePolicyHash(policyState.policy);
-      const intentResponse = await requestIntent(config, {
-        prompt: session.lastPrompt || `Use tool ${toolName}`,
-        session_id: sessionId,
-        toolName,
-        toolInput,
-        policy_hash: policyHash,
-        policy: policyState.policy,
-        validitySeconds: config.validitySeconds,
-        metadata: {
-          source: "codex",
-          trigger: "pre_tool_use"
-        }
-      });
-      const merged = mergeIntentIntoSession(session, intentResponse);
-      upsertSession(runtimeState, sessionId, merged);
-      intentTokenRaw =
-        typeof merged.intentTokenRaw === "string" ? merged.intentTokenRaw : "";
-      localPlan = merged.plan || localPlan;
-      localExpiresAt = merged.expiresAt || localExpiresAt;
-      usedStepIndices =
-        intentTokenRaw && localPlan
-          ? getSessionTokenUsedStepIndices(merged, intentTokenRaw)
-          : undefined;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (config.intentRequired && shouldDeny(config)) {
-        return denyPreTool(`ArmorCodex intent planning failed: ${message}`);
-      }
-    }
+  const acquired = await acquireTokenForPlan(
+    config,
+    { runtimeState, session, sessionId, toolName, toolInput, policy: policyState.policy },
+    { intentTokenRaw, localPlan, localExpiresAt, usedStepIndices }
+  );
+  if (acquired.deny) {
+    return acquired.deny;
   }
+  ({ intentTokenRaw, localPlan, localExpiresAt, usedStepIndices } = acquired);
 
   // Validate tool against intent token plan
   if (intentTokenRaw) {
@@ -565,7 +583,10 @@ export async function handlePreToolUse(input, config) {
 
   // --- Enforce intent requirement ---
   if (config.intentRequired && !remoteAllowed && !tokenCheckMatched && !localPlanMatched) {
-    const deny = denyOrAllow(config, "ArmorCodex intent plan missing for this session");
+    const deny = denyOrAllow(
+      config,
+      "ArmorCodex intent plan missing for this session: call register_intent_plan first, then retry the tool"
+    );
     if (deny) {
       return deny;
     }

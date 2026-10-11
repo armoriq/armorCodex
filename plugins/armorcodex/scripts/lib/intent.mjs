@@ -50,26 +50,6 @@ export function getSdkClient(config) {
   return client;
 }
 
-function buildFallbackPlan(payload) {
-  const goal = typeof payload.prompt === "string" ? payload.prompt : "ArmorCodex intent";
-  const plan = { steps: [], metadata: { goal, source: "codex" } };
-  if (typeof payload.toolName === "string" && payload.toolName.trim()) {
-    plan.steps.push({
-      action: payload.toolName.trim(),
-      mcp: payload.mcpName || "codex",
-      metadata: isPlainObject(payload.toolInput) ? { inputs: payload.toolInput } : {}
-    });
-  }
-  return plan;
-}
-
-function resolvePlan(payload) {
-  if (isPlainObject(payload.plan)) {
-    return payload.plan;
-  }
-  return buildFallbackPlan(payload);
-}
-
 export function extractPlanFromIntentToken(raw) {
   if (typeof raw !== "string" || !raw.trim()) {
     return null;
@@ -554,6 +534,9 @@ export function validateCsrgProofHeaders(proofs, required) {
 }
 
 export async function requestIntent(config, payload) {
+  if (!isPlainObject(payload.plan)) {
+    throw new Error("ArmorCodex requests an intent token only for a registered plan");
+  }
   if (config.intentEndpoint) {
     const response = await postJson(
       config.intentEndpoint,
@@ -594,7 +577,7 @@ export async function requestIntent(config, payload) {
     return { skipped: true };
   }
   const client = getSdkClient(config);
-  const plan = resolvePlan({ ...payload, mcpName: config.mcpName });
+  const plan = payload.plan;
   const metadata = {
     source: "codex",
     session_id: payload.session_id,
