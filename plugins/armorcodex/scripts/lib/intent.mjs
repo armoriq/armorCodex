@@ -22,8 +22,7 @@ function buildSdkClientKey(config) {
     config.contextId,
     config.iapEndpoint,
     config.proxyEndpoint,
-    config.backendEndpoint,
-    config.useProduction ? "prod" : "dev"
+    config.backendEndpoint
   ].join("|");
 }
 
@@ -38,7 +37,6 @@ export function getSdkClient(config) {
     userId: config.userId,
     agentId: config.agentId,
     contextId: config.contextId,
-    useProduction: config.useProduction,
     iapEndpoint: requireEndpoint(config, "iapEndpoint"),
     proxyEndpoint: requireEndpoint(config, "proxyEndpoint"),
     backendEndpoint: config.backendEndpoint,

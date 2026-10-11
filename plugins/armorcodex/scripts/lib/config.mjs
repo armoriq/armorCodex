@@ -75,7 +75,6 @@ function resolveEndpoints(env) {
     paired?.iap ||
     "";
   return {
-    useProduction: target === "production",
     backendEndpoint: backendOverride || ENDPOINTS[target].backend,
     iapEndpoint,
     proxyEndpoint:
@@ -111,17 +110,39 @@ function savedLogin(backend) {
   }
 }
 
+export function withLogin(settings) {
+  const login = savedLogin(settings.backendEndpoint);
+  const { apiKey, orgId, userId, loggedInAt } = {
+    apiKey: "",
+    orgId: "",
+    userId: "",
+    loggedInAt: "",
+    ...login?.profile,
+  };
+  const tracing = !settings.observabilityDisabled && Boolean(apiKey);
+  return {
+    ...settings,
+    apiKey,
+    orgId,
+    userId,
+    loggedInAt,
+    loginHistory: login?.loginHistory ?? null,
+    observabilityEnabled: tracing,
+    usageSyncEnabled: tracing && !settings.usageSyncDisabled,
+    auditEnabled: settings.auditEnabled ?? Boolean(apiKey),
+  };
+}
+
 export function loadConfig(env = process.env) {
+  return withLogin(loadSettings(env));
+}
+
+export function loadSettings(env = process.env) {
   const mode = (
     pluginOpt(env, "MODE", "ARMORCODEX_MODE") || "enforce"
   ).toLowerCase();
-  const {
-    useProduction,
-    backendEndpoint,
-    iapEndpoint,
-    proxyEndpoint,
-    csrgEndpoint,
-  } = resolveEndpoints(env);
+  const { backendEndpoint, iapEndpoint, proxyEndpoint, csrgEndpoint } =
+    resolveEndpoints(env);
 
   // Data directory: prefer plugin-injected storage, then
   // ARMORCODEX_DATA_DIR, then default ~/.codex/armorcodex.
@@ -137,10 +158,6 @@ export function loadConfig(env = process.env) {
     env.ARMORCODEX_RUNTIME_FILE?.trim() || path.join(dataDir, "runtime.json");
 
   const timeoutMs = parseInteger(env.ARMORCODEX_TIMEOUT_MS, 8000);
-
-  const login = savedLogin(backendEndpoint);
-  const profile = login?.profile;
-  const apiKey = profile?.apiKey ?? "";
 
   // Observability ("Model A" trace export) is ON by default whenever an API
   // key is configured — opt out via the `disable_observability` plugin
@@ -165,22 +182,15 @@ export function loadConfig(env = process.env) {
     dataDir,
     policyFile,
     runtimeFile,
-    useProduction,
     backendEndpoint,
     iapEndpoint,
     proxyEndpoint,
     csrgEndpoint,
-    apiKey,
-    orgId: profile?.orgId ?? "",
 
-    // Observability ("Model A" trace export, per-plan via disk — see
-    // scripts/lib/observability.mjs). Default ON whenever an API key is
-    // present; opt out via `disable_observability` plugin option or
-    // ARMORCODEX_OBSERVABILITY_DISABLED.
-    observabilityEnabled: !observabilityDisabled && Boolean(apiKey),
+    observabilityDisabled,
+    usageSyncDisabled,
     observabilityEndpoint: backendEndpoint,
     observabilityProduct: "armorcodex",
-    usageSyncEnabled: !observabilityDisabled && !usageSyncDisabled && Boolean(apiKey),
 
     useSdkIntent: parseBoolean(env.ARMORCODEX_USE_SDK_INTENT, true),
     intentEndpoint: env.ARMORCODEX_INTENT_URL?.trim() || "",
@@ -207,9 +217,6 @@ export function loadConfig(env = process.env) {
     // so attribution works with a single generic API key (no per-product key).
     productSlug: "armorcodex",
     mcpName: env.ARMORCODEX_MCP_NAME?.trim() || "codex",
-    userId: profile?.userId ?? "",
-    loggedInAt: profile?.loggedInAt ?? "",
-    loginHistory: login?.loginHistory ?? null,
     agentId: env.ARMORCODEX_AGENT_ID?.trim() || "codex",
     contextId: env.ARMORCODEX_CONTEXT_ID?.trim() || "default",
 
@@ -250,7 +257,7 @@ export function loadConfig(env = process.env) {
     ),
 
     // Audit logging
-    auditEnabled: parseBoolean(env.ARMORCODEX_AUDIT_ENABLED, Boolean(apiKey)),
+    auditEnabled: parseBoolean(env.ARMORCODEX_AUDIT_ENABLED, null),
 
     // Plan directive injection (tells Codex to register a plan via MCP tool)
     planningEnabled: parseBoolean(env.ARMORCODEX_PLANNING_ENABLED, true),
