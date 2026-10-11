@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
@@ -13,6 +14,7 @@ const requirePlugin = createRequire(new URL("../plugins/armorcodex/package.json"
 const { Client } = requirePlugin("@modelcontextprotocol/sdk/client/index.js");
 const { StdioClientTransport } = requirePlugin("@modelcontextprotocol/sdk/client/stdio.js");
 const POLICY_MCP = fileURLToPath(new URL("../plugins/armorcodex/scripts/policy-mcp.mjs", import.meta.url));
+const HOOK_ROUTER = fileURLToPath(new URL("../plugins/armorcodex/scripts/hook-router.mjs", import.meta.url));
 const SESSION = "deadline-session";
 
 async function startSlowBackend(delayMs, status) {
@@ -88,6 +90,25 @@ async function withMcp({ delayMs, deadlineMs, status = 200 }, fn) {
   }
 }
 
+function preToolUse(env, toolName, toolInput) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [HOOK_ROUTER], { env, stdio: ["pipe", "pipe", "pipe"] });
+    let stdout = "";
+    child.stdout.on("data", (chunk) => (stdout += chunk));
+    child.on("error", reject);
+    child.on("close", () => resolve(stdout.trim() ? JSON.parse(stdout) : null));
+    child.stdin.end(
+      JSON.stringify({
+        hook_event_name: "PreToolUse",
+        session_id: SESSION,
+        cwd: env.HOME,
+        tool_name: toolName,
+        tool_input: toolInput
+      })
+    );
+  });
+}
+
 test("backend token that arrives inside the deadline is in the pending plan before the tool returns", async () => {
   await withMcp({ delayMs: 50, deadlineMs: 500 }, async ({ registerPlan, backend, stderr }) => {
     const result = await registerPlan();
@@ -140,5 +161,30 @@ test("ARMORCODEX_INTENT_DEADLINE_MS=0 returns without waiting for the backend", 
     const result = await registerPlan();
     assert.match(result.text, /issuing in background/);
     assert.ok(result.elapsedMs < 300, `took ${result.elapsedMs}ms`);
+  });
+});
+
+test("an on-plan call while the backend is failing is denied, not allowed without a token", async () => {
+  await withMcp({ delayMs: 20, deadlineMs: 500, status: 500 }, async ({ registerPlan, backend, env, stderr }) => {
+    await registerPlan();
+
+    const output = await preToolUse(env, "Bash", { command: "ls" });
+
+    assert.equal(output?.hookSpecificOutput?.permissionDecision, "deny", JSON.stringify(output));
+    assert.match(output.hookSpecificOutput.permissionDecisionReason, /intent planning failed/);
+    assert.equal(backend.tokenRequests.length, 2, stderr());
+  });
+});
+
+test("an off-plan call while the plan token is pending is denied, and its token request carries the registered plan", async () => {
+  await withMcp({ delayMs: 1500, deadlineMs: 300 }, async ({ registerPlan, backend, env, stderr }) => {
+    await registerPlan();
+
+    const output = await preToolUse(env, "apply_patch", { patch: "*** Begin Patch" });
+
+    assert.equal(output?.hookSpecificOutput?.permissionDecision, "deny", JSON.stringify(output));
+    assert.match(output.hookSpecificOutput.permissionDecisionReason, /tool not in plan \(apply_patch\)/);
+    assert.equal(backend.tokenRequests.length, 2, stderr());
+    assert.deepEqual(backend.tokenRequests[1].plan.steps.map((step) => step.action), ["Bash"]);
   });
 });
