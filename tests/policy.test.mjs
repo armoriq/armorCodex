@@ -188,7 +188,7 @@ test("handlePreToolUse denies drift when local plan exists (no backend)", async 
   assert.match(output?.hookSpecificOutput?.permissionDecisionReason || "", /intent drift|not in plan/i);
 });
 
-test("handlePreToolUse replaces stale local plan with fresh pending-plan.json", async () => {
+test("handlePreToolUse replaces stale local plan with the session's fresh pending plan", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorcodex-test-"));
   const config = buildConfig(tmp, { intentRequired: true });
   const { writeFile } = await import("node:fs/promises");
@@ -208,7 +208,7 @@ test("handlePreToolUse replaces stale local plan with fresh pending-plan.json", 
   );
   // Drop a NEW pending plan that allows Bash (simulates register_intent_plan)
   await writeFile(
-    path.join(tmp, "pending-plan.json"),
+    path.join(tmp, "pending-plan.multi-1.json"),
     JSON.stringify({
       plan: { steps: [{ action: "Bash" }], metadata: { goal: "list etc" } },
       tokenRaw: "",
