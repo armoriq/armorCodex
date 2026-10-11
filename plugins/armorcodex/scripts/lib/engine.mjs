@@ -8,7 +8,6 @@ import {
   getSessionTokenUsedStepIndices,
   parseCsrgProofHeaders,
   recordSessionTokenUsedStepIndices,
-  requestIntent,
   resolveCsrgProofsFromToken,
   validateCsrgProofHeaders
 } from "./intent.mjs";
@@ -243,46 +242,11 @@ export async function handleUserPromptSubmit(input, config) {
 // PreToolUse
 // ---------------------------------------------------------------------------
 
-function canRequestIntent(config) {
-  return Boolean(config.intentEndpoint || (config.useSdkIntent && config.apiKey));
-}
-
-function tokenStateFrom(merged, current) {
-  const intentTokenRaw = typeof merged.intentTokenRaw === "string" ? merged.intentTokenRaw : "";
-  return {
-    intentTokenRaw,
-    localPlan: merged.plan || current.localPlan,
-    localExpiresAt: merged.expiresAt || current.localExpiresAt,
-    usedStepIndices: intentTokenRaw ? getSessionTokenUsedStepIndices(merged, intentTokenRaw) : undefined
-  };
-}
-
-async function acquireTokenForPlan(config, context, current) {
-  if (current.intentTokenRaw || !isPlainObject(current.localPlan) || !canRequestIntent(config)) {
-    return current;
-  }
-  const { runtimeState, session, sessionId, toolName, toolInput, policy } = context;
-  try {
-    const intentResponse = await requestIntent(config, {
-      prompt: session.lastPrompt || `Use tool ${toolName}`,
-      plan: current.localPlan,
-      session_id: sessionId,
-      toolName,
-      toolInput,
-      policy_hash: computePolicyHash(policy),
-      policy,
-      validitySeconds: config.validitySeconds,
-      metadata: { source: "codex", trigger: "pre_tool_use" }
-    });
-    const merged = mergeIntentIntoSession(session, intentResponse);
-    upsertSession(runtimeState, sessionId, merged);
-    return tokenStateFrom(merged, current);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (config.intentRequired && shouldDeny(config)) {
-      return { deny: denyPreTool(`ArmorCodex intent planning failed: ${message}`) };
-    }
-    return current;
+async function readIssuedPlan(pendingPath) {
+  for (;;) {
+    const pending = await readJson(pendingPath, null);
+    if (pending?.status !== "issuing" || !(Date.now() < pending.deadlineAt)) return pending;
+    await new Promise((resolve) => setTimeout(resolve, 100));
   }
 }
 
@@ -349,7 +313,16 @@ export async function handlePreToolUse(input, config) {
   const pendingPath = sessionId
     ? path.join(config.dataDir, `pending-plan.${sessionId}.json`)
     : null;
-  const pending = pendingPath ? await readJson(pendingPath, null) : null;
+  const pending = pendingPath ? await readIssuedPlan(pendingPath) : null;
+  if (pending?.status === "issuing") {
+    const deny = denyOrAllow(
+      config,
+      "ArmorCodex intent token was not issued in time: call register_intent_plan again, then retry the tool"
+    );
+    if (deny) {
+      return deny;
+    }
+  }
   if (pending && (pending.tokenRaw || pending.plan)) {
     upsertSession(runtimeState, sessionId, {
       intentTokenRaw: pending.tokenRaw || "",
@@ -397,69 +370,15 @@ export async function handlePreToolUse(input, config) {
   // --- Intent token verification ---
   // Reuse the runtimeState loaded above instead of re-reading from disk.
   const session = getSession(runtimeState, sessionId) || {};
-  let intentTokenRaw = readIntentTokenRaw(input, session);
+  const intentTokenRaw = readIntentTokenRaw(input, session);
   let localPlan = session.plan;
   let localExpiresAt = session.expiresAt;
   let remoteAllowed = false;
   let tokenCheckMatched = false;
-  let usedStepIndices =
+  const usedStepIndices =
     intentTokenRaw && localPlan
       ? getSessionTokenUsedStepIndices(session, intentTokenRaw)
       : undefined;
-
-  // Proactive refresh: if the token is about to expire and we still have the
-  // plan, re-issue silently so the user never sees a "token expired" deny in
-  // the middle of a multi-step turn. If the refresh fails, flow falls through
-  // to the existing expiry check below.
-  const refreshThreshold = Number.isFinite(config.refreshThresholdSeconds)
-    ? config.refreshThresholdSeconds
-    : 30;
-  if (
-    intentTokenRaw &&
-    isPlainObject(localPlan) &&
-    Number.isFinite(localExpiresAt) &&
-    localExpiresAt - nowEpochSeconds() < refreshThreshold &&
-    canRequestIntent(config)
-  ) {
-    try {
-      const policyHash = computePolicyHash(policyState.policy);
-      const refreshed = await requestIntent(config, {
-        prompt: session.lastPrompt || `Refresh intent for ${toolName}`,
-        plan: localPlan,
-        session_id: sessionId,
-        toolName,
-        toolInput,
-        policy_hash: policyHash,
-        policy: policyState.policy,
-        validitySeconds: config.validitySeconds,
-        metadata: { source: "codex", trigger: "auto_refresh" }
-      });
-      if (!refreshed.skipped) {
-        const merged = mergeIntentIntoSession(session, refreshed);
-        upsertSession(runtimeState, sessionId, merged);
-        intentTokenRaw =
-          typeof merged.intentTokenRaw === "string"
-            ? merged.intentTokenRaw
-            : intentTokenRaw;
-        localPlan = merged.plan || localPlan;
-        localExpiresAt = merged.expiresAt || localExpiresAt;
-        debugLog(config, "intent token auto-refreshed near expiry");
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      debugLog(config, `auto-refresh failed: ${message}`);
-    }
-  }
-
-  const acquired = await acquireTokenForPlan(
-    config,
-    { runtimeState, session, sessionId, toolName, toolInput, policy: policyState.policy },
-    { intentTokenRaw, localPlan, localExpiresAt, usedStepIndices }
-  );
-  if (acquired.deny) {
-    return acquired.deny;
-  }
-  ({ intentTokenRaw, localPlan, localExpiresAt, usedStepIndices } = acquired);
 
   // Validate tool against intent token plan
   if (intentTokenRaw) {

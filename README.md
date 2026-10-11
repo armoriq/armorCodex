@@ -74,6 +74,7 @@ Core environment variables:
 | `ARMORCODEX_MODE` | `enforce` | `enforce` blocks failures; `monitor` logs only |
 | `ARMORCODEX_INTENT_REQUIRED` | `true` | Require a registered intent plan before Bash |
 | `ARMORCODEX_DATA_DIR` | `~/.codex/armorcodex` | Runtime, policy, and pending-plan storage |
+| `ARMORCODEX_VALIDITY_SECONDS` | `3600` | Intent token lifetime. Values above 3600 are capped at 3600, the most ArmorIQ issues |
 | `ARMORCODEX_DEBUG` | `false` | Debug logs on stderr |
 | `ARMORCODEX_AUDIT_ENABLED` | true when API key exists | Send audit logs |
 | `ARMORCODEX_CRYPTO_POLICY_ENABLED` | `false` | Enable Merkle policy binding |
