@@ -80,44 +80,24 @@ export function extractPlanFromIntentToken(raw) {
   return { plan: planCandidate, expiresAt };
 }
 
+function stepAction(step) {
+  if (typeof step.action === "string") return step.action;
+  return typeof step.tool === "string" ? step.tool : "";
+}
+
+function stepMatchesTool(step, normalizedTool) {
+  return isPlainObject(step) && normalizeToolName(stepAction(step)) === normalizedTool;
+}
+
 export function extractAllowedActions(plan) {
   const allowed = new Set();
   const steps = Array.isArray(plan?.steps) ? plan.steps : [];
   for (const step of steps) {
-    if (!isPlainObject(step)) {
-      continue;
-    }
-    const action =
-      typeof step.action === "string"
-        ? step.action
-        : typeof step.tool === "string"
-          ? step.tool
-          : "";
-    if (action.trim()) {
-      allowed.add(normalizeToolName(action));
+    if (isPlainObject(step) && stepAction(step).trim()) {
+      allowed.add(normalizeToolName(stepAction(step)));
     }
   }
   return allowed;
-}
-
-function findPlanStep(plan, toolName) {
-  const steps = Array.isArray(plan?.steps) ? plan.steps : [];
-  const normalizedTool = normalizeToolName(toolName);
-  for (const step of steps) {
-    if (!isPlainObject(step)) {
-      continue;
-    }
-    const action =
-      typeof step.action === "string"
-        ? step.action
-        : typeof step.tool === "string"
-          ? step.tool
-          : "";
-    if (normalizeToolName(action) === normalizedTool) {
-      return step;
-    }
-  }
-  return null;
 }
 
 function getStepInputCandidates(step) {
@@ -141,16 +121,7 @@ export function findPlanStepIndices(plan, toolName, toolParams) {
   const paramMatches = [];
   for (let idx = 0; idx < steps.length; idx += 1) {
     const step = steps[idx];
-    if (!isPlainObject(step)) {
-      continue;
-    }
-    const action =
-      typeof step.action === "string"
-        ? step.action
-        : typeof step.tool === "string"
-          ? step.tool
-          : "";
-    if (normalizeToolName(action) !== normalizedTool) {
+    if (!stepMatchesTool(step, normalizedTool)) {
       continue;
     }
     matches.push(idx);
@@ -170,21 +141,7 @@ export function checkToolAgainstPlan({ plan, toolName, toolInput }) {
   if (!steps.length) {
     return { allowed: false, reason: "ArmorCodex intent plan is empty" };
   }
-  const matches = [];
-  for (const step of steps) {
-    if (!isPlainObject(step)) {
-      continue;
-    }
-    const action =
-      typeof step.action === "string"
-        ? step.action
-        : typeof step.tool === "string"
-          ? step.tool
-          : "";
-    if (normalizeToolName(action) === normalizedTool) {
-      matches.push(step);
-    }
-  }
+  const matches = steps.filter((step) => stepMatchesTool(step, normalizedTool));
   if (!matches.length) {
     return { allowed: false, reason: `ArmorCodex intent drift: tool not in plan (${toolName})` };
   }
