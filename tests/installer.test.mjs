@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   chmodSync,
+  cpSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -313,4 +314,56 @@ test("the installer accepts a Codex major version above 0", async (t) => {
   const result = await runInstaller(root, home, binDir);
 
   assert.match(result.stdout, /prerequisites OK \(codex-cli 1\.0\.0/);
+});
+
+test("re-running the installer upgrades an SDK left behind in node_modules", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "armorcodex-stale-sdk-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const binDir = join(root, "bin");
+  const checkout = join(root, "checkout");
+  const plugin = join(checkout, "plugins", "armorcodex");
+  mkdirSync(home, { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  mkdirSync(plugin, { recursive: true });
+  const source = new URL("../plugins/armorcodex/", import.meta.url).pathname;
+  cpSync(join(source, "scripts"), join(plugin, "scripts"), { recursive: true });
+  for (const name of ["package.json", "package-lock.json"]) cpSync(join(source, name), join(plugin, name));
+  cpSync(new URL("../install_armorcodex.sh", import.meta.url).pathname, join(checkout, "install_armorcodex.sh"));
+  writeFileSync(join(binDir, "codex"), "#!/bin/sh\necho 'codex-cli 0.162.0'\n");
+  chmodSync(join(binDir, "codex"), 0o755);
+
+  const env = {
+    ...process.env,
+    HOME: home,
+    PATH: `${binDir}${delimiter}${process.env.PATH}`,
+    NO_COLOR: "1",
+    npm_config_cache: process.env.npm_config_cache || join(os.homedir(), ".npm"),
+    npm_config_prefix: join(root, "npm-global"),
+  };
+  const sdkVersion = () =>
+    JSON.parse(readFileSync(join(plugin, "node_modules", "@armoriq", "sdk-dev", "package.json"), "utf8")).version;
+  const locked = JSON.parse(readFileSync(join(plugin, "package-lock.json"), "utf8"))
+    .packages["node_modules/@armoriq/sdk-dev"].version;
+  const stale = "0.8.12";
+  assert.notEqual(locked, stale);
+
+  const seed = spawnSync("npm", ["install", "--omit=dev", "--no-save", "--no-audit", "--no-fund", `@armoriq/sdk-dev@${stale}`], {
+    cwd: plugin,
+    encoding: "utf8",
+    env,
+  });
+  assert.equal(seed.status, 0, seed.stderr);
+  assert.equal(sdkVersion(), stale);
+  saveCodexLogin(home);
+
+  const result = spawnSync("bash", [join(checkout, "install_armorcodex.sh"), "--force-install"], {
+    cwd: root,
+    encoding: "utf8",
+    env,
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /npm dependencies installed/);
+  assert.equal(sdkVersion(), locked);
 });
