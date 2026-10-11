@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import os, { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import test from "node:test";
 
@@ -45,15 +45,30 @@ function saveCodexLogin(home, product = "armorcodex") {
   }
 }
 
-function runUpdate(root, home, binDir) {
-  return spawnSync("bash", [new URL("../install_armorcodex.sh", import.meta.url).pathname, "--update"], {
-    cwd: root,
-    encoding: "utf8",
-    env: { ...process.env, HOME: home, PATH: `${binDir}${delimiter}${process.env.PATH}`, NO_COLOR: "1" },
+function runInstaller(root, home, binDir, flag = "--update") {
+  return new Promise((resolve, reject) => {
+    const child = spawn("bash", [new URL("../install_armorcodex.sh", import.meta.url).pathname, flag], {
+      cwd: root,
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        HOME: home,
+        ARMORCODEX_INSTALL_HOME: join(home, ".armoriq", "armorCodex"),
+        PATH: `${binDir}${delimiter}${process.env.PATH}`,
+        NO_COLOR: "1",
+      },
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
+    child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk; });
+    child.on("error", reject);
+    child.on("close", (status) => resolve({ status, stdout, stderr }));
   });
 }
 
-test("a normal update adds the Stop and SessionEnd hooks to an existing ArmorCodex hooks file and leaves its other hooks unchanged", (t) => {
+test("a normal update adds the Stop and SessionEnd hooks to an existing ArmorCodex hooks file and leaves its other hooks unchanged", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "armorcodex-installer-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
 
@@ -92,17 +107,7 @@ test("a normal update adds the Stop and SessionEnd hooks to an existing ArmorCod
   stubTools(binDir);
   saveCodexLogin(home);
 
-  const installer = new URL("../install_armorcodex.sh", import.meta.url);
-  const result = spawnSync("bash", [installer.pathname, "--update"], {
-    cwd: root,
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      HOME: home,
-      PATH: `${binDir}${delimiter}${process.env.PATH}`,
-      NO_COLOR: "1",
-    },
-  });
+  const result = await runInstaller(root, home, binDir);
 
   assert.equal(result.status, 0, result.stderr || result.stdout);
   const updatedHooks = JSON.parse(readFileSync(hooksPath, "utf8"));
@@ -123,7 +128,7 @@ test("a normal update adds the Stop and SessionEnd hooks to an existing ArmorCod
   );
 });
 
-test("an existing hooks.json with only another tool's hooks keeps them and gains all seven ArmorCodex hooks", (t) => {
+test("an existing hooks.json with only another tool's hooks keeps them and gains all seven ArmorCodex hooks", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "armorcodex-other-hooks-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const home = join(root, "home");
@@ -136,11 +141,7 @@ test("an existing hooks.json with only another tool's hooks keeps them and gains
   stubTools(binDir);
   saveCodexLogin(home);
 
-  const result = spawnSync("bash", [new URL("../install_armorcodex.sh", import.meta.url).pathname, "--update"], {
-    cwd: root,
-    encoding: "utf8",
-    env: { ...process.env, HOME: home, PATH: `${binDir}${delimiter}${process.env.PATH}`, NO_COLOR: "1" },
-  });
+  const result = await runInstaller(root, home, binDir);
 
   assert.equal(result.status, 0, result.stderr || result.stdout);
   const { hooks } = JSON.parse(readFileSync(hooksPath, "utf8"));
@@ -153,16 +154,12 @@ test("an existing hooks.json with only another tool's hooks keeps them and gains
   assert.deepEqual(hooks.PostToolUse[0], other[0]);
   assert.doesNotMatch(result.stdout, /unrelated|--force-hooks/);
 
-  const uninstall = spawnSync("bash", [new URL("../install_armorcodex.sh", import.meta.url).pathname, "--uninstall"], {
-    cwd: root,
-    encoding: "utf8",
-    env: { ...process.env, HOME: home, PATH: `${binDir}${delimiter}${process.env.PATH}`, NO_COLOR: "1" },
-  });
+  const uninstall = await runInstaller(root, home, binDir, "--uninstall");
   assert.equal(uninstall.status, 0, uninstall.stderr || uninstall.stdout);
   assert.deepEqual(JSON.parse(readFileSync(hooksPath, "utf8")), { hooks: { SessionStart: other, PostToolUse: other } });
 });
 
-test("an update with an old-format credentials.json reaches the login step", (t) => {
+test("an update with an old-format credentials.json reaches the login step", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "armorcodex-update-v1-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const home = join(root, "home");
@@ -175,7 +172,7 @@ test("an update with an old-format credentials.json reaches the login step", (t)
     JSON.stringify({ apiKey: "ak_test_flat", product: "armorcodex", backend: "https://staging-api.armoriq.ai" }),
   );
 
-  const result = runUpdate(root, home, binDir);
+  const result = await runInstaller(root, home, binDir);
 
   assert.match(result.stdout, /Connect to ArmorIQ/);
   assert.match(result.stderr + result.stdout, /No TTY available for interactive login/);
@@ -183,7 +180,7 @@ test("an update with an old-format credentials.json reaches the login step", (t)
   assert.notEqual(result.status, 0);
 });
 
-test("an update with an armorcodex login the plugin loads does not prompt", (t) => {
+test("an update with an armorcodex login the plugin loads does not prompt", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "armorcodex-update-v2-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const home = join(root, "home");
@@ -193,7 +190,7 @@ test("an update with an armorcodex login the plugin loads does not prompt", (t) 
   stubTools(binDir);
   saveCodexLogin(home);
 
-  const result = runUpdate(root, home, binDir);
+  const result = await runInstaller(root, home, binDir);
 
   assert.equal(result.status, 0, result.stderr || result.stdout);
   assert.match(result.stdout, /ArmorIQ login for ArmorCodex found/);
