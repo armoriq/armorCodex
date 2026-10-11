@@ -25,6 +25,12 @@ export function normalizeToolName(name) {
   return TOOL_ALIASES[normalized] ?? normalized;
 }
 
+export function stepToolNames(action) {
+  const declared = normalizeToolName(action);
+  if (declared.startsWith("mcp__") || !declared.includes("__")) return [declared];
+  return [declared, declared.replace("__", "")];
+}
+
 export function parseBoolean(value, defaultValue = false) {
   if (typeof value !== "string") {
     return defaultValue;
