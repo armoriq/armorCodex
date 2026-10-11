@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import path from "node:path";
 import { z } from "zod";
-import { loadConfig } from "./lib/config.mjs";
+import { loadSettings, withLogin } from "./lib/config.mjs";
 import { ensurePrivateDir, writeJson } from "./lib/fs-store.mjs";
 import { extractAllowedActions, requestIntent } from "./lib/intent.mjs";
 import { INTENT_PLAN_ZOD, PLAN_STEP_SCHEMA, normalizeIntentPlan } from "./lib/intent-schema.mjs";
@@ -80,14 +80,14 @@ function coercePlanArgs(args) {
   return args;
 }
 
-async function loadStateAndConfig() {
-  const config = loadConfig();
-  const state = await loadPolicyState(config.policyFile);
-  return { config, state };
-}
-
 async function run() {
-  await ensurePrivateDir(loadConfig().dataDir);
+  const settings = loadSettings();
+  const currentConfig = () => withLogin(settings);
+  const loadStateAndConfig = async () => {
+    const config = currentConfig();
+    return { config, state: await loadPolicyState(config.policyFile) };
+  };
+  await ensurePrivateDir(settings.dataDir);
   const server = new McpServer({
     name: "armorcodex-policy",
     version: "0.1.0"
@@ -169,7 +169,7 @@ async function run() {
       }
     },
     async (args) => {
-      const config = loadConfig();
+      const config = currentConfig();
       if (!config.policyUpdateEnabled) {
         return toTextResult("ArmorCodex policy updates are disabled.");
       }
@@ -256,7 +256,7 @@ async function run() {
         return toTextResult(`Plan rejected: ${parsed.error.message}`);
       }
 
-      const config = loadConfig();
+      const config = currentConfig();
       const plan = normalizeIntentPlan(parsed.data);
 
       // Write the local plan to pending-plan.json IMMEDIATELY so PreToolUse
@@ -338,7 +338,7 @@ async function run() {
   // on failure).
   const flusher = setInterval(async () => {
     try {
-      const config = loadConfig();
+      const config = currentConfig();
       if (!config.apiKey) return; // no backend configured; WAL just accumulates locally
       const wal = createAuditWal({ dataDir: config.dataDir });
       const { rows, endOffset } = await wal.readBatch(100);
@@ -359,7 +359,7 @@ async function run() {
   async function flushAndExit(signal) {
     clearInterval(flusher);
     try {
-      const config = loadConfig();
+      const config = currentConfig();
       if (config.apiKey) {
         const wal = createAuditWal({ dataDir: config.dataDir });
         const { rows, endOffset } = await wal.readBatch(500);

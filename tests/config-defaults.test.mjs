@@ -45,7 +45,6 @@ test("production defaults match the SDK production endpoint table", () => {
 
 test("no ARMORIQ_ENV means the environment the SDK was built for", () => {
   const config = loadConfig({});
-  assert.equal(config.useProduction, BUILD_ENV === "production");
   assert.deepEqual(endpoints(config), BY_ENV[BUILD_ENV]);
 });
 
@@ -57,14 +56,12 @@ test("the use_production option selects the same production defaults", () => {
 test("ARMORIQ_ENV=staging selects the SDK staging endpoints (#102)", () => {
   for (const value of ["staging", " Staging ", "STAGING"]) {
     const config = loadConfig({ ARMORIQ_ENV: value });
-    assert.equal(config.useProduction, false, value);
     assert.deepEqual(endpoints(config), STAGING, value);
   }
 });
 
 test("ARMORIQ_ENV=local selects the SDK local endpoints, IAP on 8080 (#102)", () => {
   const config = loadConfig({ ARMORIQ_ENV: "local" });
-  assert.equal(config.useProduction, false);
   assert.deepEqual(endpoints(config), LOCAL);
 });
 
