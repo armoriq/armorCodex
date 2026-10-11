@@ -32,7 +32,7 @@ function protoFields(buf) {
     const wire = key & 7;
     if (wire === 0) fields.push({ no, value: varint() });
     else if (wire === 1) {
-      fields.push({ no, double: buf.readDoubleLE(i) });
+      fields.push({ no, double: buf.readDoubleLE(i), fixed: buf.readBigUInt64LE(i) });
       i += 8;
     } else if (wire === 5) i += 4;
     else if (wire === 2) {
@@ -69,7 +69,15 @@ function decodeSpans(body) {
           const value = field(kv.bytes, 2)[0];
           if (key && value) attributes[key] = anyValue(value.bytes);
         }
-        spans.push({ name: field(span.bytes, 5)[0]?.bytes.toString("utf8"), attributes });
+        const ms = (no) => Number(field(span.bytes, no)[0].fixed / 1_000_000n);
+        const status = field(span.bytes, 15)[0];
+        spans.push({
+          name: field(span.bytes, 5)[0]?.bytes.toString("utf8"),
+          attributes,
+          startMs: ms(7),
+          endMs: ms(8),
+          statusCode: status ? Number(field(status.bytes, 3)[0]?.value ?? 0n) : 0,
+        });
       }
     }
   }
@@ -234,6 +242,7 @@ test("Stop ships exactly one per-turn generation span without cumulative double 
     assert.equal(span.attributes["gen_ai.usage.cost_usd"], undefined);
     assert.equal(span.attributes["armoriq.cost.provenance"], undefined);
     assert.equal(span.attributes["armoriq.session_id"], sessionId);
+    assert.equal(span.attributes["armoriq.timing.provenance"], "reported");
   }
 
   assert.deepEqual(
@@ -267,7 +276,7 @@ test("Stop still ships the turn and logs the error when a model span fails", asy
     await ingest.close();
     await rm(dataDir, { recursive: true, force: true });
   });
-  t.mock.method(OtelSession.prototype, "beginModel", async () => {
+  t.mock.method(OtelSession.prototype, "recordModel", async () => {
     throw new Error("model span failed");
   });
   const stderr = [];
@@ -299,10 +308,48 @@ test("Stop still ships the turn and logs the error when a model span fails", asy
   );
   await observeHook("Stop", { session_id: sessionId, transcript_path: rolloutPath }, null, config);
 
-  const names = ingest.exports.flatMap((e) => e.spans).map((span) => span.name).sort();
-  assert.deepEqual(names, ["armoriq.agent.run", "armoriq.policy.evaluate"]);
+  const spans = ingest.exports.flatMap((e) => e.spans);
+  assert.deepEqual(spans.map((span) => span.name).sort(), ["armoriq.agent.run", "armoriq.policy.evaluate"]);
+  assert.equal(spans.find((span) => span.name === "armoriq.agent.run").statusCode, 2);
   assert.match(stderr.join(""), /Stop could not replay the turn: model span failed/);
   assert.deepEqual(await readdir(dataDir), ["rollout.jsonl"]);
+});
+
+test("Stop replays each span at its hook's time, and a tool's policy span carries the tool's call id", async (t) => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "armorcodex-obs-"));
+  const ingest = await startIngestServer();
+  t.after(async () => {
+    await ingest.close();
+    await rm(dataDir, { recursive: true, force: true });
+  });
+  const base = Date.now() - 60_000;
+  t.mock.timers.enable({ apis: ["Date"], now: base });
+  const at = (offsetMs) => t.mock.timers.setTime(base + offsetMs);
+
+  const sessionId = randomUUID();
+  const config = obsConfig(dataDir, ingest.endpoint);
+  const allow = { hookSpecificOutput: { permissionDecision: "allow" } };
+  const deny = { hookSpecificOutput: { permissionDecision: "deny" } };
+  const bash = { session_id: sessionId, tool_name: "Bash", tool_input: { command: "ls" }, tool_use_id: "call_bash" };
+  await observeHook("UserPromptSubmit", { session_id: sessionId, prompt: "List" }, null, config);
+  at(1_000);
+  await observeHook("PreToolUse", { session_id: sessionId, tool_name: "webrun", tool_input: {}, tool_use_id: "call_web" }, deny, config);
+  at(2_000);
+  await observeHook("PreToolUse", bash, allow, config);
+  at(7_000);
+  await observeHook("PostToolUse", { ...bash, tool_response: { stdout: "a" } }, null, config);
+  at(8_000);
+  await observeHook("Stop", { session_id: sessionId }, null, config);
+
+  const spans = ingest.exports.flatMap((e) => e.spans);
+  const byCall = (name, callId) =>
+    spans.find((span) => span.name === name && span.attributes["armoriq.tool.call_id"] === callId);
+  const root = spans.find((span) => span.name === "armoriq.agent.run");
+  assert.deepEqual([root.startMs - base, root.endMs - base], [0, 8_000]);
+  assert.equal(byCall("armoriq.policy.evaluate", "call_web").endMs - base, 1_000);
+  assert.equal(byCall("armoriq.policy.evaluate", "call_bash").endMs - base, 2_000);
+  const tool = byCall("armoriq.tool", "call_bash");
+  assert.deepEqual([tool.startMs - base, tool.endMs - base], [2_000, 7_000]);
 });
 
 test("PermissionRequest denial ships as a denied policy call without its free-text reason", async (t) => {
