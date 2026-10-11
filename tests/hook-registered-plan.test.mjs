@@ -40,7 +40,6 @@ async function setup() {
     intentEndpoint: "",
     verifyStepEndpoint: "",
     validitySeconds: 60,
-    refreshThresholdSeconds: 30,
     timeoutMs: 2000,
     maxRetries: 0,
     verifySsl: true,
@@ -66,7 +65,7 @@ const preToolUse = (config, sessionId) =>
     config
   );
 
-test("PreToolUse asks for a token on the registered plan, not a one-tool plan", async () => {
+test("PreToolUse enforces a registered plan without a token and never asks for one", async () => {
   const { config, recorder } = await setup();
   try {
     const plan = normalizeIntentPlan({
@@ -77,12 +76,8 @@ test("PreToolUse asks for a token on the registered plan, not a one-tool plan", 
       path.join(config.dataDir, "pending-plan.s1.json"),
       JSON.stringify({ plan, tokenRaw: "", allowedActions: [], registeredAt: Date.now() })
     );
-    await preToolUse(config, "s1");
-    assert.equal(recorder.bodies.length, 1);
-    assert.deepEqual(
-      recorder.bodies[0].plan.steps.map((step) => step.action),
-      ["Bash", "apply_patch", "update_plan"]
-    );
+    assert.equal(await preToolUse(config, "s1"), null);
+    assert.equal(recorder.bodies.length, 0);
   } finally {
     recorder.server.close();
   }

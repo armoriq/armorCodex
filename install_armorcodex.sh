@@ -262,10 +262,7 @@ fetch_plugin_source() {
 ensure_config_toml() {
   # ARMORCODEX_USE_SDK_INTENT=true tells the MCP register_intent_plan tool to
   # call the ArmorIQ SDK so plans are registered with the backend (signed JWT
-  # + dashboard visibility). The SDK round-trip is bounded by
-  # ARMORCODEX_INTENT_DEADLINE_MS (default 500ms) so Codex's ~1s MCP transport
-  # timeout is never violated; if the deadline is missed the call continues in
-  # the background and the local plan is used as the fallback.
+  # + dashboard visibility).
   # Managed block holds only the ArmorCodex MCP server table (unique to us,
   # safe to replace idempotently on re-run).
   local snippet
@@ -273,7 +270,7 @@ ensure_config_toml() {
 [mcp_servers.armorcodex-policy]
 command = "node"
 args = ["${BOOTSTRAP_PATH}", "mcp"]
-env = { ARMORCODEX_USE_SDK_INTENT = "true", ARMORCODEX_INTENT_DEADLINE_MS = "500" }
+env = { ARMORCODEX_USE_SDK_INTENT = "true" }
 EOF
   )"
   upsert_managed_block "${CONFIG_TOML}" "${snippet}"

@@ -87,7 +87,7 @@ test("the MCP server requests a token for every registration in one process", as
   const { client, register } = await startServer(home);
   try {
     for (const goal of ["first-goal", "second-goal"]) {
-      assert.match(await register(goal), /token issuing in background/, goal);
+      assert.match(await register(goal), /the ArmorIQ token request failed/, goal);
     }
     await waitFor(() => tokenRequests(home).length >= 2);
     const goals = tokenRequests(home).map((request) => (request.body.includes("second-goal") ? "second" : "first"));
@@ -104,7 +104,7 @@ test("the MCP server picks up a login made after it started", async () => {
   try {
     assert.match(await register("before-login"), /no ArmorIQ backend configured/);
     signIn(home, { backend: DEFAULT_BACKEND, apiKey: KEY });
-    assert.match(await register("after-login"), /token issuing in background/);
+    assert.match(await register("after-login"), /the ArmorIQ token request failed/);
   } finally {
     await client.close();
     fs.rmSync(home, { recursive: true, force: true });

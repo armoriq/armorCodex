@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { unlink } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import { loadSettings, withLogin } from "./lib/config.mjs";
@@ -83,6 +84,45 @@ function coercePlanArgs(args) {
 function codexSessionId(extra) {
   const id = extra?._meta?.sessionId;
   return typeof id === "string" && /^[A-Za-z0-9_-]+$/.test(id) ? id : "";
+}
+
+const INTENT_DEADLINE_MS = 30_000;
+const registrations = new Map();
+
+function serializeRegistration(sessionId, task) {
+  const run = (registrations.get(sessionId) ?? Promise.resolve()).catch(() => {}).then(task);
+  registrations.set(sessionId, run);
+  return run;
+}
+
+function withDeadline(promise, ms) {
+  let timer;
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`no token within ${ms / 1000} s`)), ms);
+  });
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+}
+
+async function issueAndStore(config, pendingPath, request) {
+  const startedAt = Date.now();
+  await writeJson(pendingPath, { status: "issuing", startedAt, deadlineAt: startedAt + INTENT_DEADLINE_MS });
+  try {
+    const result = await withDeadline(requestIntent(config, request), INTENT_DEADLINE_MS);
+    if (!result?.tokenRaw) {
+      throw new Error("the backend returned no token");
+    }
+    const plan = result.plan || request.plan;
+    await writeJson(pendingPath, {
+      plan,
+      tokenRaw: result.tokenRaw,
+      allowedActions: Array.from(extractAllowedActions(plan)),
+      expiresAt: result.expiresAt,
+      registeredAt: Date.now()
+    });
+  } catch (err) {
+    await unlink(pendingPath).catch(() => {});
+    throw err;
+  }
 }
 
 async function run() {
@@ -269,71 +309,42 @@ async function run() {
 
       const config = currentConfig();
       const plan = normalizeIntentPlan(parsed.data);
-
-      // Write the local plan to the session's pending plan file IMMEDIATELY so PreToolUse
-      // has something to enforce against. The SDK call (if any) runs entirely
-      // in the background and updates that file with the signed
-      // token when it resolves.
-      //
-      // Why fire-and-forget: Codex's MCP transport closes its stdio pipe
-      // around the ~1s mark. Any await we do here (loadPolicyState, the
-      // SDK round-trip, even cold-start latency) eats into that budget.
-      // Awaiting nothing on the network path keeps the MCP response under
-      // ~100ms regardless of backend conditions.
       const pendingPath = path.join(config.dataDir, `pending-plan.${sessionId}.json`);
-      await writeJson(pendingPath, {
-        plan,
-        tokenRaw: "",
-        allowedActions: Array.from(extractAllowedActions(plan)),
-        expiresAt: undefined,
-        registeredAt: Date.now()
-      });
+      const summary = { steps: plan.steps.length, goal: parsed.data.goal };
 
-      let backendWillIssue = false;
-      if (config.intentEndpoint || (config.useSdkIntent && config.apiKey)) {
-        backendWillIssue = true;
-        // Kick off the SDK call. When it resolves with a signed token, update
-        // the session's pending plan file so PreToolUse picks up the token on subsequent
-        // calls. Errors are logged to stderr and otherwise swallowed.
-        (async () => {
-          try {
-            const policyState = await loadPolicyState(config.policyFile);
-            const result = await requestIntent(config, {
-              prompt: parsed.data.goal,
-              plan,
-              session_id: sessionId,
-              policy_hash: computePolicyHash(policyState.policy),
-              policy: policyState.policy,
-              validitySeconds: config.validitySeconds,
-              metadata: { source: "codex", planning: "codex-registered" }
-            });
-            if (result?.tokenRaw) {
-              await writeJson(pendingPath, {
-                plan: result.plan || plan,
-                tokenRaw: result.tokenRaw,
-                allowedActions: Array.from(extractAllowedActions(result.plan || plan)),
-                expiresAt: result.expiresAt,
-                registeredAt: Date.now()
-              });
-              process.stderr.write(
-                `[armorcodex] backend token issued, tokenLen=${result.tokenRaw.length}\n`
-              );
-            }
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            process.stderr.write(`[armorcodex] intent capture failed: ${msg}\n`);
-          }
-        })();
+      if (!config.intentEndpoint && !(config.useSdkIntent && config.apiKey)) {
+        await writeJson(pendingPath, {
+          plan,
+          tokenRaw: "",
+          allowedActions: Array.from(extractAllowedActions(plan)),
+          registeredAt: Date.now()
+        });
+        return toTextResult(
+          `Intent registered: ${plan.steps.length} steps. Plan stored locally (no ArmorIQ backend configured).`,
+          summary
+        );
       }
 
-      const tokenInfo = backendWillIssue
-        ? `Plan registered; ArmorIQ token issuing in background.`
-        : "Plan stored locally (no ArmorIQ backend configured).";
-
-      return toTextResult(
-        `Intent registered: ${plan.steps.length} steps. ${tokenInfo}`,
-        { steps: plan.steps.length, goal: parsed.data.goal }
-      );
+      try {
+        await serializeRegistration(sessionId, async () => {
+          const policyState = await loadPolicyState(config.policyFile);
+          await issueAndStore(config, pendingPath, {
+            prompt: parsed.data.goal,
+            plan,
+            session_id: sessionId,
+            policy_hash: computePolicyHash(policyState.policy),
+            policy: policyState.policy,
+            validitySeconds: config.validitySeconds,
+            metadata: { source: "codex", planning: "codex-registered" }
+          });
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return toTextResult(
+          `Plan rejected: the ArmorIQ token request failed (${msg}). Nothing was stored; register the plan again.`
+        );
+      }
+      return toTextResult(`Intent registered: ${plan.steps.length} steps. ArmorIQ token issued.`, summary);
     }
   );
 
