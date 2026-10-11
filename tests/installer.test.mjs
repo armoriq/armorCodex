@@ -364,6 +364,81 @@ test("re-running the installer upgrades an SDK left behind in node_modules", asy
   });
 
   assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /installing LOCAL checkout/);
   assert.match(result.stdout, /npm dependencies installed/);
   assert.equal(sdkVersion(), locked);
+});
+
+test("a curl re-run over an install left at an old commit moves it to the requested ref and its SDK", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "armorcodex-curl-rerun-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const binDir = join(root, "bin");
+  const upstream = join(root, "upstream");
+  const upstreamPlugin = join(upstream, "plugins", "armorcodex");
+  const installHome = join(home, ".armoriq", "armorCodex");
+  mkdirSync(home, { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  mkdirSync(upstreamPlugin, { recursive: true });
+  const source = new URL("../plugins/armorcodex/", import.meta.url).pathname;
+  const installer = new URL("../install_armorcodex.sh", import.meta.url).pathname;
+  cpSync(join(source, "scripts"), join(upstreamPlugin, "scripts"), { recursive: true });
+  cpSync(installer, join(upstream, "install_armorcodex.sh"));
+  writeFileSync(join(binDir, "codex"), "#!/bin/sh\necho 'codex-cli 0.162.0'\n");
+  chmodSync(join(binDir, "codex"), 0o755);
+
+  const env = {
+    ...process.env,
+    HOME: home,
+    PATH: `${binDir}${delimiter}${process.env.PATH}`,
+    NO_COLOR: "1",
+    npm_config_cache: process.env.npm_config_cache || join(os.homedir(), ".npm"),
+    npm_config_prefix: join(root, "npm-global"),
+    ARMORCODEX_GIT_URL: upstream,
+    ARMORCODEX_GIT_REF: "main",
+  };
+  const run = (cmd, args, cwd) => {
+    const result = spawnSync(cmd, args, { cwd, encoding: "utf8", env });
+    assert.equal(result.status, 0, `${cmd} ${args.join(" ")}: ${result.stderr}`);
+    return result.stdout.trim();
+  };
+  const git = (args, cwd = upstream) =>
+    run("git", ["-c", "user.name=t", "-c", "user.email=t@example.test", "-c", "commit.gpgsign=false", ...args], cwd);
+  const stale = "0.8.12";
+
+  git(["init", "--quiet", "-b", "main"]);
+  const oldPackage = JSON.parse(readFileSync(join(source, "package.json"), "utf8"));
+  oldPackage.dependencies["@armoriq/sdk-dev"] = stale;
+  writeFileSync(join(upstreamPlugin, "package.json"), JSON.stringify(oldPackage, null, 2));
+  run("npm", ["install", "--package-lock-only", "--no-audit", "--no-fund"], upstreamPlugin);
+  git(["add", "-A"]);
+  git(["commit", "--quiet", "-m", "old"]);
+  const oldCommit = git(["rev-parse", "HEAD"]);
+
+  for (const name of ["package.json", "package-lock.json"]) cpSync(join(source, name), join(upstreamPlugin, name));
+  git(["commit", "--quiet", "-am", "new"]);
+  const newCommit = git(["rev-parse", "HEAD"]);
+
+  mkdirSync(join(home, ".armoriq"), { recursive: true });
+  git(["clone", "--quiet", upstream, installHome], root);
+  git(["reset", "--hard", "--quiet", oldCommit], installHome);
+  saveCodexLogin(home);
+
+  const result = spawnSync("bash", ["-s", "--", "--force-install"], {
+    cwd: root,
+    encoding: "utf8",
+    env,
+    input: readFileSync(installer, "utf8"),
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.doesNotMatch(result.stdout, /installing LOCAL checkout/);
+  assert.equal(git(["rev-parse", "HEAD"], installHome), newCommit);
+  const sdk = JSON.parse(
+    readFileSync(join(installHome, "plugins", "armorcodex", "node_modules", "@armoriq", "sdk-dev", "package.json"), "utf8"),
+  );
+  const locked = JSON.parse(readFileSync(join(source, "package-lock.json"), "utf8"))
+    .packages["node_modules/@armoriq/sdk-dev"].version;
+  assert.notEqual(locked, stale);
+  assert.equal(sdk.version, locked);
 });
