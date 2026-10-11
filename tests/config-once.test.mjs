@@ -67,7 +67,8 @@ async function startServer(home) {
   const register = async (goal) => {
     const result = await client.callTool({
       name: "register_intent_plan",
-      arguments: { goal, steps: [{ action: "Bash" }] }
+      arguments: { goal, steps: [{ action: "Bash" }] },
+      _meta: { sessionId: "config-once" }
     });
     return `${result.content[0].text}\n${stderr}`;
   };

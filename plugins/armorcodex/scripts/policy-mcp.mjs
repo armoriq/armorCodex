@@ -80,6 +80,11 @@ function coercePlanArgs(args) {
   return args;
 }
 
+function codexSessionId(extra) {
+  const id = extra?._meta?.sessionId;
+  return typeof id === "string" && /^[A-Za-z0-9_-]+$/.test(id) ? id : "";
+}
+
 async function run() {
   const settings = loadSettings();
   const currentConfig = () => withLogin(settings);
@@ -247,7 +252,7 @@ async function run() {
         openWorldHint: false
       }
     },
-    async (args) => {
+    async (args, extra) => {
       // Codex sometimes serializes complex tool arguments as JSON strings
       // (e.g. steps: "[{...}]" instead of steps: [{...}]). Tolerate both.
       const coerced = coercePlanArgs(args);
@@ -255,13 +260,19 @@ async function run() {
       if (!parsed.success) {
         return toTextResult(`Plan rejected: ${parsed.error.message}`);
       }
+      const sessionId = codexSessionId(extra);
+      if (!sessionId) {
+        return toTextResult(
+          "Plan rejected: this Codex version sends no session id with MCP calls. Update Codex to 0.162 or later."
+        );
+      }
 
       const config = currentConfig();
       const plan = normalizeIntentPlan(parsed.data);
 
-      // Write the local plan to pending-plan.json IMMEDIATELY so PreToolUse
+      // Write the local plan to the session's pending plan file IMMEDIATELY so PreToolUse
       // has something to enforce against. The SDK call (if any) runs entirely
-      // in the background and updates pending-plan.json with the signed
+      // in the background and updates that file with the signed
       // token when it resolves.
       //
       // Why fire-and-forget: Codex's MCP transport closes its stdio pipe
@@ -269,7 +280,7 @@ async function run() {
       // SDK round-trip, even cold-start latency) eats into that budget.
       // Awaiting nothing on the network path keeps the MCP response under
       // ~100ms regardless of backend conditions.
-      const pendingPath = path.join(config.dataDir, "pending-plan.json");
+      const pendingPath = path.join(config.dataDir, `pending-plan.${sessionId}.json`);
       await writeJson(pendingPath, {
         plan,
         tokenRaw: "",
@@ -282,7 +293,7 @@ async function run() {
       if (config.intentEndpoint || (config.useSdkIntent && config.apiKey)) {
         backendWillIssue = true;
         // Kick off the SDK call. When it resolves with a signed token, update
-        // pending-plan.json so PreToolUse picks up the token on subsequent
+        // the session's pending plan file so PreToolUse picks up the token on subsequent
         // calls. Errors are logged to stderr and otherwise swallowed.
         (async () => {
           try {
@@ -290,7 +301,7 @@ async function run() {
             const result = await requestIntent(config, {
               prompt: parsed.data.goal,
               plan,
-              session_id: "mcp",
+              session_id: sessionId,
               policy_hash: computePolicyHash(policyState.policy),
               policy: policyState.policy,
               validitySeconds: config.validitySeconds,
