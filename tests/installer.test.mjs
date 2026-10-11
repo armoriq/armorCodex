@@ -4,6 +4,7 @@ import {
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -13,9 +14,9 @@ import { spawn, spawnSync } from "node:child_process";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import test from "node:test";
 
-function stubTools(binDir) {
+function stubTools(binDir, codexVersion = "codex-cli 0.162.0") {
   for (const [name, body] of [
-    ["codex", "#!/bin/sh\necho 'codex-cli 0.142.0'\n"],
+    ["codex", `#!/bin/sh\necho '${codexVersion}'\n`],
     ["npm", "#!/bin/sh\nexit 0\n"],
   ]) {
     writeFileSync(join(binDir, name), body);
@@ -276,4 +277,40 @@ test("only an armorcodex login the plugin loads skips the installer's login", (t
   const codex = runConnect(homes.codex);
   assert.equal(codex.status, 0, codex.stdout + codex.stderr);
   assert.match(codex.stdout, /login for ArmorCodex found/);
+});
+
+for (const [version, message] of [
+  ["codex-cli 0.161.0", /Codex 0\.162 or newer is required \(found codex-cli 0\.161\.0\)/],
+  ["codex-cli dev-build", /could not read the Codex version \(got: codex-cli dev-build\)/],
+]) {
+  test(`the installer stops before changing anything when codex --version prints ${version}`, async (t) => {
+    const root = mkdtempSync(join(tmpdir(), "armorcodex-codex-min-"));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const home = join(root, "home");
+    const binDir = join(root, "bin");
+    mkdirSync(home, { recursive: true });
+    mkdirSync(binDir, { recursive: true });
+    stubTools(binDir, version);
+
+    const result = await runInstaller(root, home, binDir);
+
+    assert.notEqual(result.status, 0, result.stdout);
+    assert.match(result.stderr, message);
+    assert.doesNotMatch(result.stdout, /prerequisites OK/);
+    assert.deepEqual(readdirSync(home), []);
+  });
+}
+
+test("the installer accepts a Codex major version above 0", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "armorcodex-codex-min-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const binDir = join(root, "bin");
+  mkdirSync(home, { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  stubTools(binDir, "codex-cli 1.0.0");
+
+  const result = await runInstaller(root, home, binDir);
+
+  assert.match(result.stdout, /prerequisites OK \(codex-cli 1\.0\.0/);
 });
