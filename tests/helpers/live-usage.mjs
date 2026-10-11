@@ -20,7 +20,7 @@ export function backend() {
   const singles = [];
   let release;
   const released = new Promise((resolve) => (release = resolve));
-  const b = { batches, singles, release, generation: GENERATION, onBatch: null };
+  const b = { batches, singles, release, generation: GENERATION, onBatch: null, latency: [], onLatency: null };
   Object.assign(b, { requestId: null, reports: [], runs: new Map(), acked: new Map() });
   const stale = (run) => run?.mode === "history" && run.requestId !== b.requestId;
   const server = createServer((req, res) => {
@@ -65,6 +65,11 @@ export function backend() {
           status: "applied",
         }));
         return reply(200, { results });
+      }
+      if (req.url === "/dashboard/token-usage/latency") {
+        if (b.onLatency?.(res, body)) return;
+        b.latency.push(body);
+        return reply(201, { ok: true });
       }
       if (req.url === "/dashboard/token-usage") {
         singles.push(body);

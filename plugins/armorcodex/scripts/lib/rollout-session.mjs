@@ -62,10 +62,14 @@ function firstLine(file) {
   }
 }
 
+export function rolloutMeta(file) {
+  const line = JSON.parse(firstLine(file));
+  return line?.type === "session_meta" ? line.payload : null;
+}
+
 function indexEntry(file) {
   try {
-    const line = JSON.parse(firstLine(file));
-    const meta = line?.type === "session_meta" ? line.payload : null;
+    const meta = rolloutMeta(file);
     const id =
       typeof meta?.id === "string" && meta.id ? meta.id : rolloutOf(file).id;
     const sessionId =
