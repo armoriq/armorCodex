@@ -125,6 +125,19 @@ async function issueAndStore(config, pendingPath, request) {
   }
 }
 
+async function shipQueuedAudit(config) {
+  if (!config.apiKey) return;
+  const wal = createAuditWal({ dataDir: config.dataDir });
+  const iapService = createIapService(config);
+  for (;;) {
+    const { rows, endOffset } = await wal.readBatch(100);
+    if (rows.length === 0) return;
+    await iapService.shipAuditBatch(rows);
+    await wal.advanceOffset(endOffset);
+    process.stderr.write(`[armorcodex-policy] flushed ${rows.length} audit rows -> offset=${endOffset}\n`);
+  }
+}
+
 async function run() {
   const settings = loadSettings();
   const currentConfig = () => withLogin(settings);
@@ -348,61 +361,28 @@ async function run() {
     }
   );
 
-  // Background WAL flusher — drains queued audit rows in batches and ships
-  // to /iap/audit. Embedded here because the MCP server is already a
-  // long-lived stdio process; no need for a separate daemon binary the way
-  // armorClaude needs one (Claude Code spawns a fresh node per hook).
-  //
-  // Tuning mirrors armorClaude#44 daemon for cross-product parity:
-  //   - 5s interval  (AUDIT_FLUSH_INTERVAL_MS)
-  //   - 100-row batch (AUDIT_FLUSH_THRESHOLD)
-  // Errors are logged + retried on the next tick (offset isn't advanced
-  // on failure).
-  const flusher = setInterval(async () => {
-    try {
-      const config = currentConfig();
-      if (!config.apiKey) return; // no backend configured; WAL just accumulates locally
-      const wal = createAuditWal({ dataDir: config.dataDir });
-      const { rows, endOffset } = await wal.readBatch(100);
-      if (rows.length === 0) return;
-      const iapService = createIapService(config);
-      await iapService.shipAuditBatch(rows);
-      await wal.advanceOffset(endOffset);
-      process.stderr.write(
-        `[armorcodex-policy] flushed ${rows.length} audit rows -> offset=${endOffset}\n`
-      );
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      process.stderr.write(`[armorcodex-policy] flusher: ${msg}\n`);
-    }
-  }, 5000);
+  let flushing = Promise.resolve();
+  const flushAudit = () => {
+    flushing = flushing.then(() => shipQueuedAudit(currentConfig())).catch((err) => {
+      process.stderr.write(`[armorcodex-policy] flusher: ${err instanceof Error ? err.message : err}\n`);
+    });
+    return flushing;
+  };
+  const flusher = setInterval(flushAudit, 5000);
   flusher.unref?.();
 
-  async function flushAndExit(signal) {
-    clearInterval(flusher);
-    try {
-      const config = currentConfig();
-      if (config.apiKey) {
-        const wal = createAuditWal({ dataDir: config.dataDir });
-        const { rows, endOffset } = await wal.readBatch(500);
-        if (rows.length > 0) {
-          const iapService = createIapService(config);
-          await iapService.shipAuditBatch(rows);
-          await wal.advanceOffset(endOffset);
-          process.stderr.write(
-            `[armorcodex-policy] ${signal}: flushed ${rows.length} remaining audit rows\n`
-          );
-        }
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      process.stderr.write(`[armorcodex-policy] ${signal} flush error: ${msg}\n`);
-    }
-    process.exit(0);
-  }
-
-  process.on("SIGTERM", () => flushAndExit("SIGTERM"));
-  process.on("SIGINT", () => flushAndExit("SIGINT"));
+  let stopping;
+  const shutdown = () => {
+    stopping ??= (async () => {
+      clearInterval(flusher);
+      await flushAudit();
+      process.exit(0);
+    })();
+  };
+  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", shutdown);
+  process.stdin.on("end", shutdown);
+  process.stdin.on("close", shutdown);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
