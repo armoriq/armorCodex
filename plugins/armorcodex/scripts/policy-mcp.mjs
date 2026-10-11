@@ -9,6 +9,7 @@ import { extractAllowedActions, requestIntent } from "./lib/intent.mjs";
 import { INTENT_PLAN_ZOD, PLAN_STEP_SCHEMA, normalizeIntentPlan } from "./lib/intent-schema.mjs";
 import { applyPolicyCommand, computePolicyHash, loadPolicyState, parsePolicyTextCommand } from "./lib/policy.mjs";
 import { handleArmorPolicyCommand } from "./lib/armor-policy-commands.mjs";
+import { createAuditFlusher } from "./lib/audit-flusher.mjs";
 import { createAuditWal } from "./lib/audit-wal.mjs";
 import { createIapService } from "./lib/iap-service.mjs";
 
@@ -361,23 +362,17 @@ async function run() {
     }
   );
 
-  let flushing = Promise.resolve();
-  const flushAudit = () => {
-    flushing = flushing.then(() => shipQueuedAudit(currentConfig())).catch((err) => {
+  const flusher = createAuditFlusher({
+    ship: () => shipQueuedAudit(currentConfig()),
+    onError: (err) => {
       process.stderr.write(`[armorcodex-policy] flusher: ${err instanceof Error ? err.message : err}\n`);
-    });
-    return flushing;
-  };
-  const flusher = setInterval(flushAudit, 5000);
-  flusher.unref?.();
+    },
+    intervalMs: 5000
+  });
 
   let stopping;
   const shutdown = () => {
-    stopping ??= (async () => {
-      clearInterval(flusher);
-      await flushAudit();
-      process.exit(0);
-    })();
+    stopping ??= flusher.stop().then(() => process.exit(0));
   };
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
