@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { CLIENT_HEADERS } from "./client-identity.mjs";
 
 export function isPlainObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -427,7 +428,7 @@ export async function postJson(url, payload, headers, timeoutMs) {
 }
 
 export function buildAuthHeaders(config) {
-  const headers = { "Content-Type": "application/json" };
+  const headers = { "Content-Type": "application/json", ...CLIENT_HEADERS };
   if (config.apiKey) {
     headers.Authorization = `Bearer ${config.apiKey}`;
     headers["X-API-Key"] = config.apiKey;

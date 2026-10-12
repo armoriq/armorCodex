@@ -2,6 +2,14 @@
 
 All notable changes to ArmorCodex are recorded here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.3.6] - Unreleased
+
+### Added
+- Every request to the ArmorIQ backend carries `X-ArmorIQ-Client: armorcodex-dev/<version>` (`armorcodex/<version>` on `@armoriq/sdk`), so the platform can tell which ArmorCodex version a key runs and offer updates. The SDK client and telemetry runtime get it through the SDK's `client` option, and the plugin's own requests (audit batches, policy, key owner, history sync) through `clientHeaders`.
+
+### Changed
+- Depends on `@armoriq/sdk-dev` ^0.8.16.
+
 ## [0.3.5] - 2026-10-12
 
 ### Added

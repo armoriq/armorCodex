@@ -9,6 +9,7 @@ import {
   readString,
   sha256Hex
 } from "./common.mjs";
+import { CLIENT } from "./client-identity.mjs";
 import { requireEndpoint } from "./config.mjs";
 
 const { ArmorIQClient } = armoriqSdk;
@@ -42,7 +43,8 @@ export function getSdkClient(config) {
     backendEndpoint: config.backendEndpoint,
     timeout: config.timeoutMs,
     maxRetries: config.maxRetries,
-    verifySsl: config.verifySsl
+    verifySsl: config.verifySsl,
+    client: CLIENT
   });
   sdkClientCache.set(key, client);
   return client;

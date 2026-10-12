@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { access, appendFile, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { access, appendFile, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -87,9 +87,11 @@ function decodeSpans(body) {
 
 async function startIngestServer() {
   const exports = [];
+  const clients = [];
   const server = createServer(async (request, response) => {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
+    clients.push(`${request.url} ${request.headers["x-armoriq-client"]}`);
     if (request.url === "/observability/policy/lease") {
       response.writeHead(200, { "content-type": "application/json" });
       response.end(
@@ -116,6 +118,7 @@ async function startIngestServer() {
   return {
     endpoint: `http://127.0.0.1:${address.port}`,
     exports,
+    clients,
     close: async () => {
       server.closeAllConnections();
       server.close();
@@ -492,4 +495,26 @@ test("session ids cannot escape the observability data directory", async (t) => 
   const names = await readdir(dataDir);
   assert.equal(names.length, 1);
   assert.match(names[0], /^obs-turn\.[a-f0-9]{64}\.ndjson$/);
+});
+
+test("the lease and the trace export carry ArmorCodex's X-ArmorIQ-Client header", async (t) => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "armorcodex-obs-client-"));
+  const rolloutPath = path.join(dataDir, "rollout.jsonl");
+  const ingest = await startIngestServer();
+  t.after(async () => {
+    await ingest.close();
+    await rm(dataDir, { recursive: true, force: true });
+  });
+  const sessionId = randomUUID();
+  const config = obsConfig(dataDir, ingest.endpoint);
+  await appendFile(rolloutPath, `${JSON.stringify({ type: "event_msg", payload: { type: "task_started" } })}\n`, "utf8");
+
+  await observeHook("UserPromptSubmit", { session_id: sessionId, prompt: "Hello" }, null, config);
+  await observeHook("Stop", { session_id: sessionId, transcript_path: rolloutPath }, null, config);
+
+  const version = JSON.parse(await readFile(new URL("../plugins/armorcodex/package.json", import.meta.url), "utf8")).version;
+  assert.deepEqual([...new Set(ingest.clients)].sort(), [
+    `/observability/policy/lease armorcodex-dev/${version}`,
+    `/v1/traces armorcodex-dev/${version}`,
+  ]);
 });
