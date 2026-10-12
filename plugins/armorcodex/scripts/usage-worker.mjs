@@ -5,7 +5,8 @@ import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { pendingHistorySync } from "./lib/history-request.mjs";
 import { readJson, writeJson } from "./lib/fs-store.mjs";
-import { allSessions, sessionFingerprint, tryFileLock } from "./lib/live-usage.mjs";
+import { allSessions, codexHome, newBatchId, sessionFingerprint, tryFileLock } from "./lib/live-usage.mjs";
+import { changedTitles, titleIndexStamp } from "./lib/session-titles.mjs";
 import { sessionLatencyPayloads } from "./lib/turn-latency.mjs";
 import { prepareUsage } from "./lib/usage-context.mjs";
 import { anySessionAnswers, liveSessions } from "./lib/usage-sessions.mjs";
@@ -231,6 +232,22 @@ async function syncLatency(job, sessions) {
   }
 }
 
+const TITLES_PER_BATCH = 100;
+
+async function queueTitles(job, sessions, generation) {
+  const home = codexHome();
+  const stamp = titleIndexStamp(home);
+  if (!stamp || job.state.titleIndex === stamp) return;
+  const sent = (job.state.titles ??= {});
+  const titles = changedTitles(home, sessions.map((s) => s.sessionId), sent);
+  for (let i = 0; i < titles.length; i += TITLES_PER_BATCH) {
+    const batch = { generation, batchId: newBatchId(), deviceName: job.deviceName, snapshots: [] };
+    await enqueue(job.queueDir, [{ batch: { ...batch, sessions: titles.slice(i, i + TITLES_PER_BATCH) } }]);
+  }
+  for (const title of titles) sent[title.sessionId] = title.titleUpdatedAt;
+  job.state.titleIndex = stamp;
+}
+
 async function pass(job, generation) {
   const save = () => writeJson(job.statePath, job.state);
   const sessions = await allSessions(job.dir);
@@ -239,6 +256,7 @@ async function pass(job, generation) {
     const todo = sessions.filter((s) => !run.scanned.includes(s.sessionId));
     scans.set(run, await scan(job, run, todo, generation, save));
   }
+  await queueTitles(job, sessions, generation);
   const outcome = await drainRuns(job, scans.get(job.state.history)?.refused);
   if (outcome === "fenced") return outcome;
   for (const [run, scanned] of scans)

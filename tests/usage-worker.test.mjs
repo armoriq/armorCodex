@@ -301,3 +301,38 @@ test("a hung latency endpoint stops the latency sync, after the usage runs are s
     assert.ok(attempts[0].includes("complete"), `latency started before the run settled: ${attempts[0]}`);
   });
 });
+
+const titleRow = (id, name, updatedAt) => ({ id, thread_name: name, updated_at: updatedAt });
+const writeIndex = (h, rows) =>
+  appendFileSync(path.join(h, ".codex", "session_index.jsonl"), rows.map(line).join(""));
+const titlesSent = (b) => b.batches.flatMap((x) => x.sessions ?? []);
+
+test("the worker sends each session's latest Codex title once, and again after a rename", async () => {
+  await withBackend(at(1), async (b, h) => {
+    const s = session(h, at(2), [count(at(3), 10)]);
+    writeIndex(h, [titleRow(s.id, "first name", at(4)), titleRow(randomUUID(), "other", at(4)), titleRow(s.id, "fix the flaky test", at(5))]);
+    await runWorker(h, b);
+    assert.deepEqual(titlesSent(b), [
+      { sessionId: s.id, title: "fix the flaky test", titleSource: "codex-session-index", titleUpdatedAt: at(5) },
+    ]);
+
+    await runWorker(h, b);
+    assert.equal(titlesSent(b).length, 1, "an unchanged title is not sent again");
+
+    writeIndex(h, [titleRow(s.id, "renamed", at(6))]);
+    await runWorker(h, b);
+    assert.deepEqual(titlesSent(b).map((t) => [t.title, t.titleUpdatedAt]), [["fix the flaky test", at(5)], ["renamed", at(6)]]);
+  });
+});
+
+test("a Codex title over 200 characters is cut to 199 and an ellipsis, without splitting a character", async () => {
+  await withBackend(at(1), async (b, h) => {
+    const long = session(h, at(2), [count(at(3), 10)]);
+    const emoji = session(h, at(2), [count(at(3), 10)]);
+    writeIndex(h, [titleRow(long.id, "x".repeat(250), at(4)), titleRow(emoji.id, `${"y".repeat(198)}😀tail`, at(4))]);
+    await runWorker(h, b);
+    const byId = Object.fromEntries(titlesSent(b).map((t) => [t.sessionId, t.title]));
+    assert.equal(byId[long.id], `${"x".repeat(199)}…`);
+    assert.equal(byId[emoji.id], `${"y".repeat(198)}…`);
+  });
+});

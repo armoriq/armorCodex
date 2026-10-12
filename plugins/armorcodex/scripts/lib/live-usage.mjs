@@ -15,10 +15,9 @@ const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 const LOCK_WAIT_MS = 5_000;
 
 
-export const codexRoots = () => {
-  const home = process.env.CODEX_HOME?.trim() || path.join(homedir(), ".codex");
-  return [path.join(home, "sessions"), path.join(home, "archived_sessions")];
-};
+export const codexHome = () => process.env.CODEX_HOME?.trim() || path.join(homedir(), ".codex");
+
+export const codexRoots = () => [path.join(codexHome(), "sessions"), path.join(codexHome(), "archived_sessions")];
 
 export function loginCutoff(config) {
   const history = config.loginHistory;
