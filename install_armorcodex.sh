@@ -64,12 +64,15 @@ fi
 # Plugin sources live under plugins/<name>/ per the Codex marketplace spec.
 # Older checkouts kept everything at repo root, so accept both layouts.
 PLUGIN_SUBDIR="plugins/armorcodex"
+LOCAL_CHECKOUT=0
 if [[ -n "${SCRIPT_DIR}" && -f "${SCRIPT_DIR}/${PLUGIN_SUBDIR}/scripts/bootstrap.mjs" ]]; then
   PLUGIN_ROOT="${SCRIPT_DIR}"
+  LOCAL_CHECKOUT=1
 elif [[ -n "${SCRIPT_DIR}" && -f "${SCRIPT_DIR}/scripts/bootstrap.mjs" ]]; then
   # Legacy flat-layout fallback so existing checkouts keep working.
   PLUGIN_ROOT="${SCRIPT_DIR}"
   PLUGIN_SUBDIR="."
+  LOCAL_CHECKOUT=1
 else
   PLUGIN_ROOT="${INSTALL_HOME}"
 fi
@@ -317,8 +320,9 @@ fetch_plugin_source() {
   # Local-first: when this script is run from inside a checkout (bootstrap.mjs
   # already present next to it), install THAT local code and never clone. This
   # is how local testing wires Codex at your working branch. curl-pipe installs
-  # (no local checkout) still clone from GitHub below.
-  if [[ -f "${BOOTSTRAP_PATH}" ]]; then
+  # have no script file, so an existing INSTALL_HOME is refreshed below rather
+  # than mistaken for a local checkout.
+  if [[ "${LOCAL_CHECKOUT}" -eq 1 ]]; then
     local branch
     branch="$(git -C "${PLUGIN_ROOT}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo 'no-git')"
     info "installing LOCAL checkout at ${PLUGIN_ROOT} (${branch})"
@@ -330,7 +334,7 @@ fetch_plugin_source() {
   if [[ -d "${INSTALL_HOME}/.git" ]]; then
     info "refreshing ${INSTALL_HOME} (git pull)"
     git -C "${INSTALL_HOME}" fetch --quiet origin "${PLUGIN_GIT_REF}" >/dev/null
-    git -C "${INSTALL_HOME}" reset --hard --quiet "origin/${PLUGIN_GIT_REF}" >/dev/null
+    git -C "${INSTALL_HOME}" reset --hard --quiet FETCH_HEAD >/dev/null
     ok "updated to ${PLUGIN_GIT_REF}"
   else
     info "cloning ${PLUGIN_GIT_URL} into ${INSTALL_HOME}"
@@ -502,13 +506,9 @@ remove_codex_hooks() {
 
 install_npm_deps() {
   pushd "${PLUGIN_PATH}" >/dev/null
-  if [[ -d node_modules/@armoriq/sdk-dev && -d node_modules/zod && -d node_modules/@modelcontextprotocol/sdk ]]; then
-    info "npm dependencies already present"
-  else
-    info "installing npm dependencies (--omit=dev)"
-    npm install --omit=dev --silent --no-audit --no-fund >/dev/null
-    ok "npm dependencies installed"
-  fi
+  info "installing npm dependencies (--omit=dev)"
+  npm install --omit=dev --silent --no-audit --no-fund >/dev/null
+  ok "npm dependencies installed"
   popd >/dev/null
 }
 
