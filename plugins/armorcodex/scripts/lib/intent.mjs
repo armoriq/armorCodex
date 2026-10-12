@@ -540,7 +540,9 @@ export async function requestIntent(config, payload) {
     ...payload.metadata
   };
   const capture = client.capturePlan(config.llmId, payload.prompt || "", plan, metadata);
-  const token = await client.getIntentToken(capture, payload.policy, payload.validitySeconds);
+  const token = await client.getIntentToken(capture, payload.policy, payload.validitySeconds, {
+    contextId: payload.session_id
+  });
   const tokenRaw = JSON.stringify(token);
   const parsedFromToken = extractPlanFromIntentToken(tokenRaw);
   return {
@@ -548,7 +550,8 @@ export async function requestIntent(config, payload) {
     source: "armoriq-sdk",
     tokenRaw,
     plan: parsedFromToken?.plan || plan,
-    expiresAt: Number.isFinite(token.expiresAt) ? token.expiresAt : parsedFromToken?.expiresAt
+    expiresAt: Number.isFinite(token.expiresAt) ? token.expiresAt : parsedFromToken?.expiresAt,
+    planCheck: token.planCheck
   };
 }
 

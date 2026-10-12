@@ -64,11 +64,11 @@ async function startServer(home) {
   let stderr = "";
   transport.stderr.on("data", (chunk) => (stderr += chunk));
   await client.connect(transport).catch((error) => assert.fail(`${error.message}\n${stderr}`));
-  const register = async (goal) => {
+  const register = async (goal, sessionId = "config-once") => {
     const result = await client.callTool({
       name: "register_intent_plan",
       arguments: { goal, steps: [{ action: "Bash" }] },
-      _meta: { sessionId: "config-once" }
+      _meta: { sessionId }
     });
     return `${result.content[0].text}\n${stderr}`;
   };
@@ -105,6 +105,20 @@ test("the MCP server picks up a login made after it started", async () => {
     assert.match(await register("before-login"), /no ArmorIQ backend configured/);
     signIn(home, { backend: DEFAULT_BACKEND, apiKey: KEY });
     assert.match(await register("after-login"), /the ArmorIQ token request failed/);
+  } finally {
+    await client.close();
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("the token request carries the Codex session id as the plan's context id", async () => {
+  const home = signIn(tempHome(), { backend: DEFAULT_BACKEND, apiKey: KEY });
+  const { client, register } = await startServer(home);
+  try {
+    const sessionId = "019a2c1e-5b7d-7c11-9e3f-0a1b2c3d4e5f";
+    assert.match(await register("context-goal", sessionId), /the ArmorIQ token request failed/);
+    await waitFor(() => tokenRequests(home).length >= 1);
+    assert.equal(JSON.parse(tokenRequests(home)[0].body).context_id, sessionId);
   } finally {
     await client.close();
     fs.rmSync(home, { recursive: true, force: true });

@@ -21,7 +21,7 @@ import {
 } from "./policy.mjs";
 import { handleArmorPolicyCommand, isArmorPolicyCommand } from "./armor-policy-commands.mjs";
 import { fitAuditRow } from "./audit-wal.mjs";
-import { readJson, writePrivateFile } from "./fs-store.mjs";
+import { appendNdjsonLine, readJson, writePrivateFile } from "./fs-store.mjs";
 import { readFile, unlink } from "node:fs/promises";
 import path from "node:path";
 import {
@@ -119,6 +119,29 @@ async function denyAndAudit(input, config, reason) {
 
 function denyOrAllow(input, config, reason) {
   return shouldDeny(config) ? denyAndAudit(input, config, reason) : null;
+}
+
+function planCheckDenial(planCheck, toolName) {
+  const name = normalizeToolName(toolName);
+  const denied = (planCheck?.deniedTools ?? []).find((tool) => normalizeToolName(tool) === name);
+  if (!denied) return null;
+  const reason = (planCheck.deniedReasons ?? []).find((line) => line.startsWith(`${denied}: `));
+  return `ArmorIQ plan check denied ${toolName}${reason ? ` (${reason.slice(denied.length + 2)})` : ""}`;
+}
+
+async function enforcePlanCheck(input, config, planCheck) {
+  const reason = planCheckDenial(planCheck, input.tool_name);
+  if (!reason) return null;
+  if (shouldDeny(config)) return denyAndAudit(input, config, reason);
+  process.stderr.write(`[armorcodex] monitor mode: ${reason}; allowing it\n`);
+  await appendNdjsonLine(path.join(config.dataDir, "monitor.jsonl"), {
+    at: Date.now(),
+    session_id: input.session_id,
+    tool: input.tool_name,
+    tool_use_id: input.tool_use_id,
+    reason
+  }).catch((err) => process.stderr.write(`[armorcodex] monitor log not written: ${err?.message ?? err}\n`));
+  return null;
 }
 
 function debugLog(config, message) {
@@ -324,6 +347,7 @@ export async function handlePreToolUse(input, config) {
       plan: pending.plan,
       allowedActions: Array.isArray(pending.allowedActions) ? pending.allowedActions : [],
       expiresAt: pending.expiresAt,
+      planCheck: pending.planCheck,
       // Reset per-token execution tracking when a new plan replaces the old.
       intentExecution: undefined
     });
@@ -365,6 +389,8 @@ export async function handlePreToolUse(input, config) {
   // --- Intent token verification ---
   // Reuse the runtimeState loaded above instead of re-reading from disk.
   const session = getSession(runtimeState, sessionId) || {};
+  const planCheckDeny = await enforcePlanCheck(input, config, session.planCheck);
+  if (planCheckDeny) return planCheckDeny;
   const intentTokenRaw = readIntentTokenRaw(input, session);
   let localPlan = session.plan;
   let localExpiresAt = session.expiresAt;

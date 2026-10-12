@@ -216,3 +216,88 @@ test("a history request completes when a session is a fork whose original is gon
     assert.match(stderr, /fork_original_missing/);
   });
 });
+
+const turnDone = (startIso, durationMs, turnId = randomUUID()) => ({
+  timestamp: new Date(Date.parse(startIso) + durationMs).toISOString(),
+  type: "event_msg",
+  payload: {
+    type: "task_complete",
+    turn_id: turnId,
+    duration_ms: durationMs,
+    started_at: Date.parse(startIso) / 1000,
+    completed_at: (Date.parse(startIso) + durationMs) / 1000,
+  },
+});
+const latencyOf = (b, sessionId) => b.latency.filter((p) => p.sessionId === sessionId);
+const day = (iso) => iso.slice(0, 10);
+
+test("the worker sends each session-day's turn latency from Codex's task_complete records, replacing the day after another turn", async () => {
+  await withBackend(at(1), async (b, h) => {
+    const s = session(h, at(2), [turnDone(at(3), 1_200), turnDone(at(5), 5_000), turnDone(at(8), 30_000)]);
+    await runWorker(h, b);
+    assert.deepEqual(
+      latencyOf(b, s.id).map(({ product, usageDate, sampleCount, totalMs, maxMs, buckets }) => ({
+        product, usageDate, sampleCount, totalMs, maxMs, samples: buckets.reduce((a, n) => a + n, 0),
+      })),
+      [{ product: "armorcodex", usageDate: day(at(3)), sampleCount: 3, totalMs: 36_200, maxMs: 30_000, samples: 3 }],
+    );
+    assert.ok(latencyOf(b, s.id)[0].deviceId);
+
+    await runWorker(h, b);
+    assert.equal(latencyOf(b, s.id).length, 1, "an unchanged session is not sent again");
+
+    appendFileSync(s.file, line(turnDone(at(20), 800)));
+    await runWorker(h, b);
+    assert.deepEqual(latencyOf(b, s.id).map((p) => [p.sampleCount, p.totalMs]), [[3, 36_200], [4, 37_000]]);
+  });
+});
+
+test("turn latency leaves out turns from before the login and turns a fork copied from its original", async () => {
+  await withBackend(at(10), async (b, h) => {
+    const original = session(h, at(1), [turnDone(at(2), 4_000), turnDone(at(12), 2_000)]);
+    const forkId = randomUUID();
+    const fork = rolloutPath(h, at(20), forkId);
+    writeRollout(fork, [
+      meta(at(20), { id: forkId, session_id: forkId, forked_from_id: original.id, cwd: "/work/repo" }),
+      model(at(20), "gpt-5.5"),
+      turnDone(at(12), 2_000),
+      turnDone(at(25), 9_000),
+    ]);
+    await runWorker(h, b);
+    assert.deepEqual(latencyOf(b, original.id).map((p) => [p.sampleCount, p.totalMs]), [[1, 2_000]]);
+    assert.deepEqual(latencyOf(b, forkId).map((p) => [p.sampleCount, p.totalMs]), [[1, 9_000]]);
+  });
+});
+
+test("a turn latency post the backend refuses is sent again on the next run", async () => {
+  await withBackend(at(1), async (b, h) => {
+    const s = session(h, at(2), [turnDone(at(3), 1_500)]);
+    b.onLatency = (res) => {
+      res.writeHead(503, { "content-type": "application/json" });
+      res.end(JSON.stringify({ message: "busy" }));
+      return true;
+    };
+    const first = await runWorker(h, b);
+    assert.match(first.stderr, /could not send the turn latency/);
+    assert.equal(latencyOf(b, s.id).length, 0);
+    b.onLatency = null;
+    await runWorker(h, b);
+    assert.deepEqual(latencyOf(b, s.id).map((p) => p.sampleCount), [1]);
+  });
+});
+
+test("a hung latency endpoint stops the latency sync, after the usage runs are settled", async () => {
+  await withBackend(at(1), async (b, h) => {
+    const sessions = [1, 2, 3].map((n) => session(h, at(2), [count(at(3), 10 * n), turnDone(at(3), 1_000 * n)]));
+    const attempts = [];
+    b.onLatency = () => {
+      attempts.push(reportsOf(b, "discovery").map((r) => r.phase));
+      return true;
+    };
+    const result = await run(worker, env(h, b.url, { ARMORCODEX_TIMEOUT_MS: "300" }));
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(sessions.filter((s) => sessionBatches(b, s.id).length).length, 3);
+    assert.ok(attempts.length > 0 && attempts.length <= 2, `${attempts.length} latency attempts`);
+    assert.ok(attempts[0].includes("complete"), `latency started before the run settled: ${attempts[0]}`);
+  });
+});
