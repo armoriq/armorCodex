@@ -336,3 +336,25 @@ test("a Codex title over 200 characters is cut to 199 and an ellipsis, without s
     assert.equal(byId[emoji.id], `${"y".repeat(198)}…`);
   });
 });
+
+test("a title is sent only for a session whose usage this login sends, never for one from before the login", async () => {
+  await withBackend(at(30), async (b, h) => {
+    const before = session(h, at(5), [count(at(10), 10)]);
+    const after = session(h, at(5), [count(at(40), 10)]);
+    writeIndex(h, [titleRow(before.id, "pre-login secret", at(12)), titleRow(after.id, "my session", at(41))]);
+    await runWorker(h, b);
+    await runWorker(h, b);
+    assert.deepEqual(titlesSent(b).map((t) => t.title), ["my session"]);
+  });
+});
+
+test("a title row whose updated_at is not a full ISO time is skipped without losing the others", async () => {
+  await withBackend(at(1), async (b, h) => {
+    const bad = session(h, at(2), [count(at(3), 10)]);
+    const good = session(h, at(2), [count(at(3), 10)]);
+    writeIndex(h, [titleRow(bad.id, "bad time", "2026-10-12 10:00:00Z"), titleRow(good.id, "good time", at(4))]);
+    await runWorker(h, b);
+    await runWorker(h, b);
+    assert.deepEqual(titlesSent(b).map((t) => t.title), ["good time"]);
+  });
+});

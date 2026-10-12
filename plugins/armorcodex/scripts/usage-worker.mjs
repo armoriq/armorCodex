@@ -6,7 +6,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { pendingHistorySync } from "./lib/history-request.mjs";
 import { readJson, writeJson } from "./lib/fs-store.mjs";
 import { allSessions, codexHome, newBatchId, sessionFingerprint, tryFileLock } from "./lib/live-usage.mjs";
-import { changedTitles, titleIndexStamp } from "./lib/session-titles.mjs";
+import { codexTitles } from "./lib/session-titles.mjs";
 import { sessionLatencyPayloads } from "./lib/turn-latency.mjs";
 import { prepareUsage } from "./lib/usage-context.mjs";
 import { anySessionAnswers, liveSessions } from "./lib/usage-sessions.mjs";
@@ -234,18 +234,27 @@ async function syncLatency(job, sessions) {
 
 const TITLES_PER_BATCH = 100;
 
+async function sendsUsageFor(job, pending, sessionId) {
+  if (pending.has(sessionId)) return true;
+  const state = await readJson(sessionFile(job.dir, sessionId), {});
+  return Boolean(state.admitted) || Object.keys(state.acknowledged ?? {}).length > 0;
+}
+
 async function queueTitles(job, sessions, generation) {
-  const home = codexHome();
-  const stamp = titleIndexStamp(home);
-  if (!stamp || job.state.titleIndex === stamp) return;
+  const titles = codexTitles(codexHome());
   const sent = (job.state.titles ??= {});
-  const titles = changedTitles(home, sessions.map((s) => s.sessionId), sent);
-  for (let i = 0; i < titles.length; i += TITLES_PER_BATCH) {
-    const batch = { generation, batchId: newBatchId(), deviceName: job.deviceName, snapshots: [] };
-    await enqueue(job.queueDir, [{ batch: { ...batch, sessions: titles.slice(i, i + TITLES_PER_BATCH) } }]);
+  const pending = new Set((await queued(job.queueDir)).flatMap((i) => i.batch.snapshots.map((s) => s.sessionId)));
+  const due = [];
+  for (const { sessionId } of sessions) {
+    const title = titles.get(sessionId);
+    if (!title || sent[sessionId] === title.titleUpdatedAt) continue;
+    if (await sendsUsageFor(job, pending, sessionId)) due.push(title);
   }
-  for (const title of titles) sent[title.sessionId] = title.titleUpdatedAt;
-  job.state.titleIndex = stamp;
+  for (let i = 0; i < due.length; i += TITLES_PER_BATCH) {
+    const batch = { generation, batchId: newBatchId(), deviceName: job.deviceName, snapshots: [] };
+    await enqueue(job.queueDir, [{ batch: { ...batch, sessions: due.slice(i, i + TITLES_PER_BATCH) } }]);
+  }
+  for (const title of due) sent[title.sessionId] = title.titleUpdatedAt;
 }
 
 async function pass(job, generation) {
