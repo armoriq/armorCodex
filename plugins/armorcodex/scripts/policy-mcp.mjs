@@ -118,6 +118,7 @@ async function issueAndStore(config, pendingPath, request) {
       tokenRaw: result.tokenRaw,
       allowedActions: Array.from(extractAllowedActions(plan)),
       expiresAt: result.expiresAt,
+      planCheck: result.planCheck ?? null,
       registeredAt: Date.now()
     });
   } catch (err) {

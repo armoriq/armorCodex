@@ -550,7 +550,8 @@ export async function requestIntent(config, payload) {
     source: "armoriq-sdk",
     tokenRaw,
     plan: parsedFromToken?.plan || plan,
-    expiresAt: Number.isFinite(token.expiresAt) ? token.expiresAt : parsedFromToken?.expiresAt
+    expiresAt: Number.isFinite(token.expiresAt) ? token.expiresAt : parsedFromToken?.expiresAt,
+    planCheck: token.planCheck
   };
 }
 
