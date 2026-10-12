@@ -5,7 +5,7 @@ import { appendFileSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { loadConfig } from "../plugins/armorcodex/scripts/lib/config.mjs";
-import { liveTranscript } from "../plugins/armorcodex/scripts/lib/live-usage.mjs";
+import { liveTranscript, packBatches } from "../plugins/armorcodex/scripts/lib/live-usage.mjs";
 import { signIn, withHome } from "./helpers/login.mjs";
 import {
   backend,
@@ -252,3 +252,29 @@ test("usageSyncEnabled needs observability on and disable_usage_sync unset", () 
   }
 });
 
+
+const hourSnapshot = (sessionId, usageHour, calls) => ({
+  sessionId,
+  usageDate: "2026-10-12",
+  usageHour,
+  revision: 1,
+  armored: true,
+  entries: [{ model: "gpt-5.5", inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 }],
+  calls: Array.from({ length: calls }, (_, i) => ({
+    model: "gpt-5.5", inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0,
+    key: `${sessionId}-${usageHour}-${i}`, timestampMs: Date.parse(`2026-10-12T${String(usageHour).padStart(2, "0")}:10:00Z`),
+  })),
+});
+
+test("a usage batch never carries more than 100 call sessions or 500 calls", () => {
+  const snapshots = [hourSnapshot("busy", 5, 620), ...Array.from({ length: 100 }, (_, i) => hourSnapshot(`s${i}`, 6, 1))];
+  const batches = packBatches(snapshots);
+  for (const batch of batches) {
+    assert.ok((batch.calls ?? []).length <= 100, `${batch.calls.length} call sessions`);
+    assert.ok((batch.calls ?? []).reduce((n, c) => n + c.records.length, 0) <= 500);
+    assert.ok(batch.snapshots.every((s) => s.calls === undefined));
+  }
+  const keys = batches.flatMap((b) => (b.calls ?? []).flatMap((c) => c.records.map((r) => r.key)));
+  assert.equal(keys.length, 720);
+  assert.equal(new Set(keys).size, 720);
+});

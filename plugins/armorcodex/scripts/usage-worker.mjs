@@ -5,7 +5,9 @@ import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { pendingHistorySync } from "./lib/history-request.mjs";
 import { readJson, writeJson } from "./lib/fs-store.mjs";
-import { allSessions, sessionFingerprint, tryFileLock } from "./lib/live-usage.mjs";
+import { allSessions, codexHome, newBatchId, sessionFingerprint, tryFileLock } from "./lib/live-usage.mjs";
+import { codexTitles } from "./lib/session-titles.mjs";
+import { sessionLatencyPayloads } from "./lib/turn-latency.mjs";
 import { prepareUsage } from "./lib/usage-context.mjs";
 import { anySessionAnswers, liveSessions } from "./lib/usage-sessions.mjs";
 import {
@@ -199,6 +201,62 @@ async function drainRuns(job, historyRefused) {
   return result.outcome;
 }
 
+async function sendLatency(job, session) {
+  const payloads = sessionLatencyPayloads({
+    ...session,
+    cutoff: job.cutoff,
+    product: job.config.productSlug,
+    deviceId: job.deviceId,
+    deviceName: job.deviceName,
+  });
+  for (const payload of payloads) {
+    if (Date.now() > job.deadline) return { reason: "out of time for this pass" };
+    const res = await job.client.recordTokenLatency(payload);
+    if (!res.ok) return res;
+  }
+  return null;
+}
+
+async function syncLatency(job, sessions) {
+  const sent = (job.state.latency ??= {});
+  for (const session of sessions) {
+    if (Date.now() > job.deadline) return;
+    const seen = sessionFingerprint(session, "latency");
+    if (sent[session.sessionId] === seen) continue;
+    const failed = await sendLatency(job, session).catch((err) => ({ reason: err?.message ?? String(err) }));
+    if (!failed) sent[session.sessionId] = seen;
+    else {
+      log(`could not send the turn latency of ${session.sessionId} (${describe(failed)})`);
+      if (failed.unreachable) return;
+    }
+  }
+}
+
+const TITLES_PER_BATCH = 100;
+
+async function sendsUsageFor(job, pending, sessionId) {
+  if (pending.has(sessionId)) return true;
+  const state = await readJson(sessionFile(job.dir, sessionId), {});
+  return Boolean(state.admitted) || Object.keys(state.acknowledged ?? {}).length > 0;
+}
+
+async function queueTitles(job, sessions, generation) {
+  const titles = codexTitles(codexHome());
+  const sent = (job.state.titles ??= {});
+  const pending = new Set((await queued(job.queueDir)).flatMap((i) => i.batch.snapshots.map((s) => s.sessionId)));
+  const due = [];
+  for (const { sessionId } of sessions) {
+    const title = titles.get(sessionId);
+    if (!title || sent[sessionId] === title.titleUpdatedAt) continue;
+    if (await sendsUsageFor(job, pending, sessionId)) due.push(title);
+  }
+  for (let i = 0; i < due.length; i += TITLES_PER_BATCH) {
+    const batch = { generation, batchId: newBatchId(), deviceName: job.deviceName, snapshots: [] };
+    await enqueue(job.queueDir, [{ batch: { ...batch, sessions: due.slice(i, i + TITLES_PER_BATCH) } }]);
+  }
+  for (const title of due) sent[title.sessionId] = title.titleUpdatedAt;
+}
+
 async function pass(job, generation) {
   const save = () => writeJson(job.statePath, job.state);
   const sessions = await allSessions(job.dir);
@@ -207,10 +265,13 @@ async function pass(job, generation) {
     const todo = sessions.filter((s) => !run.scanned.includes(s.sessionId));
     scans.set(run, await scan(job, run, todo, generation, save));
   }
+  await queueTitles(job, sessions, generation);
   const outcome = await drainRuns(job, scans.get(job.state.history)?.refused);
   if (outcome === "fenced") return outcome;
   for (const [run, scanned] of scans)
     if (job.state[run.mode] === run) await settleRun(job, run, scanned, outcome);
+  await save();
+  await syncLatency(job, sessions);
   await save();
   return outcome;
 }

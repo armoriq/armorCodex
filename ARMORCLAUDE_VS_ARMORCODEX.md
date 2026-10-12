@@ -40,7 +40,6 @@ Improvements added during the Codex port that haven't been backported to ArmorCl
 | Feature | Where | Reason |
 | --- | --- | --- |
 | **`PermissionRequest` handler** | `scripts/lib/engine.mjs` (`handlePermissionRequest`) | Codex-specific event; gates approval prompts using the same policy engine. Claude has no equivalent event. |
-| **Auto-refresh of expiring intent tokens** | `scripts/lib/engine.mjs` (refresh near expiry) | Reissues the token silently when it has < 30s of life left, so multi-step turns don't hit an expiry boundary mid-execution. |
 | **Secret redaction in audit logs** | `scripts/lib/common.mjs` (`redactSecrets`) | Strips Bearer tokens, AWS keys, GitHub PATs, JWT-shaped values, private key blocks before payloads leave the host. |
 | **Atomic JSON file writes** | `scripts/lib/fs-store.mjs` | `write to .tmp -> rename` prevents torn JSON when two hooks race or the process is killed mid-write. |
 | **Corrupt-JSON recovery** | `scripts/lib/fs-store.mjs` | A `SyntaxError` on read falls back to the default value instead of crashing the session. |
@@ -71,6 +70,6 @@ These pieces are functionally equivalent on both sides — the same code with `a
 
 ## Action Items Worth Tracking
 
-- Backport ArmorCodex's hardening (atomic writes, secret redaction, auto-refresh, corrupt-JSON recovery, stricter sanitization) to ArmorClaude.
+- Backport ArmorCodex's hardening (atomic writes, secret redaction, corrupt-JSON recovery, stricter sanitization) to ArmorClaude.
 - Watch Codex release notes for: non-Bash hook coverage, `PostToolUseFailure`/`SessionEnd` events, native `plugin install` subcommand, `.mcp.json` auto-load, `ExitPlanMode`-equivalent event.
 - Build compensating layers for non-Bash coverage on Codex (MCP-gateway proxy, fswatch daemon, transcript-replay audit) — see roadmap discussion.

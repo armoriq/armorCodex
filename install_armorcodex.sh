@@ -132,17 +132,109 @@ EOF
 # Prereq checks
 # ---------------------------------------------------------------------------
 
-require_cmd() {
-  if ! command -v "$1" >/dev/null 2>&1; then
-    err "missing required command: $1"
-    case "$1" in
-      codex) echo "  install Codex from https://developers.openai.com/codex" 1>&2 ;;
-      node)  echo "  install Node.js >= 20 from https://nodejs.org" 1>&2 ;;
-      git)   echo "  install git from https://git-scm.com/downloads" 1>&2 ;;
-      npm)   echo "  npm comes bundled with Node.js" 1>&2 ;;
-    esac
+# --- Prerequisites -----------------------------------------------------------
+# A missing tool is offered for install through the machine's package manager
+# when someone is at the terminal to say yes. Otherwise the installer says how
+# to get it. Nothing is installed without a yes.
+
+# `curl ... | sudo bash` writes the plugin and the login under root's home
+# instead of the user's, so the user never sees them.
+refuse_sudo() {
+  if [[ "${EUID}" -eq 0 && -n "${SUDO_USER:-}" ]]; then
+    err "don't run this installer with sudo"
+    echo "  run it as yourself: curl -fsSL https://armoriq.ai/install_armorcodex_dev.sh | bash" 1>&2
     exit 1
   fi
+}
+
+pkg_manager() {
+  if command -v brew >/dev/null 2>&1; then echo brew
+  elif command -v apt-get >/dev/null 2>&1; then echo apt-get
+  elif command -v dnf >/dev/null 2>&1; then echo dnf
+  fi
+}
+
+# The packages that provide a tool under a package manager.
+pkg_for() {
+  case "$1:$2" in
+    node:brew|npm:brew) echo "node" ;;
+    node:*|npm:*)       echo "nodejs npm" ;;
+    python3:brew)       echo "python" ;;
+    *)                  echo "$1" ;;
+  esac
+}
+
+# offer_install TOOL HINT: succeeds once TOOL is on PATH.
+offer_install() {
+  local tool="$1" hint="$2" pm pkgs
+  command -v "${tool}" >/dev/null 2>&1 && return 0
+  pm="$(pkg_manager)"
+  if [[ -n "${pm}" ]] && is_promptable && prompt_yes_no "${tool} is not installed. Install it with ${pm} now?" Y; then
+    pkgs="$(pkg_for "${tool}" "${pm}")"
+    case "${pm}" in
+      brew)    brew install ${pkgs} ;;
+      apt-get) sudo apt-get update -qq && sudo apt-get install -y ${pkgs} ;;
+      dnf)     sudo dnf install -y ${pkgs} ;;
+    esac || true
+    hash -r
+    if command -v "${tool}" >/dev/null 2>&1; then
+      ok "${tool} installed"
+      return 0
+    fi
+  fi
+  err "${tool} is not installed"
+  echo "  ${hint}" 1>&2
+  return 1
+}
+
+# Plugins are cloned from GitHub over HTTPS. A git config that rewrites GitHub
+# HTTPS addresses to SSH (url.<ssh>.insteadOf) turns that into an SSH clone,
+# which fails with "Permission denied (publickey)" when no GitHub SSH key is
+# set up. Check the clone path first; if only the user's git config is in the
+# way, skip that config for this install's git calls and leave it unchanged.
+check_github_access() {
+  local url="$1" rules
+  if GIT_TERMINAL_PROMPT=0 git ls-remote -q "${url}" HEAD >/dev/null 2>&1; then
+    return 0
+  fi
+  if GIT_TERMINAL_PROMPT=0 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+    git ls-remote -q "${url}" HEAD >/dev/null 2>&1; then
+    warn "your git config stops git from downloading ${url} over HTTPS"
+    rules="$(git config --get-regexp '^url\..*\.insteadof$' 2>/dev/null | grep -i 'github' || true)"
+    if [[ -n "${rules}" ]]; then
+      info "it rewrites GitHub addresses to SSH: ${D}${rules//$'\n'/; }${N}"
+    fi
+    info "this install skips your git config for its own downloads; the config itself is unchanged"
+    export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+    return 0
+  fi
+  err "can't download ${url}"
+  echo "  check your network or proxy can reach github.com over HTTPS, then run this installer again" 1>&2
+  return 1
+}
+
+require_cmd() {
+  case "$1" in
+    codex)    require_codex ;;
+    node|npm) offer_install "$1" "install Node.js >= 20 from https://nodejs.org (npm comes with it)" || exit 1 ;;
+    git)      offer_install git "install git from https://git-scm.com/downloads" || exit 1 ;;
+    *)        offer_install "$1" "install $1, then run this installer again" || exit 1 ;;
+  esac
+}
+
+require_codex() {
+  command -v codex >/dev/null 2>&1 && return 0
+  if is_promptable && prompt_yes_no "Codex is not installed. Install it with npm install -g @openai/codex?" Y; then
+    npm install -g @openai/codex --no-audit --no-fund || true
+    hash -r
+    if command -v codex >/dev/null 2>&1; then
+      ok "Codex installed"
+      return 0
+    fi
+  fi
+  err "Codex is not installed"
+  echo "  install Codex from https://developers.openai.com/codex, then run this installer again" 1>&2
+  exit 1
 }
 
 check_node_version() {
@@ -266,10 +358,7 @@ fetch_plugin_source() {
 ensure_config_toml() {
   # ARMORCODEX_USE_SDK_INTENT=true tells the MCP register_intent_plan tool to
   # call the ArmorIQ SDK so plans are registered with the backend (signed JWT
-  # + dashboard visibility). The SDK round-trip is bounded by
-  # ARMORCODEX_INTENT_DEADLINE_MS (default 500ms) so Codex's ~1s MCP transport
-  # timeout is never violated; if the deadline is missed the call continues in
-  # the background and the local plan is used as the fallback.
+  # + dashboard visibility).
   # Managed block holds only the ArmorCodex MCP server table (unique to us,
   # safe to replace idempotently on re-run).
   local snippet
@@ -277,7 +366,7 @@ ensure_config_toml() {
 [mcp_servers.armorcodex-policy]
 command = "node"
 args = ["${BOOTSTRAP_PATH}", "mcp"]
-env = { ARMORCODEX_USE_SDK_INTENT = "true", ARMORCODEX_INTENT_DEADLINE_MS = "500" }
+env = { ARMORCODEX_USE_SDK_INTENT = "true" }
 EOF
   )"
   upsert_managed_block "${CONFIG_TOML}" "${snippet}"
@@ -660,15 +749,17 @@ main() {
     exit 0
   fi
 
+  refuse_sudo
   banner
 
   section "Checking prerequisites"
-  require_cmd codex
   require_cmd node
   require_cmd npm
   require_cmd git
   check_node_version
+  require_cmd codex
   check_codex_version
+  check_github_access "${PLUGIN_GIT_URL}" || exit 1
   ok "prerequisites OK ($(codex --version 2>/dev/null | head -1), $(node --version))"
 
   local mode

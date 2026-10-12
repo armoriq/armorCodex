@@ -10,15 +10,14 @@ import { validHistory } from "./login-ownership.mjs";
 import { isAlive } from "./usage-sync-launch.mjs";
 import { captureCodexSession, listSessions, rolloutOf } from "./rollout-session.mjs";
 
-const { MAX_BATCH_BYTES, MAX_BATCH_ENTRIES, MAX_BATCH_SNAPSHOTS } = armoriqSdk;
+const { MAX_BATCH_BYTES, MAX_BATCH_ENTRIES, MAX_BATCH_SNAPSHOTS, usageCallRecords } = armoriqSdk;
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const LOCK_WAIT_MS = 5_000;
 
 
-export const codexRoots = () => {
-  const home = process.env.CODEX_HOME?.trim() || path.join(homedir(), ".codex");
-  return [path.join(home, "sessions"), path.join(home, "archived_sessions")];
-};
+export const codexHome = () => process.env.CODEX_HOME?.trim() || path.join(homedir(), ".codex");
+
+export const codexRoots = () => [path.join(codexHome(), "sessions"), path.join(codexHome(), "archived_sessions")];
 
 export function loginCutoff(config) {
   const history = config.loginHistory;
@@ -138,6 +137,7 @@ export function changedSnapshots({ capture, sessionId, revision, known = {} }) {
       armored: true,
       ...(capture.repo ? { repo: capture.repo.slice(0, 200) } : {}),
       entries: h.entries,
+      calls: h.calls ?? [],
     }));
 }
 
@@ -153,31 +153,103 @@ export function refuse(state, snapshots) {
   return { ...state, refused };
 }
 
-const encoded = (snapshot) => Buffer.byteLength(JSON.stringify(snapshot));
+const encoded = (value) => Buffer.byteLength(JSON.stringify(value));
+
+function parts(snapshot) {
+  const { calls = [], ...sent } = snapshot;
+  const session = { sessionId: sent.sessionId, repo: sent.repo, armored: sent.armored };
+  const records = usageCallRecords(calls);
+  const chunks = [];
+  for (let i = 0; i < records.length; i += MAX_BATCH_ENTRIES) chunks.push(records.slice(i, i + MAX_BATCH_ENTRIES));
+  return [
+    { snapshot: sent, session, records: chunks[0] ?? [] },
+    ...chunks.slice(1).map((records) => ({ snapshot: null, session, records })),
+  ];
+}
+
+function batchOf(group) {
+  const bySession = new Map();
+  for (const { session, records } of group) {
+    if (!records.length) continue;
+    const entry = bySession.get(session.sessionId) ?? { ...session, records: [] };
+    entry.records.push(...records);
+    bySession.set(session.sessionId, entry);
+  }
+  const calls = [...bySession.values()].map(({ repo, ...rest }) => (repo ? { repo, ...rest } : rest));
+  return { snapshots: group.flatMap((p) => (p.snapshot ? [p.snapshot] : [])), ...(calls.length ? { calls } : {}) };
+}
+
+const MAX_CALL_SESSIONS = 100;
+
+const emptyCount = (bytes) => ({ snapshots: 0, entries: 0, records: 0, sessions: new Set(), bytes });
+
+const partSize = (part) => ({
+  snapshots: part.snapshot ? 1 : 0,
+  entries: part.snapshot?.entries.length ?? 0,
+  records: part.records.length,
+  bytes: encoded(part.snapshot) + encoded(part.records) + encoded(part.session) + 1,
+});
+
+function fits(count, part, size) {
+  const newSession = part.records.length && !count.sessions.has(part.session.sessionId) ? 1 : 0;
+  return (
+    count.snapshots + size.snapshots <= MAX_BATCH_SNAPSHOTS &&
+    count.entries + size.entries <= MAX_BATCH_ENTRIES &&
+    count.records + size.records <= MAX_BATCH_ENTRIES &&
+    count.sessions.size + newSession <= MAX_CALL_SESSIONS &&
+    count.bytes + size.bytes <= MAX_BATCH_BYTES
+  );
+}
+
+function add(count, part, size) {
+  count.snapshots += size.snapshots;
+  count.entries += size.entries;
+  count.records += size.records;
+  count.bytes += size.bytes;
+  if (part.records.length) count.sessions.add(part.session.sessionId);
+}
 
 export function packBatches(snapshots, overheadBytes = 512) {
   const batches = [];
   let current = [];
-  let entries = 0;
-  let bytes = overheadBytes;
-  for (const s of snapshots) {
-    const size = encoded(s) + 1;
-    const full =
-      current.length === MAX_BATCH_SNAPSHOTS ||
-      entries + s.entries.length > MAX_BATCH_ENTRIES ||
-      bytes + size > MAX_BATCH_BYTES;
-    if (full && current.length) {
-      batches.push(current);
+  let count = emptyCount(overheadBytes);
+  for (const part of snapshots.flatMap(parts)) {
+    const size = partSize(part);
+    if (current.length && !fits(count, part, size)) {
+      batches.push(batchOf(current));
       current = [];
-      entries = 0;
-      bytes = overheadBytes;
+      count = emptyCount(overheadBytes);
     }
-    current.push(s);
-    entries += s.entries.length;
-    bytes += size;
+    current.push(part);
+    add(count, part, size);
   }
-  if (current.length) batches.push(current);
+  if (current.length) batches.push(batchOf(current));
   return batches;
 }
+
+const inHour = (occurredAt, s) =>
+  occurredAt.slice(0, 10) === s.usageDate && Number(occurredAt.slice(11, 13)) === s.usageHour;
+
+export function snapshotBatch(batch, snapshot) {
+  const calls = (batch.calls ?? [])
+    .filter((c) => c.sessionId === snapshot.sessionId)
+    .map((c) => ({ ...c, records: c.records.filter((r) => inHour(r.occurredAt, snapshot)) }))
+    .filter((c) => c.records.length);
+  const { calls: _all, ...rest } = batch;
+  return { ...rest, snapshots: [snapshot], ...(calls.length ? { calls } : {}) };
+}
+
+function unclaimedCalls(batch) {
+  const claimed = (c, r) => batch.snapshots.some((s) => s.sessionId === c.sessionId && inHour(r.occurredAt, s));
+  const calls = (batch.calls ?? [])
+    .map((c) => ({ ...c, records: c.records.filter((r) => !claimed(c, r)) }))
+    .filter((c) => c.records.length);
+  return calls.length ? [{ ...batch, snapshots: [], calls }] : [];
+}
+
+export const splitBatch = (batch) => [
+  ...batch.snapshots.map((s) => snapshotBatch(batch, s)),
+  ...unclaimedCalls(batch),
+];
 
 export const newBatchId = () => randomUUID();

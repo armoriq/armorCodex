@@ -52,12 +52,12 @@ const USAGE_FIELDS = [
 
 function readUsageEvents(transcriptPath) {
   if (typeof transcriptPath !== "string" || !transcriptPath) {
-    return { events: [], latestTaskSequence: -1 };
+    return { records: [], latestTaskSequence: -1 };
   }
   try {
     return parseRollout(readFileSync(transcriptPath, "utf8"));
   } catch {
-    return { events: [], latestTaskSequence: -1 };
+    return { records: [], latestTaskSequence: -1 };
   }
 }
 
@@ -109,6 +109,7 @@ function parseRollout(raw) {
           responseId: typeof payload.response_id === "string" ? payload.response_id : "",
           timestamp,
           turn,
+          taskSequence,
         });
       }
       continue;
@@ -193,6 +194,10 @@ const utcHour = (time) => new Date(time).toISOString().slice(0, 13);
  * count nothing, for forks whose turns carry no id. Copied events still set
  * the starting totals. `turns` lists the ids of the rollout's own turns.
  */
+function addCall(calls, entry, key, time) {
+  if (key) (calls[utcHour(time)] ??= []).push({ ...entry, key, timestampMs: time });
+}
+
 export function rolloutUsage({ meta, events, records }, copied = {}, owns = () => true) {
   const createdAt = meta?.forked_from_id ? Date.parse(meta.timestamp) : NaN;
   const kept = (item) => {
@@ -200,9 +205,10 @@ export function rolloutUsage({ meta, events, records }, copied = {}, owns = () =
     return Number.isNaN(at) || owns(at);
   };
   const hours = {};
+  const calls = {};
   const turns = new Set();
   const copiedTurns = {};
-  const add = (item, usage) => {
+  const add = (item, usage, key) => {
     const [entry] = usageEntry(item.model, usage);
     if (!entry) return;
     if (!kept(item)) return;
@@ -216,6 +222,7 @@ export function rolloutUsage({ meta, events, records }, copied = {}, owns = () =
       if (Number.isNaN(time)) return;
       if (item.turn) turns.add(item.turn.id);
       models = hours[utcHour(time)] ??= {};
+      addCall(calls, entry, key, time);
     }
     models[entry.model] = sumEntries(models[entry.model], entry);
   };
@@ -228,8 +235,11 @@ export function rolloutUsage({ meta, events, records }, copied = {}, owns = () =
     if (i < (copied.events ?? 0)) continue;
     add(event, subtractTotals(event.totals, base));
   }
-  for (const record of records.slice(copied.records ?? 0)) add(record, record.usage);
-  return { hours, turns: [...turns], copiedTurns };
+  const skipped = copied.records ?? 0;
+  records.slice(skipped).forEach((record, i) =>
+    add(record, record.usage, record.responseId || `${record.timestamp}#${skipped + i}`)
+  );
+  return { hours, calls, turns: [...turns], copiedTurns };
 }
 
 function usageEntry(model, totals) {
@@ -259,36 +269,20 @@ function subtractTotals(latest, baseline) {
 }
 
 /**
- * Return only the latest Codex task's token usage for one observability trace.
- * Codex reports cumulative session totals, while the observability backend adds
- * every trace's generation span. Prefer a task-boundary delta so repeated Stop
- * hooks cannot double count. Older rollouts without task_started fall back to
- * last_token_usage, then the last two cumulative snapshots, then the sole
- * cumulative snapshot for a first turn.
+ * One entry per token_usage_record of the rollout's latest task: one model
+ * request each, keyed by its response id and timed when the request completed.
  */
-export function summarizeCodexTurnUsage(transcriptPath) {
-  const { events, latestTaskSequence } = readUsageEvents(transcriptPath);
-  const latest = events.at(-1);
-  if (!latest) return [];
-
-  if (latestTaskSequence >= 0) {
-    if (latest.taskSequence !== latestTaskSequence) return [];
-    const baseline = events.findLast((event) => event.taskSequence < latest.taskSequence);
-    const totals = baseline ? subtractTotals(latest.totals, baseline.totals) : latest.totals;
-    const entry = usageEntry(latest.model, totals);
-    if (entry.length) return entry;
-    return usageEntry(latest.model, latest.lastUsage);
-  }
-
-  const fromLastUsage = usageEntry(latest.model, latest.lastUsage);
-  if (fromLastUsage.length) return fromLastUsage;
-
-  const previous = events.at(-2);
-  if (previous) {
-    const fromDelta = usageEntry(latest.model, subtractTotals(latest.totals, previous.totals));
-    if (fromDelta.length) return fromDelta;
-  }
-  return usageEntry(latest.model, latest.totals);
+export function codexTurnUsageCalls(transcriptPath) {
+  const { records, latestTaskSequence } = readUsageEvents(transcriptPath);
+  return records
+    .filter((record) => record.taskSequence === latestTaskSequence)
+    .flatMap((record, i) =>
+      usageEntry(record.model, record.usage).map((entry) => ({
+        ...entry,
+        key: record.responseId || `${record.timestamp}#${i}`,
+        timestampMs: Date.parse(record.timestamp),
+      }))
+    );
 }
 
 function toCount(value) {

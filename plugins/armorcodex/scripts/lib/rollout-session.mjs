@@ -62,10 +62,14 @@ function firstLine(file) {
   }
 }
 
+export function rolloutMeta(file) {
+  const line = JSON.parse(firstLine(file));
+  return line?.type === "session_meta" ? line.payload : null;
+}
+
 function indexEntry(file) {
   try {
-    const line = JSON.parse(firstLine(file));
-    const meta = line?.type === "session_meta" ? line.payload : null;
+    const meta = rolloutMeta(file);
     const id =
       typeof meta?.id === "string" && meta.id ? meta.id : rolloutOf(file).id;
     const sessionId =
@@ -179,6 +183,7 @@ export async function captureCodexSession({
   const problems = [];
   const warnings = [];
   const hours = {};
+  const calls = {};
   let repo;
   const files = await sessionRollouts({
     sessionsRoot: roots[0],
@@ -197,7 +202,9 @@ export async function captureCodexSession({
     if (file === transcript && typeof rollout.meta?.cwd === "string")
       repo = rollout.meta.cwd;
     const copied = forkCopied(rollout, roots, warnings, file);
-    addHours(hours, rolloutUsage(rollout, copied, (t) => t >= cutoff).hours);
+    const usage = rolloutUsage(rollout, copied, (t) => t >= cutoff);
+    addHours(hours, usage.hours);
+    for (const [key, own] of Object.entries(usage.calls)) (calls[key] ??= []).push(...own);
   }
   const snapshots = Object.keys(hours)
     .sort()
@@ -205,6 +212,7 @@ export async function captureCodexSession({
       usageDate: key.slice(0, 10),
       usageHour: Number(key.slice(11, 13)),
       entries: Object.values(hours[key]),
+      calls: calls[key] ?? [],
     }));
   return { hours: snapshots, ...(repo ? { repo } : {}), problems, warnings };
 }

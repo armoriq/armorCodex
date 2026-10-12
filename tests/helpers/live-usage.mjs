@@ -20,7 +20,7 @@ export function backend() {
   const singles = [];
   let release;
   const released = new Promise((resolve) => (release = resolve));
-  const b = { batches, singles, release, generation: GENERATION, onBatch: null };
+  const b = { batches, singles, release, generation: GENERATION, onBatch: null, latency: [], onLatency: null };
   Object.assign(b, { requestId: null, reports: [], runs: new Map(), acked: new Map() });
   const stale = (run) => run?.mode === "history" && run.requestId !== b.requestId;
   const server = createServer((req, res) => {
@@ -58,13 +58,26 @@ export function backend() {
           for (const s of body.snapshots) hours.add(`${s.sessionId}|${s.usageDate}|${s.usageHour}`);
           b.acked.set(body.runId, hours);
         }
+        const keys = (b.callKeys ??= new Set());
+        const calls = { stored: 0, duplicates: 0 };
+        for (const c of body.calls ?? [])
+          for (const r of c.records) {
+            const k = `${c.sessionId}\u0000${r.key}`;
+            if (keys.has(k)) calls.duplicates += 1;
+            else (keys.add(k), (calls.stored += 1));
+          }
         const results = body.snapshots.map(({ sessionId, usageDate, usageHour }) => ({
           sessionId,
           usageDate,
           usageHour,
           status: "applied",
         }));
-        return reply(200, { results });
+        return reply(200, { results, ...(body.calls ? { calls } : {}) });
+      }
+      if (req.url === "/dashboard/token-usage/latency") {
+        if (b.onLatency?.(res, body)) return;
+        b.latency.push(body);
+        return reply(201, { ok: true });
       }
       if (req.url === "/dashboard/token-usage") {
         singles.push(body);

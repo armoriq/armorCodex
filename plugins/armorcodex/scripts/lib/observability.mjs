@@ -128,7 +128,7 @@
  */
 import armoriqSdk from "@armoriq/sdk-dev";
 import { sanitizeParams, redactSecrets, sha256Hex } from "./common.mjs";
-import { summarizeCodexTurnUsage } from "./token-usage.mjs";
+import { codexTurnUsageCalls } from "./token-usage.mjs";
 import {
   appendNdjsonLine,
   readNdjsonLines,
@@ -269,12 +269,13 @@ function capSpan(span) {
 
 // ---------------------------------------------------------------------------
 // Disk record shapes (one JSON value per NDJSON line):
-//   { recordType: "meta", attributes: { source, input } }
-//   { recordType: "span", span: { kind: "policy" | "tool", attributes } }
+//   { recordType: "meta", at, attributes: { source, input } }
+//   { recordType: "span", span: { kind: "policy" | "tool", at, callId, attributes } }
+// `at` is the hook's wall-clock time in ms; `callId` is Codex's tool_use_id.
 // ---------------------------------------------------------------------------
 
 function newMetaRecord(attrs) {
-  return { recordType: "meta", attributes: capAttributes(attrs || {}) };
+  return { recordType: "meta", at: Date.now(), attributes: capAttributes(attrs || {}) };
 }
 
 function classifyDecision(output) {
@@ -305,7 +306,7 @@ async function appendMeta(sessionId, config, attrs) {
 async function appendSpan(sessionId, config, span) {
   await appendNdjsonLine(turnLogPath(config, sessionId), {
     recordType: "span",
-    span: capSpan(span),
+    span: capSpan({ ...span, at: Date.now() }),
   });
 }
 
@@ -316,9 +317,10 @@ async function obsStartPlan(sessionId, config, prompt) {
   await appendMeta(sessionId, config, { source: "codex", input: sanitizedInput ?? null });
 }
 
-async function obsCheck(sessionId, config, toolName, toolInput, output) {
+async function obsCheck(sessionId, config, toolName, toolInput, output, callId) {
   await appendSpan(sessionId, config, {
     kind: "policy",
+    callId,
     attributes: {
       toolName: toolName || undefined,
       decision: classifyDecision(output),
@@ -327,9 +329,10 @@ async function obsCheck(sessionId, config, toolName, toolInput, output) {
   });
 }
 
-async function obsReport(sessionId, config, toolName, toolInput, toolResponse, status) {
+async function obsReport(sessionId, config, toolName, toolInput, toolResponse, status, callId) {
   await appendSpan(sessionId, config, {
     kind: "tool",
+    callId,
     attributes: {
       toolName: toolName || undefined,
       outcome: status === "error" ? "error" : "success",
@@ -347,50 +350,49 @@ async function obsReport(sessionId, config, toolName, toolInput, toolResponse, s
 const toolCategory = (toolName) =>
   typeof toolName === "string" && toolName.startsWith("mcp__") ? "mcp" : "tool";
 
-async function replaySpan(session, span) {
+const endedAt = (ms) => (Number.isFinite(ms) ? { endTime: new Date(ms) } : undefined);
+
+// A tool starts when its PreToolUse decision allowed it, so its first policy
+// span's time is the tool span's start.
+function toolStartTimes(spans) {
+  const starts = new Map();
+  for (const span of spans) {
+    if (span.kind === "policy" && span.callId && !starts.has(span.callId)) starts.set(span.callId, span.at);
+  }
+  return starts;
+}
+
+async function replaySpan(session, span, toolStarts) {
   const attrs = span.attributes || {};
   const toolName = attrs.toolName || "unknown";
+  const call = { toolName, toolCallId: span.callId, arguments: attrs.input };
   if (span.kind === "policy") {
-    await session.recordPolicy(
-      { toolName, arguments: attrs.input },
-      { decision: attrs.decision === "deny" ? "block" : "allow" }
-    );
+    await session.recordPolicy(call, { decision: attrs.decision === "deny" ? "block" : "allow" }, endedAt(span.at));
   } else if (span.kind === "tool") {
+    const startedAt = toolStarts.get(span.callId);
     await session.recordTool(
-      { toolName, arguments: attrs.input, operation: { category: toolCategory(toolName) } },
-      { outcome: attrs.outcome === "error" ? "error" : "success", result: attrs.output }
+      { ...call, operation: { category: toolCategory(toolName) } },
+      {
+        outcome: attrs.outcome === "error" ? "error" : "success",
+        result: attrs.output,
+        durationMs: Number.isFinite(startedAt) && span.at >= startedAt ? span.at - startedAt : undefined,
+      },
+      endedAt(span.at)
     );
   }
 }
 
-async function replayModel(session, entry) {
+async function replayModel(session, call) {
   const usage = {
-    "armoriq.timing.provenance": "post_hoc",
-    "gen_ai.usage.input_tokens": entry.inputTokens,
-    "gen_ai.usage.output_tokens": entry.outputTokens,
-    "gen_ai.usage.cache_read_tokens": entry.cacheReadTokens,
-    "gen_ai.usage.cache_write_tokens": entry.cacheWriteTokens,
+    "gen_ai.usage.input_tokens": call.inputTokens,
+    "gen_ai.usage.output_tokens": call.outputTokens,
+    "gen_ai.usage.cache_read_tokens": call.cacheReadTokens,
+    "gen_ai.usage.cache_write_tokens": call.cacheWriteTokens,
   };
-  const model = await session.beginModel(entry.model);
-  await session.endModel(model, usage);
+  await session.recordModel(call.model, usage, endedAt(call.timestampMs), { spanId: sha256Hex(call.key).slice(0, 16) });
 }
 
-async function obsEndTurnAndShip(sessionId, config, transcriptPath) {
-  const livePath = turnLogPath(config, sessionId);
-  const claimedPath = shippingPath(config, sessionId);
-
-  // Rename FIRST, before any read. This is the single atomic operation that
-  // gives this Stop invocation exclusive ownership of whatever bytes were on
-  // disk at this instant. Any hook process still mid-append (or one that
-  // starts appending after this instant) is now writing to a brand-new file
-  // at `livePath` (O_CREAT) — it can never write into the inode we are about
-  // to read, so there is no read-vs-append race window at all, unlike the
-  // old read-then-delete sequence.
-  const claimed = await renameIfExists(livePath, claimedPath);
-  if (!claimed) return; // no hooks fired for this turn (e.g. no tool use) — nothing to ship
-
-  const lines = await readNdjsonLines(claimedPath);
-
+function parseTurnLog(lines) {
   let meta = null;
   const spans = [];
   for (const record of lines) {
@@ -405,6 +407,31 @@ async function obsEndTurnAndShip(sessionId, config, transcriptPath) {
       spans.push(record.span);
     }
   }
+  return { meta, spans };
+}
+
+// The root starts at the turn's earliest hook so no replayed span starts before it.
+function turnRoot(meta, spans) {
+  const times = [meta?.at, ...spans.map((span) => span.at)].filter(Number.isFinite);
+  return times.length ? { startTime: new Date(Math.min(...times)) } : undefined;
+}
+
+async function obsEndTurnAndShip(sessionId, config, transcriptPath) {
+  const stoppedAt = Date.now();
+  const livePath = turnLogPath(config, sessionId);
+  const claimedPath = shippingPath(config, sessionId);
+
+  // Rename FIRST, before any read. This is the single atomic operation that
+  // gives this Stop invocation exclusive ownership of whatever bytes were on
+  // disk at this instant. Any hook process still mid-append (or one that
+  // starts appending after this instant) is now writing to a brand-new file
+  // at `livePath` (O_CREAT) — it can never write into the inode we are about
+  // to read, so there is no read-vs-append race window at all, unlike the
+  // old read-then-delete sequence.
+  const claimed = await renameIfExists(livePath, claimedPath);
+  if (!claimed) return; // no hooks fired for this turn (e.g. no tool use) — nothing to ship
+
+  const { meta, spans } = parseTurnLog(await readNdjsonLines(claimedPath));
 
   const runtime = new ArmorIQTelemetryRuntime({
     backendEndpoint: config.observabilityEndpoint,
@@ -416,19 +443,21 @@ async function obsEndTurnAndShip(sessionId, config, transcriptPath) {
     sessionId,
     agentId: config.agentId || null,
     userId: config.userId || null,
+    root: turnRoot(meta, spans),
   });
   // A runtime without a lease records nothing, so wait for it (the SDK bounds the wait).
   await session.refreshPolicy();
   await session.beginRoot({ input: meta?.attributes?.input ?? null });
   let failure = null;
   try {
-    for (const span of spans) await replaySpan(session, span);
-    for (const entry of summarizeCodexTurnUsage(transcriptPath)) await replayModel(session, entry);
+    const toolStarts = toolStartTimes(spans);
+    for (const span of spans) await replaySpan(session, span, toolStarts);
+    for (const call of codexTurnUsageCalls(transcriptPath)) await replayModel(session, call);
   } catch (err) {
     failure = err;
     process.stderr.write(`[armorcodex-obs] Stop could not replay the turn: ${err?.message ?? err}\n`);
   }
-  await session.close(failure ? "error" : "ok");
+  await session.close({ status: failure ? "error" : "ok", endTime: new Date(stoppedAt) });
   await unlink(claimedPath).catch(() => {});
 }
 
@@ -473,6 +502,7 @@ export async function observeHook(event, input, output, config) {
   if (!isObsEnabled(config)) return;
   const sessionId = typeof input?.session_id === "string" ? input.session_id : "";
   if (!sessionId && event !== "SessionStart") return;
+  const callId = typeof input?.tool_use_id === "string" ? input.tool_use_id : undefined;
 
   await safeObsAsync(async () => {
     switch (event) {
@@ -488,7 +518,8 @@ export async function observeHook(event, input, output, config) {
           config,
           typeof input.tool_name === "string" ? input.tool_name : "",
           input.tool_input,
-          output
+          output,
+          callId
         );
         break;
       case "PermissionRequest":
@@ -497,7 +528,8 @@ export async function observeHook(event, input, output, config) {
           config,
           typeof input.tool_name === "string" ? input.tool_name : "",
           input.tool_input,
-          output
+          output,
+          callId
         );
         break;
       case "PostToolUse": {
@@ -516,7 +548,8 @@ export async function observeHook(event, input, output, config) {
           input.tool_name,
           input.tool_input,
           input.tool_response,
-          status
+          status,
+          callId
         );
         break;
       }

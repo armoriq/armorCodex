@@ -197,15 +197,7 @@ export function loadSettings(env = process.env) {
     verifyStepEndpoint:
       env.ARMORCODEX_VERIFY_STEP_URL?.trim() ||
       `${backendEndpoint}/iap/verify-step`,
-    // 1 hour covers a full working session without forcing a mid-turn replan.
-    // Set ARMORCODEX_VALIDITY_SECONDS to tighten for compliance environments.
-    validitySeconds: parseInteger(env.ARMORCODEX_VALIDITY_SECONDS, 3600),
-    // Proactively refresh the intent token when it has less than this many
-    // seconds of life left, so tool calls don't hit the expiry boundary.
-    refreshThresholdSeconds: parseInteger(
-      env.ARMORCODEX_REFRESH_THRESHOLD_SECONDS,
-      30,
-    ),
+    validitySeconds: Math.min(parseInteger(env.ARMORCODEX_VALIDITY_SECONDS, 3600), 3600),
     timeoutMs,
     // One attempt per tool call is usually right — a hung backend shouldn't
     // stall Codex for timeout * retries. Users who really want retries can

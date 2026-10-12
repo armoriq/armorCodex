@@ -8,7 +8,6 @@ import {
   getSessionTokenUsedStepIndices,
   parseCsrgProofHeaders,
   recordSessionTokenUsedStepIndices,
-  requestIntent,
   resolveCsrgProofsFromToken,
   validateCsrgProofHeaders
 } from "./intent.mjs";
@@ -21,8 +20,9 @@ import {
   parsePolicyTextCommand
 } from "./policy.mjs";
 import { handleArmorPolicyCommand, isArmorPolicyCommand } from "./armor-policy-commands.mjs";
-import { readJson } from "./fs-store.mjs";
-import { unlink } from "node:fs/promises";
+import { fitAuditRow } from "./audit-wal.mjs";
+import { appendNdjsonLine, readJson, writePrivateFile } from "./fs-store.mjs";
+import { readFile, unlink } from "node:fs/promises";
 import path from "node:path";
 import {
   getSession,
@@ -112,10 +112,35 @@ function readIntentTokenRaw(input, session) {
   return "";
 }
 
-function denyOrAllow(config, reason) {
-  if (shouldDeny(config)) {
-    return denyPreTool(reason);
-  }
+async function denyAndAudit(input, config, reason) {
+  await auditToolCall(input, config, { status: "blocked", output: null, error_message: reason }, null);
+  return denyPreTool(reason);
+}
+
+function denyOrAllow(input, config, reason) {
+  return shouldDeny(config) ? denyAndAudit(input, config, reason) : null;
+}
+
+function planCheckDenial(planCheck, toolName) {
+  const name = normalizeToolName(toolName);
+  const denied = (planCheck?.deniedTools ?? []).find((tool) => normalizeToolName(tool) === name);
+  if (!denied) return null;
+  const reason = (planCheck.deniedReasons ?? []).find((line) => line.startsWith(`${denied}: `));
+  return `ArmorIQ plan check denied ${toolName}${reason ? ` (${reason.slice(denied.length + 2)})` : ""}`;
+}
+
+async function enforcePlanCheck(input, config, planCheck) {
+  const reason = planCheckDenial(planCheck, input.tool_name);
+  if (!reason) return null;
+  if (shouldDeny(config)) return denyAndAudit(input, config, reason);
+  process.stderr.write(`[armorcodex] monitor mode: ${reason}; allowing it\n`);
+  await appendNdjsonLine(path.join(config.dataDir, "monitor.jsonl"), {
+    at: Date.now(),
+    session_id: input.session_id,
+    tool: input.tool_name,
+    tool_use_id: input.tool_use_id,
+    reason
+  }).catch((err) => process.stderr.write(`[armorcodex] monitor log not written: ${err?.message ?? err}\n`));
   return null;
 }
 
@@ -125,18 +150,10 @@ function debugLog(config, message) {
   }
 }
 
-/**
- * Pick the best matching step index in the plan for a given tool call.
- * Prefers a step that matches BOTH tool name and parameters, falls back to
- * tool name only, then to step 0. Used to populate audit log step_index so
- * the backend can advance plan execution state to 'completed'.
- */
-function pickStepIndex(plan, toolName, toolInput) {
-  if (!plan || typeof plan !== "object") return 0;
+function matchedStepIndex(plan, toolName, toolInput) {
+  if (!plan || typeof plan !== "object") return undefined;
   const { matches, paramMatches } = findPlanStepIndices(plan, toolName, toolInput);
-  if (paramMatches.length > 0) return paramMatches[0];
-  if (matches.length > 0) return matches[0];
-  return 0;
+  return paramMatches[0] ?? matches[0];
 }
 
 // ---------------------------------------------------------------------------
@@ -242,46 +259,11 @@ export async function handleUserPromptSubmit(input, config) {
 // PreToolUse
 // ---------------------------------------------------------------------------
 
-function canRequestIntent(config) {
-  return Boolean(config.intentEndpoint || (config.useSdkIntent && config.apiKey));
-}
-
-function tokenStateFrom(merged, current) {
-  const intentTokenRaw = typeof merged.intentTokenRaw === "string" ? merged.intentTokenRaw : "";
-  return {
-    intentTokenRaw,
-    localPlan: merged.plan || current.localPlan,
-    localExpiresAt: merged.expiresAt || current.localExpiresAt,
-    usedStepIndices: intentTokenRaw ? getSessionTokenUsedStepIndices(merged, intentTokenRaw) : undefined
-  };
-}
-
-async function acquireTokenForPlan(config, context, current) {
-  if (current.intentTokenRaw || !isPlainObject(current.localPlan) || !canRequestIntent(config)) {
-    return current;
-  }
-  const { runtimeState, session, sessionId, toolName, toolInput, policy } = context;
-  try {
-    const intentResponse = await requestIntent(config, {
-      prompt: session.lastPrompt || `Use tool ${toolName}`,
-      plan: current.localPlan,
-      session_id: sessionId,
-      toolName,
-      toolInput,
-      policy_hash: computePolicyHash(policy),
-      policy,
-      validitySeconds: config.validitySeconds,
-      metadata: { source: "codex", trigger: "pre_tool_use" }
-    });
-    const merged = mergeIntentIntoSession(session, intentResponse);
-    upsertSession(runtimeState, sessionId, merged);
-    return tokenStateFrom(merged, current);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (config.intentRequired && shouldDeny(config)) {
-      return { deny: denyPreTool(`ArmorCodex intent planning failed: ${message}`) };
-    }
-    return current;
+async function readIssuedPlan(pendingPath) {
+  for (;;) {
+    const pending = await readJson(pendingPath, null);
+    if (pending?.status !== "issuing" || !(Date.now() < pending.deadlineAt)) return pending;
+    await new Promise((resolve) => setTimeout(resolve, 100));
   }
 }
 
@@ -292,7 +274,7 @@ export async function handlePreToolUse(input, config) {
   if (!toolName) {
     // Missing tool_name on a PreToolUse event means the payload shape is
     // unexpected. Fail-closed in enforce mode instead of silently allowing.
-    return denyOrAllow(config, "ArmorCodex: missing tool_name on PreToolUse");
+    return denyOrAllow(input, config, "ArmorCodex: missing tool_name on PreToolUse");
   }
 
   // --- Whitelist: ArmorCodex's own MCP tools must never be blocked,
@@ -348,13 +330,24 @@ export async function handlePreToolUse(input, config) {
   const pendingPath = sessionId
     ? path.join(config.dataDir, `pending-plan.${sessionId}.json`)
     : null;
-  const pending = pendingPath ? await readJson(pendingPath, null) : null;
+  const pending = pendingPath ? await readIssuedPlan(pendingPath) : null;
+  if (pending?.status === "issuing") {
+    const deny = await denyOrAllow(
+      input,
+      config,
+      "ArmorCodex intent token was not issued in time: call register_intent_plan again, then retry the tool"
+    );
+    if (deny) {
+      return deny;
+    }
+  }
   if (pending && (pending.tokenRaw || pending.plan)) {
     upsertSession(runtimeState, sessionId, {
       intentTokenRaw: pending.tokenRaw || "",
       plan: pending.plan,
       allowedActions: Array.isArray(pending.allowedActions) ? pending.allowedActions : [],
       expiresAt: pending.expiresAt,
+      planCheck: pending.planCheck,
       // Reset per-token execution tracking when a new plan replaces the old.
       intentExecution: undefined
     });
@@ -376,7 +369,7 @@ export async function handlePreToolUse(input, config) {
       if (cachedState?.policyDigest) {
         const check = cryptoService.verifyPolicyDigest(currentDigest, cachedState.policyDigest);
         if (!check.valid) {
-          return denyOrAllow(config, `ArmorCodex crypto policy mismatch: ${check.reason}`);
+          return denyOrAllow(input, config, `ArmorCodex crypto policy mismatch: ${check.reason}`);
         }
       }
     } catch (error) {
@@ -390,75 +383,23 @@ export async function handlePreToolUse(input, config) {
     toolParams: toolInput
   });
   if (!policyDecision.allowed) {
-    return denyPreTool(policyDecision.reason || "ArmorCodex policy denied");
+    return denyAndAudit(input, config, policyDecision.reason || "ArmorCodex policy denied");
   }
 
   // --- Intent token verification ---
   // Reuse the runtimeState loaded above instead of re-reading from disk.
   const session = getSession(runtimeState, sessionId) || {};
-  let intentTokenRaw = readIntentTokenRaw(input, session);
+  const planCheckDeny = await enforcePlanCheck(input, config, session.planCheck);
+  if (planCheckDeny) return planCheckDeny;
+  const intentTokenRaw = readIntentTokenRaw(input, session);
   let localPlan = session.plan;
   let localExpiresAt = session.expiresAt;
   let remoteAllowed = false;
   let tokenCheckMatched = false;
-  let usedStepIndices =
+  const usedStepIndices =
     intentTokenRaw && localPlan
       ? getSessionTokenUsedStepIndices(session, intentTokenRaw)
       : undefined;
-
-  // Proactive refresh: if the token is about to expire and we still have the
-  // plan, re-issue silently so the user never sees a "token expired" deny in
-  // the middle of a multi-step turn. If the refresh fails, flow falls through
-  // to the existing expiry check below.
-  const refreshThreshold = Number.isFinite(config.refreshThresholdSeconds)
-    ? config.refreshThresholdSeconds
-    : 30;
-  if (
-    intentTokenRaw &&
-    isPlainObject(localPlan) &&
-    Number.isFinite(localExpiresAt) &&
-    localExpiresAt - nowEpochSeconds() < refreshThreshold &&
-    canRequestIntent(config)
-  ) {
-    try {
-      const policyHash = computePolicyHash(policyState.policy);
-      const refreshed = await requestIntent(config, {
-        prompt: session.lastPrompt || `Refresh intent for ${toolName}`,
-        plan: localPlan,
-        session_id: sessionId,
-        toolName,
-        toolInput,
-        policy_hash: policyHash,
-        policy: policyState.policy,
-        validitySeconds: config.validitySeconds,
-        metadata: { source: "codex", trigger: "auto_refresh" }
-      });
-      if (!refreshed.skipped) {
-        const merged = mergeIntentIntoSession(session, refreshed);
-        upsertSession(runtimeState, sessionId, merged);
-        intentTokenRaw =
-          typeof merged.intentTokenRaw === "string"
-            ? merged.intentTokenRaw
-            : intentTokenRaw;
-        localPlan = merged.plan || localPlan;
-        localExpiresAt = merged.expiresAt || localExpiresAt;
-        debugLog(config, "intent token auto-refreshed near expiry");
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      debugLog(config, `auto-refresh failed: ${message}`);
-    }
-  }
-
-  const acquired = await acquireTokenForPlan(
-    config,
-    { runtimeState, session, sessionId, toolName, toolInput, policy: policyState.policy },
-    { intentTokenRaw, localPlan, localExpiresAt, usedStepIndices }
-  );
-  if (acquired.deny) {
-    return acquired.deny;
-  }
-  ({ intentTokenRaw, localPlan, localExpiresAt, usedStepIndices } = acquired);
 
   // Validate tool against intent token plan
   if (intentTokenRaw) {
@@ -470,7 +411,7 @@ export async function handlePreToolUse(input, config) {
     if (tokenCheck.matched) {
       tokenCheckMatched = true;
       if (tokenCheck.blockReason) {
-        return denyOrAllow(config, tokenCheck.blockReason);
+        return denyOrAllow(input, config, tokenCheck.blockReason);
       }
       localPlan = tokenCheck.plan || localPlan;
       remoteAllowed = true;
@@ -480,7 +421,7 @@ export async function handlePreToolUse(input, config) {
   // --- CSRG proof handling ---
   const parsedProofs = parseCsrgProofHeaders(input);
   if (parsedProofs.error) {
-    return denyOrAllow(config, parsedProofs.error);
+    return denyOrAllow(input, config, parsedProofs.error);
   }
   let csrgProofs = parsedProofs.proofs;
   if (!csrgProofs && intentTokenRaw && localPlan && typeof localPlan === "object") {
@@ -503,7 +444,7 @@ export async function handlePreToolUse(input, config) {
       Boolean(intentTokenRaw)
   );
   if (proofError) {
-    return denyOrAllow(config, proofError);
+    return denyOrAllow(input, config, proofError);
   }
 
   // --- Remote step verification ---
@@ -516,6 +457,7 @@ export async function handlePreToolUse(input, config) {
       }
       if (verifyResult.allowed === false) {
         return denyOrAllow(
+          input,
           config,
           verifyResult.reason || `ArmorCodex intent verification denied for ${toolName}`
         );
@@ -533,7 +475,7 @@ export async function handlePreToolUse(input, config) {
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      const deny = denyOrAllow(config, `ArmorCodex verify-step failed: ${message}`);
+      const deny = await denyOrAllow(input, config, `ArmorCodex verify-step failed: ${message}`);
       if (deny) {
         return deny;
       }
@@ -542,7 +484,8 @@ export async function handlePreToolUse(input, config) {
 
   // --- Expiry check ---
   if (Number.isFinite(localExpiresAt) && nowEpochSeconds() > localExpiresAt) {
-    const deny = denyOrAllow(
+    const deny = await denyOrAllow(
+      input,
       config,
       "ArmorCodex intent token expired — call register_intent_plan with your current plan to refresh, then retry the tool"
     );
@@ -565,7 +508,7 @@ export async function handlePreToolUse(input, config) {
     if (localCheck.allowed) {
       localPlanMatched = true;
     } else {
-      const deny = denyOrAllow(config, localCheck.reason || "ArmorCodex intent drift");
+      const deny = await denyOrAllow(input, config, localCheck.reason || "ArmorCodex intent drift");
       if (deny) {
         return deny;
       }
@@ -574,7 +517,8 @@ export async function handlePreToolUse(input, config) {
 
   // --- Enforce intent requirement ---
   if (config.intentRequired && !remoteAllowed && !tokenCheckMatched && !localPlanMatched) {
-    const deny = denyOrAllow(
+    const deny = await denyOrAllow(
+      input,
       config,
       "ArmorCodex intent plan missing for this session: call register_intent_plan first, then retry the tool"
     );
@@ -586,6 +530,7 @@ export async function handlePreToolUse(input, config) {
   // --- Record tool for discovery ---
   upsertDiscoveredTool(runtimeState, toolName);
   await saveRuntimeState(config.runtimeFile, runtimeState);
+  await recordToolStart(config, input.tool_use_id);
   return null;
 }
 
@@ -617,63 +562,73 @@ export async function handlePermissionRequest(input, config) {
 // PostToolUse — audit logging
 // ---------------------------------------------------------------------------
 
-export async function handlePostToolUse(input, config) {
-  if (!config.auditEnabled || !config.apiKey) {
-    return null;
-  }
-
-  const sessionId = typeof input.session_id === "string" ? input.session_id : "";
-  const toolName = typeof input.tool_name === "string" ? input.tool_name : "";
-  if (!toolName) return null;
-
+function auditLink(config, sessionId, intentTokenRaw) {
+  let planId;
   try {
-    const runtimeState = await loadRuntimeState(config.runtimeFile);
-    const session = getSession(runtimeState, sessionId) || {};
-    const iapService = createIapService(config);
-
-    const intentTokenRaw = session.intentTokenRaw || "";
-    let token = intentTokenRaw;
-    // Extract JWT if embedded in JSON envelope
-    if (intentTokenRaw.startsWith("{")) {
-      try {
-        const parsed = JSON.parse(intentTokenRaw);
-        token = parsed.jwtToken || parsed.jwt_token || intentTokenRaw;
-      } catch { /* use raw */ }
-    }
-
-    // Compute the real step index from the registered plan so the backend's
-    // updateExecutionProgress can advance plan status to 'completed'.
-    const inputs = sanitizeParams(input.tool_input, config.sanitize);
-    const stepIdx = pickStepIndex(session.plan, toolName, inputs);
-
-    const dto = {
-      token,
-      step_index: stepIdx,
-      action: toolName,
-      tool: toolName,
-      input: redactSecrets(inputs),
-      output: redactSecrets(sanitizeParams(input.tool_response, config.sanitize)),
-      status: "success",
-      executed_at: new Date().toISOString(),
-      duration_ms: 0
-    };
-
-    // Await the WAL disk write (~1-2ms) so the row is durable before the
-    // hook returns. Without the await a crash between read and write loses
-    // the audit row even though the WAL exists for exactly this reason.
-    // The slow HTTP ship to /iap/audit/batch still happens async via the
-    // embedded flusher in policy-mcp.mjs. Mirrors armorClaude#46 fix #5.
-    try {
-      await iapService.enqueueAudit(dto);
-    } catch (error) {
-      debugLog(config, `audit enqueue failed: ${error}`);
-    }
-    debugLog(config, `audit log enqueued for ${toolName} step=${stepIdx}`);
-  } catch (error) {
-    // Audit is best-effort — don't block
-    debugLog(config, `audit log failed: ${error}`);
+    planId = JSON.parse(intentTokenRaw).planId;
+  } catch {
+    planId = undefined;
   }
+  return {
+    plan_id: planId,
+    session_id: sessionId,
+    user_id: config.userId,
+    agent_id: config.agentId,
+    client_id: config.mcpName || config.llmId
+  };
+}
 
+const toolStartPath = (config, toolUseId) =>
+  typeof toolUseId === "string" && /^[A-Za-z0-9_-]+$/.test(toolUseId)
+    ? path.join(config.dataDir, "tool-starts", toolUseId)
+    : null;
+
+async function recordToolStart(config, toolUseId) {
+  const startPath = toolStartPath(config, toolUseId);
+  if (startPath && config.auditEnabled && config.apiKey) {
+    await writePrivateFile(startPath, String(Date.now())).catch(() => {});
+  }
+}
+
+async function takeToolDuration(config, toolUseId) {
+  const startPath = toolStartPath(config, toolUseId);
+  if (!startPath) return undefined;
+  const started = Number(await readFile(startPath, "utf8").catch(() => ""));
+  await unlink(startPath).catch(() => {});
+  return started > 0 ? Date.now() - started : undefined;
+}
+
+async function buildAuditRow(input, config, outcome, unknownStep) {
+  const toolName = input.tool_name;
+  const sessionId = typeof input.session_id === "string" ? input.session_id : "";
+  const session = getSession(await loadRuntimeState(config.runtimeFile), sessionId) || {};
+  const inputs = sanitizeParams(input.tool_input, config.sanitize);
+  return fitAuditRow({
+    ...auditLink(config, sessionId, session.intentTokenRaw || ""),
+    step_index: matchedStepIndex(session.plan, toolName, inputs) ?? unknownStep,
+    action: toolName,
+    tool: toolName,
+    input: redactSecrets(inputs),
+    executed_at: new Date().toISOString(),
+    duration_ms: await takeToolDuration(config, input.tool_use_id),
+    ...outcome
+  });
+}
+
+async function auditToolCall(input, config, outcome, unknownStep = 0) {
+  if (!config.auditEnabled || !config.apiKey || typeof input.tool_name !== "string" || !input.tool_name) return;
+  try {
+    await createIapService(config).enqueueAudit(await buildAuditRow(input, config, outcome, unknownStep));
+  } catch (error) {
+    process.stderr.write(`[armorcodex] audit row rejected: ${error instanceof Error ? error.message : error}\n`);
+  }
+}
+
+export async function handlePostToolUse(input, config) {
+  await auditToolCall(input, config, {
+    status: "success",
+    output: redactSecrets(sanitizeParams(input.tool_response, config.sanitize))
+  });
   return null;
 }
 
@@ -682,54 +637,11 @@ export async function handlePostToolUse(input, config) {
 // ---------------------------------------------------------------------------
 
 export async function handlePostToolUseFailure(input, config) {
-  if (!config.auditEnabled || !config.apiKey) {
-    return null;
-  }
-
-  const sessionId = typeof input.session_id === "string" ? input.session_id : "";
-  const toolName = typeof input.tool_name === "string" ? input.tool_name : "";
-  if (!toolName) return null;
-
-  try {
-    const runtimeState = await loadRuntimeState(config.runtimeFile);
-    const session = getSession(runtimeState, sessionId) || {};
-    const iapService = createIapService(config);
-
-    const intentTokenRaw = session.intentTokenRaw || "";
-    let token = intentTokenRaw;
-    if (intentTokenRaw.startsWith("{")) {
-      try {
-        const parsed = JSON.parse(intentTokenRaw);
-        token = parsed.jwtToken || parsed.jwt_token || intentTokenRaw;
-      } catch { /* use raw */ }
-    }
-
-    const inputs = sanitizeParams(input.tool_input, config.sanitize);
-    const stepIdx = pickStepIndex(session.plan, toolName, inputs);
-    const dto = {
-      token,
-      step_index: stepIdx,
-      action: toolName,
-      tool: toolName,
-      input: redactSecrets(inputs),
-      output: null,
-      status: "failed",
-      error_message: typeof input.error === "string" ? redactSecrets(input.error) : "Unknown error",
-      executed_at: new Date().toISOString(),
-      duration_ms: 0
-    };
-
-    // Same await rationale as the success path above — see armorClaude#46 fix #5.
-    try {
-      await iapService.enqueueAudit(dto);
-    } catch (error) {
-      debugLog(config, `audit enqueue (failure) failed: ${error}`);
-    }
-    debugLog(config, `audit log (failure) enqueued for ${toolName}`);
-  } catch (error) {
-    debugLog(config, `audit log (failure) failed: ${error}`);
-  }
-
+  await auditToolCall(input, config, {
+    status: "failed",
+    output: null,
+    error_message: typeof input.error === "string" ? redactSecrets(input.error) : "Unknown error"
+  });
   return null;
 }
 
