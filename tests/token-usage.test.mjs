@@ -341,10 +341,30 @@ test("a fork's copied turns are kept apart, in the UTC hour the turn started", a
   ]);
   assert.deepEqual(usage, {
     hours: { "2026-09-22T09": { "gpt-5.5": entry("gpt-5.5", 40, 3) } },
+    calls: {},
     turns: [ownTurn],
     copiedTurns: {
       [copiedTurn]: { hour: "2026-09-20T23", items: 2, models: { "gpt-5.5": entry("gpt-5.5", 300, 30) } },
     },
+  });
+});
+
+test("a fork's own records become calls with their response ids, and its copied records do not", async () => {
+  const { calls } = await usageOf([
+    at("2026-09-22T09:00:00Z", {
+      type: "session_meta",
+      payload: { id: "fork", forked_from_id: "original", timestamp: "2026-09-22T09:00:00Z" },
+    }),
+    at("2026-09-22T09:00:00Z", started(v7("2026-09-20T23:59:30Z"), "2026-09-20T23:59:30Z")),
+    at("2026-09-22T09:00:00Z", { type: "turn_context", payload: { model: "gpt-5.5" } }),
+    at("2026-09-22T09:00:00Z", record("resp-copied", { input_tokens: 50, output_tokens: 5 })),
+    at("2026-09-22T09:04:00Z", started(v7("2026-09-22T09:04:00Z"), "2026-09-22T09:04:00Z")),
+    at("2026-09-22T09:05:00Z", record("resp-own", { input_tokens: 70, cached_input_tokens: 20, output_tokens: 7 })),
+  ]);
+  assert.deepEqual(calls, {
+    "2026-09-22T09": [
+      { ...entry("gpt-5.5", 50, 7, 20), key: "resp-own", timestampMs: Date.parse("2026-09-22T09:05:00Z") },
+    ],
   });
 });
 

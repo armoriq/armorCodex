@@ -358,3 +358,77 @@ test("a title row whose updated_at is not a full ISO time is skipped without los
     assert.deepEqual(titlesSent(b).map((t) => t.title), ["good time"]);
   });
 });
+
+const usageRecord = (timestamp, responseId, input, output = 0, cached = 0) => ({
+  timestamp,
+  type: "token_usage_record",
+  payload: { response_id: responseId, usage: { input_tokens: input, cached_input_tokens: cached, output_tokens: output } },
+});
+const callsOf = (b, sessionId) =>
+  b.batches.flatMap((x) => (x.calls ?? []).filter((c) => c.sessionId === sessionId));
+const snapshotTotal = (snapshots) =>
+  snapshots.flatMap((s) => s.entries).reduce((n, e) => n + e.inputTokens + e.cacheReadTokens + e.outputTokens, 0);
+const callTotal = (records) =>
+  records.reduce((n, r) => n + r.inputTokens + r.cacheReadTokens + r.outputTokens, 0);
+
+test("each changed session-hour goes out with every call in that hour, keyed by Codex's response id", async () => {
+  await withBackend(at(1), async (b, h) => {
+    const s = session(h, at(2), [
+      usageRecord(at(3), "resp_a", 100, 10, 40),
+      usageRecord(at(4), "resp_b", 200, 20),
+      usageRecord(at(65), "resp_c", 300, 30),
+    ]);
+    await runWorker(h, b);
+    const sent = callsOf(b, s.id);
+    assert.deepEqual(sent.map((c) => [c.repo, c.armored]), sent.map(() => ["/work/repo", true]));
+    const records = sent.flatMap((c) => c.records);
+    assert.deepEqual(records.map((r) => [r.key, r.model, r.occurredAt]).sort(), [
+      ["resp_a", "gpt-5.5", at(3)],
+      ["resp_b", "gpt-5.5", at(4)],
+      ["resp_c", "gpt-5.5", at(65)],
+    ]);
+    assert.deepEqual(records.find((r) => r.key === "resp_a"), {
+      key: "resp_a", model: "gpt-5.5", inputTokens: 60, outputTokens: 10, cacheReadTokens: 40,
+      cacheWriteTokens: 0, reasoningOutputTokens: 0, occurredAt: at(3),
+    });
+    assert.equal(callTotal(records), snapshotTotal(sessionBatches(b, s.id)));
+
+    appendFileSync(s.file, line(usageRecord(at(66), "resp_d", 50, 5)));
+    const before = b.batches.length;
+    await runWorker(h, b);
+    const later = b.batches.slice(before).flatMap((x) => (x.calls ?? []).filter((c) => c.sessionId === s.id)).flatMap((c) => c.records);
+    assert.deepEqual(later.map((r) => r.key).sort(), ["resp_c", "resp_d"], "the changed hour resends all its calls, the unchanged hour none");
+  });
+});
+
+test("a session-hour with more than 500 calls is sent across batches of at most 500 calls", async () => {
+  await withBackend(at(1), async (b, h) => {
+    const records = Array.from({ length: 620 }, (_, i) => usageRecord(at(3 + Math.floor(i / 20)), `resp_${i}`, 10, 1));
+    const s = session(h, at(2), records);
+    await runWorker(h, b);
+    const perBatch = b.batches.map((x) => (x.calls ?? []).reduce((n, c) => n + c.records.length, 0)).filter(Boolean);
+    assert.ok(perBatch.every((n) => n <= 500), `${perBatch}`);
+    const keys = callsOf(b, s.id).flatMap((c) => c.records.map((r) => r.key));
+    assert.equal(new Set(keys).size, 620);
+    assert.equal(keys.length, 620);
+  });
+});
+
+test("a refused batch retried one session-hour at a time sends each hour with only its own calls", async () => {
+  await withBackend(at(1), async (b, h) => {
+    const s = session(h, at(2), [usageRecord(at(3), "resp_a", 100, 1), usageRecord(at(65), "resp_b", 200, 2)]);
+    b.onBatch = (res, body) => {
+      if (body.snapshots.length < 2) return false;
+      b.onBatch = null;
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ message: "refused as a whole" }));
+      return true;
+    };
+    await runWorker(h, b);
+    const singles = b.batches.filter((x) => x.snapshots.length === 1 && x.snapshots[0].sessionId === s.id);
+    assert.deepEqual(
+      singles.map((x) => [x.snapshots[0].usageHour, (x.calls ?? []).flatMap((c) => c.records.map((r) => r.key))]).sort(),
+      [[new Date(at(3)).getUTCHours(), ["resp_a"]], [new Date(at(65)).getUTCHours(), ["resp_b"]]].sort()
+    );
+  });
+});

@@ -201,9 +201,10 @@ export function rolloutUsage({ meta, events, records }, copied = {}, owns = () =
     return Number.isNaN(at) || owns(at);
   };
   const hours = {};
+  const calls = {};
   const turns = new Set();
   const copiedTurns = {};
-  const add = (item, usage) => {
+  const add = (item, usage, key) => {
     const [entry] = usageEntry(item.model, usage);
     if (!entry) return;
     if (!kept(item)) return;
@@ -217,6 +218,7 @@ export function rolloutUsage({ meta, events, records }, copied = {}, owns = () =
       if (Number.isNaN(time)) return;
       if (item.turn) turns.add(item.turn.id);
       models = hours[utcHour(time)] ??= {};
+      if (key) (calls[utcHour(time)] ??= []).push({ ...entry, key, timestampMs: time });
     }
     models[entry.model] = sumEntries(models[entry.model], entry);
   };
@@ -229,8 +231,11 @@ export function rolloutUsage({ meta, events, records }, copied = {}, owns = () =
     if (i < (copied.events ?? 0)) continue;
     add(event, subtractTotals(event.totals, base));
   }
-  for (const record of records.slice(copied.records ?? 0)) add(record, record.usage);
-  return { hours, turns: [...turns], copiedTurns };
+  const skipped = copied.records ?? 0;
+  records.slice(skipped).forEach((record, i) =>
+    add(record, record.usage, record.responseId || `${record.timestamp}#${skipped + i}`)
+  );
+  return { hours, calls, turns: [...turns], copiedTurns };
 }
 
 function usageEntry(model, totals) {

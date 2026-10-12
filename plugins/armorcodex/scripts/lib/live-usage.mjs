@@ -10,7 +10,7 @@ import { validHistory } from "./login-ownership.mjs";
 import { isAlive } from "./usage-sync-launch.mjs";
 import { captureCodexSession, listSessions, rolloutOf } from "./rollout-session.mjs";
 
-const { MAX_BATCH_BYTES, MAX_BATCH_ENTRIES, MAX_BATCH_SNAPSHOTS } = armoriqSdk;
+const { MAX_BATCH_BYTES, MAX_BATCH_ENTRIES, MAX_BATCH_SNAPSHOTS, usageCallRecords } = armoriqSdk;
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const LOCK_WAIT_MS = 5_000;
 
@@ -137,6 +137,7 @@ export function changedSnapshots({ capture, sessionId, revision, known = {} }) {
       armored: true,
       ...(capture.repo ? { repo: capture.repo.slice(0, 200) } : {}),
       entries: h.entries,
+      calls: h.calls ?? [],
     }));
 }
 
@@ -152,31 +153,71 @@ export function refuse(state, snapshots) {
   return { ...state, refused };
 }
 
-const encoded = (snapshot) => Buffer.byteLength(JSON.stringify(snapshot));
+const encoded = (value) => Buffer.byteLength(JSON.stringify(value));
+
+function parts(snapshot) {
+  const { calls = [], ...sent } = snapshot;
+  const session = { sessionId: sent.sessionId, repo: sent.repo, armored: sent.armored };
+  const records = usageCallRecords(calls);
+  const chunks = [];
+  for (let i = 0; i < records.length; i += MAX_BATCH_ENTRIES) chunks.push(records.slice(i, i + MAX_BATCH_ENTRIES));
+  return [
+    { snapshot: sent, session, records: chunks[0] ?? [] },
+    ...chunks.slice(1).map((records) => ({ snapshot: null, session, records })),
+  ];
+}
+
+function batchOf(group) {
+  const bySession = new Map();
+  for (const { session, records } of group) {
+    if (!records.length) continue;
+    const entry = bySession.get(session.sessionId) ?? { ...session, records: [] };
+    entry.records.push(...records);
+    bySession.set(session.sessionId, entry);
+  }
+  const calls = [...bySession.values()].map(({ repo, ...rest }) => (repo ? { repo, ...rest } : rest));
+  return { snapshots: group.flatMap((p) => (p.snapshot ? [p.snapshot] : [])), ...(calls.length ? { calls } : {}) };
+}
 
 export function packBatches(snapshots, overheadBytes = 512) {
   const batches = [];
   let current = [];
-  let entries = 0;
-  let bytes = overheadBytes;
-  for (const s of snapshots) {
-    const size = encoded(s) + 1;
+  let count = { snapshots: 0, entries: 0, records: 0, bytes: overheadBytes };
+  for (const part of snapshots.flatMap(parts)) {
+    const size = encoded(part.snapshot) + encoded(part.records) + 1;
+    const entries = part.snapshot?.entries.length ?? 0;
     const full =
-      current.length === MAX_BATCH_SNAPSHOTS ||
-      entries + s.entries.length > MAX_BATCH_ENTRIES ||
-      bytes + size > MAX_BATCH_BYTES;
+      count.snapshots + (part.snapshot ? 1 : 0) > MAX_BATCH_SNAPSHOTS ||
+      count.entries + entries > MAX_BATCH_ENTRIES ||
+      count.records + part.records.length > MAX_BATCH_ENTRIES ||
+      count.bytes + size > MAX_BATCH_BYTES;
     if (full && current.length) {
-      batches.push(current);
+      batches.push(batchOf(current));
       current = [];
-      entries = 0;
-      bytes = overheadBytes;
+      count = { snapshots: 0, entries: 0, records: 0, bytes: overheadBytes };
     }
-    current.push(s);
-    entries += s.entries.length;
-    bytes += size;
+    current.push(part);
+    count = {
+      snapshots: count.snapshots + (part.snapshot ? 1 : 0),
+      entries: count.entries + entries,
+      records: count.records + part.records.length,
+      bytes: count.bytes + size,
+    };
   }
-  if (current.length) batches.push(current);
+  if (current.length) batches.push(batchOf(current));
   return batches;
+}
+
+const inHour = (occurredAt, s) =>
+  occurredAt.slice(0, 10) === s.usageDate && Number(occurredAt.slice(11, 13)) === s.usageHour;
+
+export function snapshotBatch(batch, snapshot) {
+  const calls = (batch.calls ?? [])
+    .filter((c) => c.sessionId === snapshot.sessionId)
+    .map((c) => ({ ...c, records: c.records.filter((r) => inHour(r.occurredAt, snapshot)) }))
+    .filter((c) => c.records.length);
+  const { calls: _all, ...rest } = batch;
+  return { ...rest, snapshots: [snapshot], ...(calls.length ? { calls } : {}) };
 }
 
 export const newBatchId = () => randomUUID();

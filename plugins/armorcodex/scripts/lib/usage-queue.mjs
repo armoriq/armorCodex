@@ -9,6 +9,7 @@ import {
   knownDigests,
   newBatchId,
   packBatches,
+  snapshotBatch,
   refuse,
   setGeneration,
   storedGeneration,
@@ -74,7 +75,7 @@ export const toItems = (snapshots, { generation, deviceName, runId }) =>
       batchId: newBatchId(),
       ...(runId ? { runId } : {}),
       deviceName,
-      snapshots: group,
+      ...group,
     },
   }));
 
@@ -106,7 +107,7 @@ async function setAside(job, { file, ...item }, result) {
 async function retryAlone(job, { file, ...item }) {
   const singles = item.batch.snapshots.map((s) => ({
     ...item,
-    batch: { ...item.batch, batchId: newBatchId(), snapshots: [s] },
+    batch: { ...snapshotBatch(item.batch, s), batchId: newBatchId() },
   }));
   await enqueue(job.queueDir, singles);
   await settle(file);
