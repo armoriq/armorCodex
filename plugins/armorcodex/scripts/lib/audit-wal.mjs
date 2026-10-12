@@ -26,6 +26,7 @@
 import { appendFile, open, readFile, rename, stat, unlink } from "node:fs/promises";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { PRIVATE_FILE_MODE, ensurePrivateDir, tightenDirFilesOnce, writePrivateFile } from "./fs-store.mjs";
 
 const MAX_LINE_BYTES = 4000; // stay under PIPE_BUF (~4 KB) for atomic appends
@@ -34,7 +35,9 @@ const DEFAULT_ROTATE_AGE_MS = 60 * 60 * 1000; // 1 hour
 
 const ROW_BUDGET_BYTES =
   MAX_LINE_BYTES -
-  Buffer.byteLength(JSON.stringify({ _seq: Number.MAX_SAFE_INTEGER, _enqueuedAt: Number.MAX_SAFE_INTEGER }));
+  Buffer.byteLength(
+    JSON.stringify({ _seq: Number.MAX_SAFE_INTEGER, _enqueuedAt: Number.MAX_SAFE_INTEGER, client_row_id: randomUUID() })
+  );
 
 const rowBytes = (row) => Buffer.byteLength(JSON.stringify(row), "utf8");
 const fieldBytes = (row, field) => Buffer.byteLength(JSON.stringify(row[field] ?? null), "utf8");
@@ -98,6 +101,7 @@ export function createAuditWal(opts) {
     // order; the post-await order does not.
     const enriched = {
       ...row,
+      client_row_id: randomUUID(),
       _seq: ++seqCounter,
       _enqueuedAt: Date.now(),
     };
