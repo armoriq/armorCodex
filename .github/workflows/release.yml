@@ -1,0 +1,85 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.tagged.outputs.exists == 'false' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+
+      - name: Read the version
+        id: version
+        run: echo "tag=v$(jq -r .version plugins/armorcodex/package.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Skip a version that is already released
+        id: tagged
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "${TAG} is already tagged, nothing to release"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check the manifests and the CHANGELOG section
+        if: steps.tagged.outputs.exists == 'false'
+        run: node .github/scripts/release-info.mjs . "${RUNNER_TEMP}/notes.md"
+
+      - name: Test
+        if: steps.tagged.outputs.exists == 'false'
+        working-directory: plugins/armorcodex
+        run: |
+          npm ci --ignore-scripts
+          npm test
+
+  release:
+    needs: check
+    if: needs.check.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+
+      - name: Read the version and the release notes
+        id: info
+        run: node .github/scripts/release-info.mjs . "${RUNNER_TEMP}/notes.md"
+
+      - name: Tag and publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.info.outputs.tag }}
+        run: |
+          gh release create "${TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --target "${GITHUB_SHA}" \
+            --title "ArmorCodex ${TAG#v}" \
+            --notes-file "${RUNNER_TEMP}/notes.md" \
+            --latest

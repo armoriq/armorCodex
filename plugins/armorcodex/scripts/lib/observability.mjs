@@ -136,6 +136,7 @@ import {
 } from "./fs-store.mjs";
 import { readdir, unlink, stat } from "node:fs/promises";
 import path from "node:path";
+import { CLIENT } from "./client-identity.mjs";
 
 const { ArmorIQTelemetryRuntime, OtelSession } = armoriqSdk;
 
@@ -438,6 +439,7 @@ async function obsEndTurnAndShip(sessionId, config, transcriptPath) {
     apiKey: config.apiKey,
     sdkVersion: typeof armoriqSdk.VERSION === "string" ? armoriqSdk.VERSION : "unknown",
     options: { serviceName: config.observabilityProduct || "armorcodex" },
+    client: CLIENT,
   });
   const session = new OtelSession(runtime, {
     sessionId,

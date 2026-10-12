@@ -86,6 +86,7 @@ MARK_BEGIN="# >>> ArmorCodex managed block (do not edit manually) >>>"
 MARK_END="# <<< ArmorCodex managed block <<<"
 
 DO_UNINSTALL=0
+HAD_INSTALL=0
 FORCE_MODE=""
 if [[ "${ARMORIQ_FORCE_INSTALL:-0}" == "1" ]]; then
   FORCE_MODE="install"
@@ -316,6 +317,17 @@ upsert_managed_block() {
 # Plugin source + config wiring
 # ---------------------------------------------------------------------------
 
+refuse_other_channel() {
+  local branch command="install_armorcodex.sh"
+  branch="$(git -C "${INSTALL_HOME}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+  [[ "${branch}" == "${PLUGIN_GIT_REF}" ]] && return 0
+  [[ "${branch}" == "dev" ]] && command="install_armorcodex_dev.sh"
+  err "${INSTALL_HOME} is on ${branch}, not ${PLUGIN_GIT_REF}. Nothing was changed."
+  printf "  Update it with ${B}curl -fsSL https://armoriq.ai/%s | bash${N}\n" "${command}"
+  printf "  To switch channels, uninstall first (${B}--uninstall${N}), then delete %s.\n" "${INSTALL_HOME}"
+  exit 1
+}
+
 fetch_plugin_source() {
   # Local-first: when this script is run from inside a checkout (bootstrap.mjs
   # already present next to it), install THAT local code and never clone. This
@@ -332,6 +344,7 @@ fetch_plugin_source() {
   mkdir -p "$(dirname "${INSTALL_HOME}")"
 
   if [[ -d "${INSTALL_HOME}/.git" ]]; then
+    refuse_other_channel
     info "refreshing ${INSTALL_HOME} (git pull)"
     git -C "${INSTALL_HOME}" fetch --quiet origin "${PLUGIN_GIT_REF}" >/dev/null
     git -C "${INSTALL_HOME}" reset --hard --quiet FETCH_HEAD >/dev/null
@@ -630,11 +643,19 @@ abort_install() {
     strip_managed_block "${CONFIG_TOML}" 2>/dev/null && info "removed managed block from ${CONFIG_TOML}" || true
   fi
   remove_codex_hooks
-  if [[ -d "${INSTALL_HOME}" ]]; then
+  if [[ "${LOCAL_CHECKOUT}" -eq 0 && -d "${INSTALL_HOME}" ]]; then
     rm -rf "${INSTALL_HOME}" && info "removed plugin source ${INSTALL_HOME}" || true
   fi
   echo
   printf "  Get an account at ${C}${B}https://armoriq.ai${N} and re-run when ready.\n\n"
+  exit 1
+}
+
+stop_without_login() {
+  [[ "${HAD_INSTALL}" -eq 1 ]] || abort_install
+  echo
+  warn "Kept the existing ArmorCodex install, but it has no ArmorIQ login."
+  printf "  Run ${B}armoriq-dev login --product armorcodex${N}, then start a new Codex session.\n\n"
   exit 1
 }
 
@@ -661,11 +682,11 @@ EOF
   if ! is_promptable; then
     err "No TTY available for interactive login."
     printf "  Run ${B}armoriq-dev login --product armorcodex${N} interactively.\n"
-    abort_install
+    stop_without_login
   fi
 
   if ! prompt_yes_no "Connect your ArmorIQ account now?" "Y"; then
-    abort_install
+    stop_without_login
   fi
 
   echo
@@ -676,12 +697,12 @@ EOF
     npx @armoriq/sdk-dev login --product armorcodex && login_ok=1
   else
     err "armoriq-dev CLI not found."
-    abort_install
+    stop_without_login
   fi
 
   if [[ "${login_ok}" -ne 1 ]] || ! plugin_has_login; then
     err "ArmorIQ login did not complete for ArmorCodex's backend."
-    abort_install
+    stop_without_login
   fi
 
   echo
@@ -761,6 +782,8 @@ main() {
   check_codex_version
   check_github_access "${PLUGIN_GIT_URL}" || exit 1
   ok "prerequisites OK ($(codex --version 2>/dev/null | head -1), $(node --version))"
+
+  is_armorcodex_installed && HAD_INSTALL=1
 
   local mode
   mode="$(detect_mode)"
