@@ -442,3 +442,114 @@ test("a curl re-run over an install left at an old commit moves it to the reques
   assert.notEqual(locked, stale);
   assert.equal(sdk.version, locked);
 });
+
+function git(cwd, ...args) {
+  const result = spawnSync("git", args, { cwd, encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout.trim();
+}
+
+function pluginRepo(root) {
+  const work = join(root, "origin-work");
+  mkdirSync(join(work, "plugins", "armorcodex", "scripts", "lib"), { recursive: true });
+  git(root, "init", "--quiet", "--initial-branch=dev", work);
+  git(work, "config", "user.email", "test@example.test");
+  git(work, "config", "user.name", "test");
+  git(work, "config", "commit.gpgsign", "false");
+  writeFileSync(join(work, "plugins", "armorcodex", "scripts", "bootstrap.mjs"), "");
+  writeFileSync(
+    join(work, "plugins", "armorcodex", "scripts", "lib", "config.mjs"),
+    'export const loadConfig = () => ({ apiKey: "ak_test_update" });\n'
+  );
+  const commit = (version) => {
+    writeFileSync(join(work, "plugins", "armorcodex", "package.json"), JSON.stringify({ name: "armorcodex", version }));
+    git(work, "add", "-A");
+    git(work, "commit", "--quiet", "-m", version);
+    return git(work, "rev-parse", "HEAD");
+  };
+  return { work, commit };
+}
+
+function runPipedInstaller(root, home, binDir, env) {
+  const script = readFileSync(new URL("../install_armorcodex.sh", import.meta.url));
+  return spawnSync("bash", ["-s", "--", "--update"], {
+    cwd: root,
+    input: script,
+    encoding: "utf8",
+    env: { ...process.env, HOME: home, PATH: `${binDir}${delimiter}${process.env.PATH}`, NO_COLOR: "1", ...env },
+  });
+}
+
+
+test("the dev command's downloaded installer moves an existing dev install to the branch's latest commit", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "armorcodex-wrapper-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const binDir = join(root, "bin");
+  mkdirSync(join(home, ".codex"), { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  stubTools(binDir);
+  saveCodexLogin(home);
+  const origin = pluginRepo(root);
+  origin.commit("0.3.4");
+  const installHome = join(home, ".armoriq", "armorCodex");
+  git(root, "clone", "--quiet", "--depth", "1", "--branch", "dev", `file://${origin.work}`, installHome);
+  const latest = origin.commit("0.3.5");
+  const download = mkdtempSync(join(root, "download-"));
+  const installer = join(download, "install_armorcodex.sh");
+  writeFileSync(installer, readFileSync(new URL("../install_armorcodex.sh", import.meta.url)));
+
+  const result = spawnSync("bash", [installer], {
+    cwd: root,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      HOME: home,
+      PATH: `${binDir}${delimiter}${process.env.PATH}`,
+      ARMORCODEX_GIT_URL: origin.work,
+      ARMORCODEX_GIT_REF: "dev",
+      ARMORCODEX_INSTALL_HOME: installHome,
+    },
+  });
+
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(git(installHome, "rev-parse", "HEAD"), latest);
+  assert.doesNotMatch(result.stdout, /installing LOCAL checkout/);
+});
+
+for (const [installed, requested, command] of [
+  ["main", "dev", "install_armorcodex.sh"],
+  ["dev", "main", "install_armorcodex_dev.sh"],
+]) {
+  test(`the ${requested === "main" ? "stable" : requested} update command refuses an install on ${installed} and changes nothing`, (t) => {
+    const root = mkdtempSync(join(tmpdir(), "armorcodex-channel-"));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const home = join(root, "home");
+    const binDir = join(root, "bin");
+    mkdirSync(join(home, ".codex"), { recursive: true });
+    mkdirSync(binDir, { recursive: true });
+    stubTools(binDir);
+    saveCodexLogin(home);
+    const origin = pluginRepo(root);
+    origin.commit("0.3.4");
+    git(origin.work, "branch", "main");
+    const installHome = join(home, ".armoriq", "armorCodex");
+    git(root, "clone", "--quiet", "--depth", "1", "--branch", installed, `file://${origin.work}`, installHome);
+    const before = git(installHome, "rev-parse", "HEAD");
+    origin.commit("0.3.5");
+    git(origin.work, "branch", "-f", "main");
+
+    const result = runPipedInstaller(root, home, binDir, {
+      ARMORCODEX_GIT_URL: origin.work,
+      ARMORCODEX_GIT_REF: requested,
+      ARMORCODEX_INSTALL_HOME: installHome,
+    });
+
+    const out = (result.stdout + result.stderr).replace(/\x1b\[[0-9;]*m/g, "");
+    assert.equal(result.status, 1, out);
+    assert.match(out, new RegExp(`is on ${installed}, not ${requested}`));
+    assert.match(out, new RegExp(command.replace(".", "\\.")));
+    assert.equal(git(installHome, "rev-parse", "HEAD"), before);
+    assert.deepEqual(readdirSync(join(home, ".codex")), []);
+  });
+}

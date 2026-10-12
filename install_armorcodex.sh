@@ -316,6 +316,17 @@ upsert_managed_block() {
 # Plugin source + config wiring
 # ---------------------------------------------------------------------------
 
+refuse_other_channel() {
+  local branch command="install_armorcodex.sh"
+  branch="$(git -C "${INSTALL_HOME}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+  [[ "${branch}" == "${PLUGIN_GIT_REF}" ]] && return 0
+  [[ "${branch}" == "dev" ]] && command="install_armorcodex_dev.sh"
+  err "${INSTALL_HOME} is on ${branch}, not ${PLUGIN_GIT_REF}. Nothing was changed."
+  printf "  Update it with ${B}curl -fsSL https://armoriq.ai/%s | bash${N}\n" "${command}"
+  printf "  To switch channels, uninstall first (${B}--uninstall${N}), then delete %s.\n" "${INSTALL_HOME}"
+  exit 1
+}
+
 fetch_plugin_source() {
   # Local-first: when this script is run from inside a checkout (bootstrap.mjs
   # already present next to it), install THAT local code and never clone. This
@@ -332,6 +343,7 @@ fetch_plugin_source() {
   mkdir -p "$(dirname "${INSTALL_HOME}")"
 
   if [[ -d "${INSTALL_HOME}/.git" ]]; then
+    refuse_other_channel
     info "refreshing ${INSTALL_HOME} (git pull)"
     git -C "${INSTALL_HOME}" fetch --quiet origin "${PLUGIN_GIT_REF}" >/dev/null
     git -C "${INSTALL_HOME}" reset --hard --quiet FETCH_HEAD >/dev/null

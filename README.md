@@ -35,6 +35,20 @@ Bash result -> PostToolUse -> audit log to ArmorIQ IAP
 
 Requirements: Codex 0.162 or newer and Node.js 20 or newer. Older Codex sends no session id with MCP calls, so ArmorCodex rejects every plan registration. The installer checks both versions and stops if either is too old.
 
+### Install or Update
+
+The same command installs ArmorCodex and updates an existing install. Run it again whenever Tools says a new version is out:
+
+```bash
+# Stable (platform.armoriq.ai)
+curl -fsSL https://armoriq.ai/install_armorcodex.sh | bash
+
+# Dev (staging)
+curl -fsSL https://armoriq.ai/install_armorcodex_dev.sh | bash
+```
+
+An update fetches the latest plugin into `~/.armoriq/armorCodex`, rewires `~/.codex/config.toml` and `~/.codex/hooks.json`, and refreshes the npm dependencies. Your ArmorIQ login is kept. Each command updates only an install of its own channel; run against the other channel's install, it stops without changing anything. Release notes are in [CHANGELOG.md](CHANGELOG.md) and on the repo's GitHub releases.
+
 ### From This Checkout
 
 ```bash

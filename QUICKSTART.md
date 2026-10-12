@@ -38,6 +38,15 @@ armoriq-dev login --product armorcodex
 
 Without a saved login, ArmorCodex performs local policy and local plan enforcement. After login, it can request signed intent tokens and send audit logs.
 
+## Update
+
+Re-run the installer you installed with. It updates the existing install in place and keeps your login:
+
+```bash
+curl -fsSL https://armoriq.ai/install_armorcodex.sh | bash       # stable
+curl -fsSL https://armoriq.ai/install_armorcodex_dev.sh | bash   # dev
+```
+
 ## Current Limitation
 
 Codex hooks currently intercept Bash for `PreToolUse`, `PermissionRequest`, and `PostToolUse`. Other Codex tools are not directly gated by ArmorCodex hooks yet.
