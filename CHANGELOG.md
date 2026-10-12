@@ -2,7 +2,7 @@
 
 All notable changes to ArmorCodex are recorded here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
-## [0.3.5] - Unreleased
+## [0.3.5] - 2026-10-12
 
 ### Added
 - Turn latency: the usage worker sends each session-day's turn durations from Codex's `task_complete` records to the latency chart.
