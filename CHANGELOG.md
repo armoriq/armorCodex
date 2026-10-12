@@ -27,6 +27,7 @@ All notable changes to ArmorCodex are recorded here. Format follows [Keep a Chan
 - The installer requires Codex 0.162 or newer, merges its hooks into an existing `hooks.json` and removes only its own on uninstall, checks the login at the end of an update, offers missing tools, and works with git configs that rewrite GitHub HTTPS to SSH.
 - A re-run of the installer always runs `npm install`, so an install left on an old SDK is upgraded, and a piped re-run (`curl ... | bash`) refreshes the existing install instead of taking it for a local checkout.
 - The stable and dev install commands refuse to update an install on the other channel, and say which command to run, without changing anything.
+- An update that finds no usable login keeps the existing install, config block and hooks, prints the login command and exits 1. A fresh install still rolls back, and a run from a local checkout no longer deletes `ARMORCODEX_INSTALL_HOME`.
 
 ## [0.3.4] - 2026-10-10
 

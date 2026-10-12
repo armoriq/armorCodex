@@ -86,6 +86,7 @@ MARK_BEGIN="# >>> ArmorCodex managed block (do not edit manually) >>>"
 MARK_END="# <<< ArmorCodex managed block <<<"
 
 DO_UNINSTALL=0
+HAD_INSTALL=0
 FORCE_MODE=""
 if [[ "${ARMORIQ_FORCE_INSTALL:-0}" == "1" ]]; then
   FORCE_MODE="install"
@@ -642,11 +643,19 @@ abort_install() {
     strip_managed_block "${CONFIG_TOML}" 2>/dev/null && info "removed managed block from ${CONFIG_TOML}" || true
   fi
   remove_codex_hooks
-  if [[ -d "${INSTALL_HOME}" ]]; then
+  if [[ "${LOCAL_CHECKOUT}" -eq 0 && -d "${INSTALL_HOME}" ]]; then
     rm -rf "${INSTALL_HOME}" && info "removed plugin source ${INSTALL_HOME}" || true
   fi
   echo
   printf "  Get an account at ${C}${B}https://armoriq.ai${N} and re-run when ready.\n\n"
+  exit 1
+}
+
+stop_without_login() {
+  [[ "${HAD_INSTALL}" -eq 1 ]] || abort_install
+  echo
+  warn "Kept the existing ArmorCodex install, but it has no ArmorIQ login."
+  printf "  Run ${B}armoriq-dev login --product armorcodex${N}, then start a new Codex session.\n\n"
   exit 1
 }
 
@@ -673,11 +682,11 @@ EOF
   if ! is_promptable; then
     err "No TTY available for interactive login."
     printf "  Run ${B}armoriq-dev login --product armorcodex${N} interactively.\n"
-    abort_install
+    stop_without_login
   fi
 
   if ! prompt_yes_no "Connect your ArmorIQ account now?" "Y"; then
-    abort_install
+    stop_without_login
   fi
 
   echo
@@ -688,12 +697,12 @@ EOF
     npx @armoriq/sdk-dev login --product armorcodex && login_ok=1
   else
     err "armoriq-dev CLI not found."
-    abort_install
+    stop_without_login
   fi
 
   if [[ "${login_ok}" -ne 1 ]] || ! plugin_has_login; then
     err "ArmorIQ login did not complete for ArmorCodex's backend."
-    abort_install
+    stop_without_login
   fi
 
   echo
@@ -773,6 +782,8 @@ main() {
   check_codex_version
   check_github_access "${PLUGIN_GIT_URL}" || exit 1
   ok "prerequisites OK ($(codex --version 2>/dev/null | head -1), $(node --version))"
+
+  is_armorcodex_installed && HAD_INSTALL=1
 
   local mode
   mode="$(detect_mode)"

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   chmodSync,
   cpSync,
+  existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -227,7 +228,7 @@ test("an environment key cannot skip login or appear in installer instructions",
 function connectStep() {
   const installer = readFileSync(new URL("../install_armorcodex.sh", import.meta.url), "utf8");
   const pick = (name) => installer.match(new RegExp(`${name}\\(\\) \\{[\\s\\S]*?\\n\\}\\n`))?.[0] ?? "";
-  return [pick("plugin_has_login"), pick("connect_to_armoriq")].join("\n");
+  return [pick("stop_without_login"), pick("plugin_has_login"), pick("connect_to_armoriq")].join("\n");
 }
 
 function runConnect(home) {
@@ -459,7 +460,7 @@ function pluginRepo(root) {
   writeFileSync(join(work, "plugins", "armorcodex", "scripts", "bootstrap.mjs"), "");
   writeFileSync(
     join(work, "plugins", "armorcodex", "scripts", "lib", "config.mjs"),
-    'export const loadConfig = () => ({ apiKey: "ak_test_update" });\n'
+    'export const loadConfig = () => (process.env.TEST_NO_LOGIN ? {} : { apiKey: "ak_test_update" });\n'
   );
   const commit = (version) => {
     writeFileSync(join(work, "plugins", "armorcodex", "package.json"), JSON.stringify({ name: "armorcodex", version }));
@@ -553,3 +554,104 @@ for (const [installed, requested, command] of [
     assert.deepEqual(readdirSync(join(home, ".codex")), []);
   });
 }
+
+function runInstallerWithPrompts(root, home, binDir, prompts, env) {
+  const script = readFileSync(new URL("../install_armorcodex.sh", import.meta.url), "utf8")
+    .replace(/\nmain "\$@"\n$/, `\n${prompts}\nmain "$@"\n`);
+  const path = join(root, "install.sh");
+  writeFileSync(path, script);
+  return spawnSync("bash", [path], {
+    cwd: root,
+    encoding: "utf8",
+    env: { ...process.env, HOME: home, PATH: `${binDir}${delimiter}${process.env.PATH}`, NO_COLOR: "1", ...env },
+  });
+}
+
+function installed(home, installHome) {
+  const codex = join(home, ".codex");
+  return {
+    head: git(installHome, "rev-parse", "HEAD"),
+    config: readFileSync(join(codex, "config.toml"), "utf8"),
+    hooks: readFileSync(join(codex, "hooks.json"), "utf8"),
+  };
+}
+
+for (const [name, prompts, failingLogin] of [
+  ["there is no terminal", "is_promptable() { return 1; }", false],
+  ["the user declines the login", "is_promptable() { return 0; }\nprompt_yes_no() { return 1; }", false],
+  ["the login fails", "is_promptable() { return 0; }\nprompt_yes_no() { return 0; }", true],
+]) {
+  test(`an update without a usable login keeps the existing install when ${name}`, (t) => {
+    const root = mkdtempSync(join(tmpdir(), "armorcodex-keep-"));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const home = join(root, "home");
+    const binDir = join(root, "bin");
+    mkdirSync(join(home, ".codex"), { recursive: true });
+    mkdirSync(binDir, { recursive: true });
+    stubTools(binDir);
+    writeFileSync(join(binDir, "armoriq-dev"), `#!/bin/sh\necho login-called\nexit ${failingLogin ? 1 : 0}\n`);
+    chmodSync(join(binDir, "armoriq-dev"), 0o755);
+    const origin = pluginRepo(root);
+    origin.commit("0.3.4");
+    const installHome = join(home, ".armoriq", "armorCodex");
+    const env = { ARMORCODEX_GIT_URL: origin.work, ARMORCODEX_GIT_REF: "dev", ARMORCODEX_INSTALL_HOME: installHome };
+
+    const first = runInstallerWithPrompts(root, home, binDir, "", env);
+    assert.equal(first.status, 0, first.stdout + first.stderr);
+    const latest = origin.commit("0.3.5");
+
+    const result = runInstallerWithPrompts(root, home, binDir, prompts, { ...env, TEST_NO_LOGIN: "1" });
+
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.doesNotMatch(result.stdout, /rolling back|removed plugin source|removed managed block/);
+    assert.match(result.stdout.replace(/\x1b\[[0-9;]*m/g, ""), /Run armoriq-dev login --product armorcodex, then start a new Codex session/);
+    assert.equal(result.stdout.includes("login-called"), failingLogin);
+    const after = installed(home, installHome);
+    assert.equal(after.head, latest);
+    assert.match(after.config, /ArmorCodex managed block/);
+    assert.equal(after.hooks.split(`${installHome}/plugins/armorcodex/scripts/bootstrap.mjs`).length - 1, 7);
+  });
+}
+
+test("a fresh install without a usable login still rolls back", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "armorcodex-fresh-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const binDir = join(root, "bin");
+  mkdirSync(join(home, ".codex"), { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  stubTools(binDir);
+  const origin = pluginRepo(root);
+  origin.commit("0.3.5");
+  const installHome = join(home, ".armoriq", "armorCodex");
+
+  const result = runInstallerWithPrompts(root, home, binDir, "is_promptable() { return 1; }", {
+    ARMORCODEX_GIT_URL: origin.work,
+    ARMORCODEX_GIT_REF: "dev",
+    ARMORCODEX_INSTALL_HOME: installHome,
+    TEST_NO_LOGIN: "1",
+  });
+
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stdout, /removed plugin source/);
+  assert.equal(existsSync(installHome), false);
+  assert.doesNotMatch(readFileSync(join(home, ".codex", "config.toml"), "utf8"), /ArmorCodex managed block/);
+});
+
+test("a local checkout run without a login leaves ARMORCODEX_INSTALL_HOME alone", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "armorcodex-local-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const binDir = join(root, "bin");
+  const installHome = join(home, ".armoriq", "armorCodex");
+  mkdirSync(installHome, { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  stubTools(binDir);
+  writeFileSync(join(installHome, "keep.txt"), "not used by a local checkout run");
+
+  const result = await runInstaller(root, home, binDir, "--force-install");
+
+  assert.notEqual(result.status, 0, result.stdout);
+  assert.match(result.stdout, /rolling back/);
+  assert.equal(readFileSync(join(installHome, "keep.txt"), "utf8"), "not used by a local checkout run");
+});

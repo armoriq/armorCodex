@@ -47,7 +47,7 @@ curl -fsSL https://armoriq.ai/install_armorcodex.sh | bash
 curl -fsSL https://armoriq.ai/install_armorcodex_dev.sh | bash
 ```
 
-An update fetches the latest plugin into `~/.armoriq/armorCodex`, rewires `~/.codex/config.toml` and `~/.codex/hooks.json`, and refreshes the npm dependencies. Your ArmorIQ login is kept. Each command updates only an install of its own channel; run against the other channel's install, it stops without changing anything. Release notes are in [CHANGELOG.md](CHANGELOG.md) and on the repo's GitHub releases.
+An update fetches the latest plugin into `~/.armoriq/armorCodex`, rewires `~/.codex/config.toml` and `~/.codex/hooks.json`, and refreshes the npm dependencies. Your ArmorIQ login is kept. Each command updates only an install of its own channel; run against the other channel's install, it stops without changing anything. If the installer finds no login, it leaves the install in place, prints the login command to run, and exits with status 1. Release notes are in [CHANGELOG.md](CHANGELOG.md) and on the repo's GitHub releases.
 
 ### From This Checkout
 

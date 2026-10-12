@@ -47,6 +47,8 @@ curl -fsSL https://armoriq.ai/install_armorcodex.sh | bash       # stable
 curl -fsSL https://armoriq.ai/install_armorcodex_dev.sh | bash   # dev
 ```
 
+If it finds no ArmorIQ login, it keeps the install and prints the login command to run.
+
 ## Current Limitation
 
 Codex hooks currently intercept Bash for `PreToolUse`, `PermissionRequest`, and `PostToolUse`. Other Codex tools are not directly gated by ArmorCodex hooks yet.
