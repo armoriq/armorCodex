@@ -179,30 +179,49 @@ function batchOf(group) {
   return { snapshots: group.flatMap((p) => (p.snapshot ? [p.snapshot] : [])), ...(calls.length ? { calls } : {}) };
 }
 
+const MAX_CALL_SESSIONS = 100;
+
+const emptyCount = (bytes) => ({ snapshots: 0, entries: 0, records: 0, sessions: new Set(), bytes });
+
+const partSize = (part) => ({
+  snapshots: part.snapshot ? 1 : 0,
+  entries: part.snapshot?.entries.length ?? 0,
+  records: part.records.length,
+  bytes: encoded(part.snapshot) + encoded(part.records) + encoded(part.session) + 1,
+});
+
+function fits(count, part, size) {
+  const newSession = part.records.length && !count.sessions.has(part.session.sessionId) ? 1 : 0;
+  return (
+    count.snapshots + size.snapshots <= MAX_BATCH_SNAPSHOTS &&
+    count.entries + size.entries <= MAX_BATCH_ENTRIES &&
+    count.records + size.records <= MAX_BATCH_ENTRIES &&
+    count.sessions.size + newSession <= MAX_CALL_SESSIONS &&
+    count.bytes + size.bytes <= MAX_BATCH_BYTES
+  );
+}
+
+function add(count, part, size) {
+  count.snapshots += size.snapshots;
+  count.entries += size.entries;
+  count.records += size.records;
+  count.bytes += size.bytes;
+  if (part.records.length) count.sessions.add(part.session.sessionId);
+}
+
 export function packBatches(snapshots, overheadBytes = 512) {
   const batches = [];
   let current = [];
-  let count = { snapshots: 0, entries: 0, records: 0, bytes: overheadBytes };
+  let count = emptyCount(overheadBytes);
   for (const part of snapshots.flatMap(parts)) {
-    const size = encoded(part.snapshot) + encoded(part.records) + 1;
-    const entries = part.snapshot?.entries.length ?? 0;
-    const full =
-      count.snapshots + (part.snapshot ? 1 : 0) > MAX_BATCH_SNAPSHOTS ||
-      count.entries + entries > MAX_BATCH_ENTRIES ||
-      count.records + part.records.length > MAX_BATCH_ENTRIES ||
-      count.bytes + size > MAX_BATCH_BYTES;
-    if (full && current.length) {
+    const size = partSize(part);
+    if (current.length && !fits(count, part, size)) {
       batches.push(batchOf(current));
       current = [];
-      count = { snapshots: 0, entries: 0, records: 0, bytes: overheadBytes };
+      count = emptyCount(overheadBytes);
     }
     current.push(part);
-    count = {
-      snapshots: count.snapshots + (part.snapshot ? 1 : 0),
-      entries: count.entries + entries,
-      records: count.records + part.records.length,
-      bytes: count.bytes + size,
-    };
+    add(count, part, size);
   }
   if (current.length) batches.push(batchOf(current));
   return batches;
@@ -219,5 +238,18 @@ export function snapshotBatch(batch, snapshot) {
   const { calls: _all, ...rest } = batch;
   return { ...rest, snapshots: [snapshot], ...(calls.length ? { calls } : {}) };
 }
+
+function unclaimedCalls(batch) {
+  const claimed = (c, r) => batch.snapshots.some((s) => s.sessionId === c.sessionId && inHour(r.occurredAt, s));
+  const calls = (batch.calls ?? [])
+    .map((c) => ({ ...c, records: c.records.filter((r) => !claimed(c, r)) }))
+    .filter((c) => c.records.length);
+  return calls.length ? [{ ...batch, snapshots: [], calls }] : [];
+}
+
+export const splitBatch = (batch) => [
+  ...batch.snapshots.map((s) => snapshotBatch(batch, s)),
+  ...unclaimedCalls(batch),
+];
 
 export const newBatchId = () => randomUUID();

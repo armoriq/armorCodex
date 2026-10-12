@@ -432,3 +432,21 @@ test("a refused batch retried one session-hour at a time sends each hour with on
     );
   });
 });
+
+test("a refused batch holding another hour's overflow calls is retried without losing them", async () => {
+  await withBackend(at(1), async (b, h) => {
+    const busy = session(h, at(2), Array.from({ length: 620 }, (_, i) => usageRecord(at(3 + Math.floor(i / 40)), `busy_${i}`, 10, 1)));
+    session(h, at(40), [usageRecord(at(70), "quiet_1", 10, 1)]);
+    b.onBatch = (res, body) => {
+      const claimed = new Set(body.snapshots.map((s) => s.sessionId));
+      if (!(body.calls ?? []).some((c) => !claimed.has(c.sessionId)) || !body.snapshots.length) return false;
+      b.onBatch = null;
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ message: "refused as a whole" }));
+      return true;
+    };
+    await runWorker(h, b);
+    const stored = [...(b.callKeys ?? [])].filter((k) => k.startsWith(`${busy.id}\u0000`));
+    assert.equal(stored.length, 620);
+  });
+});

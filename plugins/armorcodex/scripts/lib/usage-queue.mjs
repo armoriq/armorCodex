@@ -9,7 +9,7 @@ import {
   knownDigests,
   newBatchId,
   packBatches,
-  snapshotBatch,
+  splitBatch,
   refuse,
   setGeneration,
   storedGeneration,
@@ -105,9 +105,9 @@ async function setAside(job, { file, ...item }, result) {
 }
 
 async function retryAlone(job, { file, ...item }) {
-  const singles = item.batch.snapshots.map((s) => ({
+  const singles = splitBatch(item.batch).map((batch) => ({
     ...item,
-    batch: { ...snapshotBatch(item.batch, s), batchId: newBatchId() },
+    batch: { ...batch, batchId: newBatchId() },
   }));
   await enqueue(job.queueDir, singles);
   await settle(file);
@@ -118,7 +118,7 @@ async function retryAlone(job, { file, ...item }) {
     if (result.ok) {
       await recordAcks(job.dir, single);
       await settle(single.file);
-      outcome.sent += 1;
+      outcome.sent += single.batch.snapshots.length;
     } else if (result.retryable === false)
       outcome.refused.push(await setAside(job, single, result));
   }
@@ -126,7 +126,7 @@ async function retryAlone(job, { file, ...item }) {
 }
 
 async function refuseBatch(job, item, result) {
-  if (item.batch.snapshots.length > 1) return retryAlone(job, item);
+  if (splitBatch(item.batch).length > 1) return retryAlone(job, item);
   return { sent: 0, refused: [await setAside(job, item, result)] };
 }
 
