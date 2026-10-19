@@ -126,7 +126,6 @@
  * safeObsAsync() (everything in this module does disk or network I/O, so
  * there is no synchronous variant to wrap).
  */
-import armoriqSdk from "@armoriq/sdk-dev";
 import { sanitizeParams, redactSecrets, sha256Hex } from "./common.mjs";
 import { codexTurnUsageCalls } from "./token-usage.mjs";
 import {
@@ -137,8 +136,8 @@ import {
 import { readdir, unlink, stat } from "node:fs/promises";
 import path from "node:path";
 import { CLIENT } from "./client-identity.mjs";
+import { sdkModule } from "./sdk.mjs";
 
-const { ArmorIQTelemetryRuntime, OtelSession } = armoriqSdk;
 
 // A trace file older than this is considered abandoned (crashed session,
 // missed Stop) and is garbage-collected on the next SessionStart rather than
@@ -434,10 +433,12 @@ async function obsEndTurnAndShip(sessionId, config, transcriptPath) {
 
   const { meta, spans } = parseTurnLog(await readNdjsonLines(claimedPath));
 
+  const { ArmorIQTelemetryRuntime, OtelSession } = sdkModule("observability");
+  const { VERSION } = sdkModule("_version");
   const runtime = new ArmorIQTelemetryRuntime({
     backendEndpoint: config.observabilityEndpoint,
     apiKey: config.apiKey,
-    sdkVersion: typeof armoriqSdk.VERSION === "string" ? armoriqSdk.VERSION : "unknown",
+    sdkVersion: typeof VERSION === "string" ? VERSION : "unknown",
     options: { serviceName: config.observabilityProduct || "armorcodex" },
     client: CLIENT,
   });

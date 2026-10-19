@@ -1,4 +1,3 @@
-import armoriqSdk from "@armoriq/sdk-dev";
 import {
   buildAuthHeaders,
   isPlainObject,
@@ -11,8 +10,8 @@ import {
 } from "./common.mjs";
 import { CLIENT } from "./client-identity.mjs";
 import { requireEndpoint } from "./config.mjs";
+import { sdkModule } from "./sdk.mjs";
 
-const { ArmorIQClient } = armoriqSdk;
 const sdkClientCache = new Map();
 
 function buildSdkClientKey(config) {
@@ -33,7 +32,7 @@ export function getSdkClient(config) {
   if (cached) {
     return cached;
   }
-  const client = new ArmorIQClient({
+  const client = new (sdkModule("client").ArmorIQClient)({
     apiKey: config.apiKey,
     userId: config.userId,
     agentId: config.agentId,

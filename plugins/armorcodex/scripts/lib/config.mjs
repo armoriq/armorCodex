@@ -1,8 +1,8 @@
-import armoriqSdk from "@armoriq/sdk-dev";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import path from "node:path";
 import { parseBoolean, parseInteger, parseList } from "./common.mjs";
+import { sdkModule } from "./sdk.mjs";
 
 const { ARMORIQ_ENV: BUILD_ENV, ENDPOINTS } = createRequire(import.meta.url)(
   "@armoriq/sdk-dev/dist/_build_env.js",
@@ -99,11 +99,10 @@ function pluginOpt(env, pluginKey, legacyKey) {
 }
 
 const PRODUCT = "armorcodex";
-const { loadLoginContext } = armoriqSdk;
 
 function savedLogin(backend) {
   try {
-    return loadLoginContext({ backend, product: PRODUCT });
+    return sdkModule("credentials").loadLoginContext({ backend, product: PRODUCT });
   } catch (error) {
     if (typeof error?.code === "string") return null;
     throw error;
