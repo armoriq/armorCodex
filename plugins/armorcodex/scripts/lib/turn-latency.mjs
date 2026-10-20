@@ -1,7 +1,5 @@
-import armoriqSdk from "@armoriq/sdk-dev";
 import { rolloutMeta } from "./rollout-session.mjs";
-
-const { codexTurnLatencies, turnLatencyPayloads } = armoriqSdk;
+import { sdkModule } from "./sdk.mjs";
 
 function firstOwnTurnMs(transcript, cutoff) {
   const meta = rolloutMeta(transcript);
@@ -11,6 +9,7 @@ function firstOwnTurnMs(transcript, cutoff) {
 
 export function sessionLatencyPayloads({ transcript, sessionId, cutoff, product, deviceId, deviceName }) {
   const from = firstOwnTurnMs(transcript, cutoff);
+  const { codexTurnLatencies, turnLatencyPayloads } = sdkModule("turn_latency");
   const samples = codexTurnLatencies(transcript).filter((sample) => sample.startedAtMs >= from);
   return turnLatencyPayloads({ product, sessionId, deviceId, deviceName }, samples);
 }

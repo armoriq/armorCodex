@@ -4,13 +4,12 @@ import { readFile, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import armoriqSdk from "@armoriq/sdk-dev";
 import { ensurePrivateDir, PRIVATE_FILE_MODE, readJson, writeJson } from "./fs-store.mjs";
 import { validHistory } from "./login-ownership.mjs";
+import { sdkModule } from "./sdk.mjs";
 import { isAlive } from "./usage-sync-launch.mjs";
 import { captureCodexSession, listSessions, rolloutOf } from "./rollout-session.mjs";
 
-const { MAX_BATCH_BYTES, MAX_BATCH_ENTRIES, MAX_BATCH_SNAPSHOTS, usageCallRecords } = armoriqSdk;
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const LOCK_WAIT_MS = 5_000;
 
@@ -158,6 +157,7 @@ const encoded = (value) => Buffer.byteLength(JSON.stringify(value));
 function parts(snapshot) {
   const { calls = [], ...sent } = snapshot;
   const session = { sessionId: sent.sessionId, repo: sent.repo, armored: sent.armored };
+  const { MAX_BATCH_ENTRIES, usageCallRecords } = sdkModule("usage_sync");
   const records = usageCallRecords(calls);
   const chunks = [];
   for (let i = 0; i < records.length; i += MAX_BATCH_ENTRIES) chunks.push(records.slice(i, i + MAX_BATCH_ENTRIES));
@@ -191,6 +191,7 @@ const partSize = (part) => ({
 });
 
 function fits(count, part, size) {
+  const { MAX_BATCH_BYTES, MAX_BATCH_ENTRIES, MAX_BATCH_SNAPSHOTS } = sdkModule("usage_sync");
   const newSession = part.records.length && !count.sessions.has(part.session.sessionId) ? 1 : 0;
   return (
     count.snapshots + size.snapshots <= MAX_BATCH_SNAPSHOTS &&
