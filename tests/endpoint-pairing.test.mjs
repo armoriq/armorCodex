@@ -17,7 +17,7 @@ const ROWS = {
 const CUSTOM = "http://127.0.0.1:3930";
 const { ARMORIQ_ENV: BUILD_ENV } = createRequire(
   new URL("../plugins/armorcodex/package.json", import.meta.url),
-)("@armoriq/sdk-dev/dist/_build_env.js");
+)("@armoriq/sdk/dist/_build_env.js");
 
 const paired = (config) => [config.backendEndpoint, config.proxyEndpoint, config.iapEndpoint, config.csrgEndpoint];
 

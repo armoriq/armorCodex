@@ -10,8 +10,8 @@ const requireSdk = createRequire(
   new URL("../plugins/armorcodex/package.json", import.meta.url),
 );
 const { saveLoginProfile, saveProfile, loadLoginContext } =
-  requireSdk("@armoriq/sdk-dev");
-const build = requireSdk("@armoriq/sdk-dev/dist/_build_env.js");
+  requireSdk("@armoriq/sdk");
+const build = requireSdk("@armoriq/sdk/dist/_build_env.js");
 const DEFAULT_BACKEND = build.ENDPOINTS[build.ARMORIQ_ENV].backend;
 const LOCAL = "http://127.0.0.1:3920";
 const KEY = "ak_test_savedlogin0000000000000000";

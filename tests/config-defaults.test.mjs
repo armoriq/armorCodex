@@ -5,7 +5,7 @@ import { loadConfig } from "../plugins/armorcodex/scripts/lib/config.mjs";
 
 const { ARMORIQ_ENV: BUILD_ENV } = createRequire(
   new URL("../plugins/armorcodex/package.json", import.meta.url),
-)("@armoriq/sdk-dev/dist/_build_env.js");
+)("@armoriq/sdk/dist/_build_env.js");
 
 const PRODUCTION = {
   backendEndpoint: "https://api.armoriq.ai",

@@ -143,7 +143,7 @@ EOF
 refuse_sudo() {
   if [[ "${EUID}" -eq 0 && -n "${SUDO_USER:-}" ]]; then
     err "don't run this installer with sudo"
-    echo "  run it as yourself: curl -fsSL https://armoriq.ai/install_armorcodex_dev.sh | bash" 1>&2
+    echo "  run it as yourself: curl -fsSL https://armoriq.ai/install_armorcodex.sh | bash" 1>&2
     exit 1
   fi
 }
@@ -526,11 +526,11 @@ install_npm_deps() {
 }
 
 install_armoriq_cli() {
-  info "installing ArmorIQ CLI ${B}(@armoriq/sdk-dev)${N}"
-  if npm install -g @armoriq/sdk-dev@latest --silent --no-audit --no-fund >/dev/null 2>&1; then
-    ok "armoriq-dev CLI ready"
+  info "installing ArmorIQ CLI ${B}(@armoriq/sdk)${N}"
+  if npm install -g @armoriq/sdk@latest --silent --no-audit --no-fund >/dev/null 2>&1; then
+    ok "armoriq CLI ready"
   else
-    warn "couldn't install globally, use ${B}npx @armoriq/sdk-dev${N} instead"
+    warn "couldn't install globally, use ${B}npx @armoriq/sdk${N} instead"
   fi
 }
 
@@ -599,7 +599,7 @@ finish_update_banner() {
   else
     info "Plugin: ${INSTALL_HOME} (refreshed)"
   fi
-  info "SDK:    @armoriq/sdk-dev (latest)"
+  info "SDK:    @armoriq/sdk (latest)"
   info "Hooks:  ${GLOBAL_HOOKS} (verified)"
   echo
 }
@@ -655,7 +655,7 @@ stop_without_login() {
   [[ "${HAD_INSTALL}" -eq 1 ]] || abort_install
   echo
   warn "Kept the existing ArmorCodex install, but it has no ArmorIQ login."
-  printf "  Run ${B}armoriq-dev login --product armorcodex${N}, then start a new Codex session.\n\n"
+  printf "  Run ${B}armoriq login --product armorcodex${N}, then start a new Codex session.\n\n"
   exit 1
 }
 
@@ -681,7 +681,7 @@ EOF
 
   if ! is_promptable; then
     err "No TTY available for interactive login."
-    printf "  Run ${B}armoriq-dev login --product armorcodex${N} interactively.\n"
+    printf "  Run ${B}armoriq login --product armorcodex${N} interactively.\n"
     stop_without_login
   fi
 
@@ -691,12 +691,12 @@ EOF
 
   echo
   local login_ok=0
-  if command -v armoriq-dev >/dev/null 2>&1; then
-    armoriq-dev login --product armorcodex && login_ok=1
+  if command -v armoriq >/dev/null 2>&1; then
+    armoriq login --product armorcodex && login_ok=1
   elif command -v npx >/dev/null 2>&1; then
-    npx @armoriq/sdk-dev login --product armorcodex && login_ok=1
+    npx @armoriq/sdk login --product armorcodex && login_ok=1
   else
-    err "armoriq-dev CLI not found."
+    err "armoriq CLI not found."
     stop_without_login
   fi
 

@@ -22,6 +22,7 @@ import {
 import { handleArmorPolicyCommand, isArmorPolicyCommand } from "./armor-policy-commands.mjs";
 import { fitAuditRow } from "./audit-wal.mjs";
 import { appendNdjsonLine, readJson, writePrivateFile } from "./fs-store.mjs";
+import { otherBackendLogins } from "./config.mjs";
 import { readFile, unlink } from "node:fs/promises";
 import path from "node:path";
 import {
@@ -175,10 +176,19 @@ export async function handleSessionStart(input, config) {
 
   const modeLabel = config.mode === "enforce" ? "ENFORCING" : "MONITORING";
   const intentLabel = config.intentRequired ? "required" : "optional";
-  return addPromptContext(
+  const output = addPromptContext(
     `ArmorCodex active (${modeLabel}, intent=${intentLabel})`,
     "SessionStart"
   );
+  const elsewhere = config.apiKey ? [] : otherBackendLogins(config.backendEndpoint);
+  if (elsewhere.length) {
+    const switchTo = elsewhere.find((login) => login.env);
+    output.systemMessage =
+      `ArmorCodex has no ArmorIQ login for ${config.backendEndpoint}, only for ${elsewhere.map((login) => login.host).join(", ")}, ` +
+      "so audit logs, traces and usage are off. Run `armoriq login --product armorcodex`" +
+      (switchTo ? `, or set ARMORIQ_ENV=${switchTo.env} to use the ${switchTo.host} login.` : ".");
+  }
+  return output;
 }
 
 // ---------------------------------------------------------------------------

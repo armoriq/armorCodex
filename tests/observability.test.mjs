@@ -12,7 +12,7 @@ import { denyPermissionRequest } from "../plugins/armorcodex/scripts/lib/hook-ou
 import { observeHook } from "../plugins/armorcodex/scripts/lib/observability.mjs";
 
 const { OtelSession } = createRequire(new URL("../plugins/armorcodex/package.json", import.meta.url))(
-  "@armoriq/sdk-dev",
+  "@armoriq/sdk",
 );
 
 function protoFields(buf) {
@@ -514,7 +514,7 @@ test("the lease and the trace export carry ArmorCodex's X-ArmorIQ-Client header"
 
   const version = JSON.parse(await readFile(new URL("../plugins/armorcodex/package.json", import.meta.url), "utf8")).version;
   assert.deepEqual([...new Set(ingest.clients)].sort(), [
-    `/observability/policy/lease armorcodex-dev/${version}`,
-    `/v1/traces armorcodex-dev/${version}`,
+    `/observability/policy/lease armorcodex/${version}`,
+    `/v1/traces armorcodex/${version}`,
   ]);
 });

@@ -5,7 +5,7 @@ import { parseBoolean, parseInteger, parseList } from "./common.mjs";
 import { sdkModule } from "./sdk.mjs";
 
 const { ARMORIQ_ENV: BUILD_ENV, ENDPOINTS } = createRequire(import.meta.url)(
-  "@armoriq/sdk-dev/dist/_build_env.js",
+  "@armoriq/sdk/dist/_build_env.js",
 );
 
 const ENV_NAMES = {
@@ -106,6 +106,26 @@ function savedLogin(backend) {
   } catch (error) {
     if (typeof error?.code === "string") return null;
     throw error;
+  }
+}
+
+// Saved ArmorCodex logins for other backends, e.g. a staging login left by the
+// dev channel after the default moved to production. `env` is the ARMORIQ_ENV
+// that selects that backend, or null for a backend outside the SDK's table.
+export function otherBackendLogins(backend) {
+  try {
+    const credentials = sdkModule("credentials");
+    const own = credentials.profileName(backend, PRODUCT);
+    return credentials
+      .profileNames()
+      .filter((name) => name.startsWith(`${PRODUCT}@`) && name !== own)
+      .map((name) => {
+        const host = name.slice(PRODUCT.length + 1);
+        const env = Object.keys(ENDPOINTS).find((key) => new URL(ENDPOINTS[key].backend).host === host);
+        return { host, env: env ?? null };
+      });
+  } catch {
+    return [];
   }
 }
 

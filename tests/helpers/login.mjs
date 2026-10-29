@@ -6,7 +6,7 @@ import path from "node:path";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 
 const requireSdk = createRequire(new URL("../../plugins/armorcodex/package.json", import.meta.url));
-const { profileName } = requireSdk("@armoriq/sdk-dev");
+const { profileName } = requireSdk("@armoriq/sdk");
 
 export function signIn(home, { backend, apiKey, userId = "user-login", at = new Date().toISOString(), origin = "fresh" }) {
   assert.ok(home.startsWith(os.tmpdir()), home);

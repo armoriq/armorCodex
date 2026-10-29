@@ -18,7 +18,7 @@ test("the channel comes from the SDK package the plugin depends on", () => {
     product: "armorcodex",
     version: "1.2.3",
   });
-  assert.deepEqual(CLIENT, { product: "armorcodex-dev", version: manifest.version });
+  assert.deepEqual(CLIENT, { product: "armorcodex", version: manifest.version });
 });
 
 test("the audit batch request carries the X-ArmorIQ-Client header", async (t) => {
@@ -39,7 +39,7 @@ test("the audit batch request carries the X-ArmorIQ-Client header", async (t) =>
 
   await svc.shipAuditBatch([{ tool: "Read" }]);
 
-  assert.deepEqual(seen, [`/iap/audit/batch armorcodex-dev/${manifest.version}`]);
+  assert.deepEqual(seen, [`/iap/audit/batch armorcodex/${manifest.version}`]);
 });
 
 test("the SDK client is built with ArmorCodex's client identity", () => {

@@ -43,7 +43,7 @@ The same command installs ArmorCodex and updates an existing install. Run it aga
 # Stable (platform.armoriq.ai)
 curl -fsSL https://armoriq.ai/install_armorcodex.sh | bash
 
-# Dev (staging)
+# Dev (tracks the dev branch)
 curl -fsSL https://armoriq.ai/install_armorcodex_dev.sh | bash
 ```
 
@@ -79,7 +79,9 @@ ArmorCodex ships a Codex plugin manifest at `.codex-plugin/plugin.json` and an M
 
 ## Configuration
 
-Sign in with `armoriq-dev login --product armorcodex`. ArmorCodex reads the saved login for its backend and product.
+Sign in with `armoriq login --product armorcodex`. ArmorCodex reads the saved login for its backend and product.
+
+ArmorCodex and the `armoriq` CLI talk to production (`https://api.armoriq.ai`) by default. To use staging, set `ARMORIQ_ENV=staging` in the shell that runs both `armoriq login` and Codex; a login saved for one backend is not used for the other.
 
 Core environment variables:
 
