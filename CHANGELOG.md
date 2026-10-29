@@ -2,6 +2,16 @@
 
 All notable changes to ArmorCodex are recorded here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.3.7] - 2026-10-29
+
+### Changed
+- Stable channel on production: depends on `@armoriq/sdk` ^0.8.23 instead of `@armoriq/sdk-dev`, so ArmorCodex and the `armoriq` CLI default to `https://api.armoriq.ai`. Set `ARMORIQ_ENV=staging` to use staging.
+- The installer installs `@armoriq/sdk` and signs in with `armoriq login --product armorcodex`.
+- Requests carry `X-ArmorIQ-Client: armorcodex/<version>`.
+
+### Fixed
+- A login saved by the current `armoriq` CLI (credentials file version 2) is found by the plugin and the installer. The 0.3.2 release read a top-level `apiKey` that this file no longer has, so it ran without the backend after a fresh login.
+
 ## [0.3.6] - 2026-10-12
 
 ### Added

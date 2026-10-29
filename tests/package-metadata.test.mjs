@@ -38,7 +38,7 @@ test("release metadata uses the registry sdk 0.8.23 SDK and one ArmorCodex versi
     agentsMarketplace.metadata.version,
     agentsMarketplace.plugins[0].version,
   ]) {
-    assert.equal(version, "0.3.6");
+    assert.equal(version, "0.3.7");
   }
 });
 
