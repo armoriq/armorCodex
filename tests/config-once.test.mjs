@@ -10,7 +10,7 @@ import { getSdkClient } from "../plugins/armorcodex/scripts/lib/intent.mjs";
 import { signIn, withHome } from "./helpers/login.mjs";
 
 const requirePlugin = createRequire(new URL("../plugins/armorcodex/package.json", import.meta.url));
-const build = requirePlugin("@armoriq/sdk-dev/dist/_build_env.js");
+const build = requirePlugin("@armoriq/sdk/dist/_build_env.js");
 const { Client } = requirePlugin("@modelcontextprotocol/sdk/client/index.js");
 const { StdioClientTransport } = requirePlugin("@modelcontextprotocol/sdk/client/stdio.js");
 const DEFAULT_BACKEND = build.ENDPOINTS[build.ARMORIQ_ENV].backend;

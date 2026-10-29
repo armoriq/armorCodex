@@ -5,7 +5,7 @@ import { parseBoolean, parseInteger, parseList } from "./common.mjs";
 import { sdkModule } from "./sdk.mjs";
 
 const { ARMORIQ_ENV: BUILD_ENV, ENDPOINTS } = createRequire(import.meta.url)(
-  "@armoriq/sdk-dev/dist/_build_env.js",
+  "@armoriq/sdk/dist/_build_env.js",
 );
 
 const ENV_NAMES = {

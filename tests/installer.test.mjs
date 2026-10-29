@@ -28,8 +28,8 @@ function stubTools(binDir, codexVersion = "codex-cli 0.162.0") {
 
 function saveCodexLogin(home, product = "armorcodex") {
   const requireSdk = createRequire(new URL("../plugins/armorcodex/package.json", import.meta.url));
-  const { saveLoginProfile } = requireSdk("@armoriq/sdk-dev");
-  const build = requireSdk("@armoriq/sdk-dev/dist/_build_env.js");
+  const { saveLoginProfile } = requireSdk("@armoriq/sdk");
+  const build = requireSdk("@armoriq/sdk/dist/_build_env.js");
   const real = os.homedir;
   os.homedir = () => home;
   syncBuiltinESMExports();
@@ -220,7 +220,7 @@ test("an environment key cannot skip login or appear in installer instructions",
     env: { PATH: process.env.PATH, HOME: root, ARMORIQ_API_KEY: "ignored-test-key" },
   });
   assert.equal(result.status, 17, result.stderr || result.stdout);
-  assert.match(result.stdout, /armoriq-dev login --product armorcodex/);
+  assert.match(result.stdout, /armoriq login --product armorcodex/);
   assert.doesNotMatch(result.stdout, /credentials already present|ARMORIQ_API_KEY/);
   assert.doesNotMatch(installer, /ARMORIQ_API_KEY/);
 });
@@ -246,8 +246,8 @@ function runConnect(home) {
 
 test("only an armorcodex login the plugin loads skips the installer's login", (t) => {
   const requireSdk = createRequire(new URL("../plugins/armorcodex/package.json", import.meta.url));
-  const { saveLoginProfile } = requireSdk("@armoriq/sdk-dev");
-  const build = requireSdk("@armoriq/sdk-dev/dist/_build_env.js");
+  const { saveLoginProfile } = requireSdk("@armoriq/sdk");
+  const build = requireSdk("@armoriq/sdk/dist/_build_env.js");
   const backend = build.ENDPOINTS[build.ARMORIQ_ENV].backend;
   const homes = {};
   for (const name of ["claudeOnly", "v1", "codex"]) {
@@ -273,7 +273,7 @@ test("only an armorcodex login the plugin loads skips the installer's login", (t
   for (const name of ["claudeOnly", "v1"]) {
     const result = runConnect(homes[name]);
     assert.equal(result.status, 17, `${name}: ${result.stdout}${result.stderr}`);
-    assert.match(result.stdout, /armoriq-dev login --product armorcodex/, name);
+    assert.match(result.stdout, /armoriq login --product armorcodex/, name);
     assert.doesNotMatch(result.stdout, /already present|login for ArmorCodex found|connected/, name);
   }
   const codex = runConnect(homes.codex);
@@ -343,13 +343,13 @@ test("re-running the installer upgrades an SDK left behind in node_modules", asy
     npm_config_prefix: join(root, "npm-global"),
   };
   const sdkVersion = () =>
-    JSON.parse(readFileSync(join(plugin, "node_modules", "@armoriq", "sdk-dev", "package.json"), "utf8")).version;
+    JSON.parse(readFileSync(join(plugin, "node_modules", "@armoriq", "sdk", "package.json"), "utf8")).version;
   const locked = JSON.parse(readFileSync(join(plugin, "package-lock.json"), "utf8"))
-    .packages["node_modules/@armoriq/sdk-dev"].version;
-  const stale = "0.8.12";
+    .packages["node_modules/@armoriq/sdk"].version;
+  const stale = "0.6.10";
   assert.notEqual(locked, stale);
 
-  const seed = spawnSync("npm", ["install", "--omit=dev", "--no-save", "--no-audit", "--no-fund", `@armoriq/sdk-dev@${stale}`], {
+  const seed = spawnSync("npm", ["install", "--omit=dev", "--no-save", "--no-audit", "--no-fund", `@armoriq/sdk@${stale}`], {
     cwd: plugin,
     encoding: "utf8",
     env,
@@ -405,11 +405,11 @@ test("a curl re-run over an install left at an old commit moves it to the reques
   };
   const git = (args, cwd = upstream) =>
     run("git", ["-c", "user.name=t", "-c", "user.email=t@example.test", "-c", "commit.gpgsign=false", ...args], cwd);
-  const stale = "0.8.12";
+  const stale = "0.6.10";
 
   git(["init", "--quiet", "-b", "main"]);
   const oldPackage = JSON.parse(readFileSync(join(source, "package.json"), "utf8"));
-  oldPackage.dependencies["@armoriq/sdk-dev"] = stale;
+  oldPackage.dependencies["@armoriq/sdk"] = stale;
   writeFileSync(join(upstreamPlugin, "package.json"), JSON.stringify(oldPackage, null, 2));
   run("npm", ["install", "--package-lock-only", "--no-audit", "--no-fund"], upstreamPlugin);
   git(["add", "-A"]);
@@ -436,10 +436,10 @@ test("a curl re-run over an install left at an old commit moves it to the reques
   assert.doesNotMatch(result.stdout, /installing LOCAL checkout/);
   assert.equal(git(["rev-parse", "HEAD"], installHome), newCommit);
   const sdk = JSON.parse(
-    readFileSync(join(installHome, "plugins", "armorcodex", "node_modules", "@armoriq", "sdk-dev", "package.json"), "utf8"),
+    readFileSync(join(installHome, "plugins", "armorcodex", "node_modules", "@armoriq", "sdk", "package.json"), "utf8"),
   );
   const locked = JSON.parse(readFileSync(join(source, "package-lock.json"), "utf8"))
-    .packages["node_modules/@armoriq/sdk-dev"].version;
+    .packages["node_modules/@armoriq/sdk"].version;
   assert.notEqual(locked, stale);
   assert.equal(sdk.version, locked);
 });
@@ -589,8 +589,8 @@ for (const [name, prompts, failingLogin] of [
     mkdirSync(join(home, ".codex"), { recursive: true });
     mkdirSync(binDir, { recursive: true });
     stubTools(binDir);
-    writeFileSync(join(binDir, "armoriq-dev"), `#!/bin/sh\necho login-called\nexit ${failingLogin ? 1 : 0}\n`);
-    chmodSync(join(binDir, "armoriq-dev"), 0o755);
+    writeFileSync(join(binDir, "armoriq"), `#!/bin/sh\necho login-called\nexit ${failingLogin ? 1 : 0}\n`);
+    chmodSync(join(binDir, "armoriq"), 0o755);
     const origin = pluginRepo(root);
     origin.commit("0.3.4");
     const installHome = join(home, ".armoriq", "armorCodex");
@@ -604,7 +604,7 @@ for (const [name, prompts, failingLogin] of [
 
     assert.equal(result.status, 1, result.stdout + result.stderr);
     assert.doesNotMatch(result.stdout, /rolling back|removed plugin source|removed managed block/);
-    assert.match(result.stdout.replace(/\x1b\[[0-9;]*m/g, ""), /Run armoriq-dev login --product armorcodex, then start a new Codex session/);
+    assert.match(result.stdout.replace(/\x1b\[[0-9;]*m/g, ""), /Run armoriq login --product armorcodex, then start a new Codex session/);
     assert.equal(result.stdout.includes("login-called"), failingLogin);
     const after = installed(home, installHome);
     assert.equal(after.head, latest);

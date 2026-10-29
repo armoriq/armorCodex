@@ -20,7 +20,7 @@ const USED = {
 };
 
 test("every SDK module loaded by name serves the same export as the SDK root", () => {
-  const root = require("@armoriq/sdk-dev");
+  const root = require("@armoriq/sdk");
   for (const [name, exports] of Object.entries(USED)) {
     const mod = sdkModule(name);
     assert.notEqual(mod, root, `${name} should load without the SDK root`);
@@ -41,5 +41,5 @@ test("every sdkModule call in scripts/lib is covered above", async () => {
 });
 
 test("an SDK module missing from the install falls back to the SDK root", () => {
-  assert.equal(sdkModule("no_such_module"), require("@armoriq/sdk-dev"));
+  assert.equal(sdkModule("no_such_module"), require("@armoriq/sdk"));
 });

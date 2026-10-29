@@ -9,7 +9,7 @@ import { handlePreToolUse } from "../plugins/armorcodex/scripts/lib/engine.mjs";
 import { requestIntent } from "../plugins/armorcodex/scripts/lib/intent.mjs";
 
 const { ArmorIQClient } = createRequire(new URL("../plugins/armorcodex/package.json", import.meta.url))(
-  "@armoriq/sdk-dev"
+  "@armoriq/sdk"
 );
 
 const SESSION = "sess-plan-check";

@@ -33,7 +33,7 @@ Then ask Codex to run a shell command. ArmorCodex will inject an instruction to 
 ## 4. Optional ArmorIQ Backend
 
 ```bash
-armoriq-dev login --product armorcodex
+armoriq login --product armorcodex
 ```
 
 Without a saved login, ArmorCodex performs local policy and local plan enforcement. After login, it can request signed intent tokens and send audit logs.

@@ -10,7 +10,7 @@ import { signIn } from "./helpers/login.mjs";
 const HOOK_ROUTER = path.join(path.dirname(fileURLToPath(import.meta.url)), "../plugins/armorcodex/scripts/hook-router.mjs");
 
 const REPORT_SDK_ROOT = `data:text/javascript,${encodeURIComponent(
-  'import Module from "node:module";process.on("exit",()=>{for(const k of Object.keys(Module._cache))if(/@armoriq\\/sdk-dev\\/dist\\/index\\.js$|\\/node_modules\\/axios\\//.test(k))process.stderr.write("loaded "+k+"\\n")});'
+  'import Module from "node:module";process.on("exit",()=>{for(const k of Object.keys(Module._cache))if(/@armoriq\\/sdk\\/dist\\/index\\.js$|\\/node_modules\\/axios\\//.test(k))process.stderr.write("loaded "+k+"\\n")});'
 )}`;
 
 const PAYLOADS = [
