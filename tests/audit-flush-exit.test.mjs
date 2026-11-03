@@ -66,7 +66,7 @@ async function startServerWithQueuedRows(t, { delayMs = 0, failFirst = 0, rows }
   let stderr = "";
   child.stderr.on("data", (chunk) => (stderr += chunk));
   const exited = new Promise((resolve) => child.on("exit", (code, signal) => resolve({ code, signal })));
-  return { child, backend, exited, stderr: () => stderr };
+  return { child, backend, exited, dataDir, stderr: () => stderr };
 }
 
 test("closing the server's stdin ships the queued audit rows before it exits", async (t) => {
@@ -87,7 +87,13 @@ test("a shutdown during a periodic flush ships each queued row exactly once", as
 });
 
 test("a row resent after a failed upload carries the same client_row_id", async (t) => {
-  const { child, backend, exited, stderr } = await startServerWithQueuedRows(t, { failFirst: 1, rows: ["Bash", "Read"] });
+  const { child, backend, exited, stderr, dataDir } = await startServerWithQueuedRows(t, { failFirst: 1, rows: ["Bash", "Read"] });
+  await new Promise((resolve) => setTimeout(resolve, 5600));
+  const postureFile = path.join(dataDir, "backend-posture.json");
+  const posture = JSON.parse(fs.readFileSync(postureFile, "utf8"));
+  assert.equal(posture.state, "unreachable");
+  assert.equal(backend.sends.length, 1, "the 5xx holds the queue instead of retrying on the next tick");
+  fs.writeFileSync(postureFile, JSON.stringify({ ...posture, until: Date.now() - 1 }));
   await new Promise((resolve) => setTimeout(resolve, 5600));
   child.stdin.end();
   await exited;
