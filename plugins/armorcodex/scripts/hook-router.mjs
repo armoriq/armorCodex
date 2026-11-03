@@ -1,4 +1,5 @@
 import { emitJson } from "./lib/hook-stdout.mjs";
+import { cachedPosture, localOnly } from "./lib/backend-posture.mjs";
 import { loadConfig } from "./lib/config.mjs";
 import { denyPermissionRequest, denyPreTool } from "./lib/hook-output.mjs";
 import {
@@ -33,7 +34,7 @@ function debugLog(config, message) {
 }
 
 async function main() {
-  const config = loadConfig();
+  let config = loadConfig();
   await ensurePrivateDir(config.dataDir);
   const rawInput = await readStdin();
   if (!rawInput.trim()) {
@@ -54,6 +55,7 @@ async function main() {
   const event = typeof input.hook_event_name === "string" ? input.hook_event_name : "";
   currentEvent = event;
   debugLog(config, `hook=${event}`);
+  if ((await cachedPosture(config))?.state === "signed_out") config = localOnly(config);
   await trackUsageSession(event, input, config);
 
   let output;

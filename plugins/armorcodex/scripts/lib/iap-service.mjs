@@ -211,7 +211,7 @@ export function createIapService(config) {
         const message = response.text
           ? `IAP audit batch failed: ${response.text}`
           : `IAP audit batch failed with status ${response.status}`;
-        throw new Error(message);
+        throw Object.assign(new Error(message), { status: response.status });
       }
       return response.data;
     },
