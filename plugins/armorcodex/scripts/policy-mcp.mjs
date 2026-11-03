@@ -79,7 +79,24 @@ function coercePlanArgs(args) {
   if (typeof args.steps === "string") {
     try { args = { ...args, steps: JSON.parse(args.steps) }; } catch { /* leave as-is */ }
   }
+  // The inputSchema advertises goal as optional, so models often omit it.
+  if (!(typeof args.goal === "string" && args.goal.trim()) && Array.isArray(args.steps)) {
+    const goal = deriveGoal(args.steps);
+    if (goal) args = { ...args, goal };
+  }
   return args;
+}
+
+function deriveGoal(steps) {
+  const parts = steps
+    .map((step) => {
+      if (!step || typeof step !== "object") return "";
+      return ["description", "rationale", "reason", "why", "action", "tool"]
+        .map((key) => (typeof step[key] === "string" ? step[key].trim() : ""))
+        .find(Boolean) ?? "";
+    })
+    .filter(Boolean);
+  return parts.join("; ").slice(0, 500);
 }
 
 function codexSessionId(extra) {
