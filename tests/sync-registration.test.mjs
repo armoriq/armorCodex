@@ -50,14 +50,11 @@ async function withServer(answer, fn) {
   });
   const client = new Client({ name: "sync-registration-test", version: "0.0.0" });
   await client.connect(transport);
-  const register = async (goal, action = "Bash") => {
-    const result = await client.callTool({
-      name: "register_intent_plan",
-      arguments: { goal, steps: [{ action }] },
-      _meta: { sessionId: SESSION }
-    });
+  const registerArgs = async (args) => {
+    const result = await client.callTool({ name: "register_intent_plan", arguments: args, _meta: { sessionId: SESSION } });
     return result.content[0].text;
   };
+  const register = (goal, action = "Bash") => registerArgs({ goal, steps: [{ action }] });
   const config = withHome(home, () => loadConfig(env));
   const preToolUse = (toolName = "Bash") =>
     handlePreToolUse(
@@ -67,7 +64,7 @@ async function withServer(answer, fn) {
   const pendingPath = path.join(dataDir, `pending-plan.${SESSION}.json`);
   const pending = () => (fs.existsSync(pendingPath) ? JSON.parse(fs.readFileSync(pendingPath, "utf8")) : null);
   try {
-    await fn({ register, preToolUse, pending, backend, config });
+    await fn({ register, registerArgs, preToolUse, pending, backend, config });
   } finally {
     await client.close();
     backend.server.close();
@@ -157,4 +154,24 @@ test("a PreToolUse that outwaits the issuing deadline denies and asks for a new 
   } finally {
     fs.rmSync(dataDir, { recursive: true, force: true });
   }
+});
+
+test("a plan with steps and no goal registers, with the goal derived from the steps", async () => {
+  await withServer(() => ({ status: 200, delayMs: 0 }), async ({ registerArgs, backend }) => {
+    const reply = await registerArgs({
+      steps: [{ action: "Write", description: "write notes.txt" }, { action: "Bash", description: " " }]
+    });
+    assert.match(reply, /Intent registered: 2 steps\. ArmorIQ token issued\./);
+    assert.equal(backend.requests.length, 1);
+    assert.equal(backend.requests[0].plan.metadata.goal, "write notes.txt; Bash");
+  });
+});
+
+test("a plan with steps as a JSON string and no goal registers", async () => {
+  await withServer(() => ({ status: 200, delayMs: 0 }), async ({ registerArgs, backend, pending }) => {
+    const reply = await registerArgs({ steps: JSON.stringify([{ tool: "Bash", rationale: "list files" }]) });
+    assert.match(reply, /Intent registered: 1 steps\. ArmorIQ token issued\./);
+    assert.equal(backend.requests[0].plan.metadata.goal, "list files");
+    assert.deepEqual(pending().plan.steps.map((step) => step.action), ["Bash"]);
+  });
 });
