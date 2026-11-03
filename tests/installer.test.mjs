@@ -162,6 +162,38 @@ test("an existing hooks.json with only another tool's hooks keeps them and gains
   assert.deepEqual(JSON.parse(readFileSync(hooksPath, "utf8")), { hooks: { SessionStart: other, PostToolUse: other } });
 });
 
+test("install then uninstall leaves another tool's hooks.json byte-identical, whatever its indentation", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "armorcodex-foreign-bytes-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const binDir = join(root, "bin");
+  const hooksPath = join(home, ".codex", "hooks.json");
+  mkdirSync(join(home, ".codex"), { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  const superset = { type: "command", command: 'SUPERSET_AGENT_ID=codex "/opt/superset/hooks/notify.sh"' };
+  const pstack = { type: "command", command: "$HOME/.agents/hooks/pstack-reminder.sh" };
+  const foreign = JSON.stringify({
+    hooks: {
+      SessionStart: [{ hooks: [superset] }],
+      UserPromptSubmit: [{ hooks: [superset] }, { hooks: [pstack] }],
+      Stop: [{ hooks: [superset] }],
+    },
+  }, null, 4);
+  writeFileSync(hooksPath, foreign);
+  stubTools(binDir);
+  saveCodexLogin(home);
+
+  const install = await runInstaller(root, home, binDir);
+  assert.equal(install.status, 0, install.stderr || install.stdout);
+  const installed = readFileSync(hooksPath, "utf8");
+  assert.equal((installed.match(/bootstrap\.mjs router/g) ?? []).length, 7);
+  assert.match(installed, /^ {4}"hooks"/m);
+
+  const uninstall = await runInstaller(root, home, binDir, "--uninstall");
+  assert.equal(uninstall.status, 0, uninstall.stderr || uninstall.stdout);
+  assert.equal(readFileSync(hooksPath, "utf8"), foreign);
+});
+
 test("an update with an old-format credentials.json reaches the login step", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "armorcodex-update-v1-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
