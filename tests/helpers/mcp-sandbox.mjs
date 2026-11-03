@@ -17,3 +17,13 @@ axios.defaults.adapter = async (config) => {
   );
   return { status: 403, statusText: "Forbidden", headers: {}, config, data: { message: "sandbox" } };
 };
+
+const realFetch = globalThis.fetch;
+globalThis.fetch = async (url, init = {}) => {
+  if (new URL(String(url)).hostname === "127.0.0.1") return realFetch(url, init);
+  fs.appendFileSync(
+    path.join(home, "requests.jsonl"),
+    `${JSON.stringify({ method: init.method ?? "GET", url: String(url), body: init.body ?? null })}\n`
+  );
+  return new Response(JSON.stringify({ message: "sandbox" }), { status: 403, headers: { "content-type": "application/json" } });
+};

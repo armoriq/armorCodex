@@ -12,6 +12,14 @@ import { handleArmorPolicyCommand } from "./lib/armor-policy-commands.mjs";
 import { createAuditFlusher } from "./lib/audit-flusher.mjs";
 import { createAuditWal } from "./lib/audit-wal.mjs";
 import { createIapService } from "./lib/iap-service.mjs";
+import {
+  BACKEND_UNREACHABLE,
+  STATUS_COMMAND,
+  backendPosture,
+  cachedPosture,
+  classifyStatus,
+  recordBackendOutcome
+} from "./lib/backend-posture.mjs";
 
 const MATCHER_OPERATORS = z
   .object({
@@ -121,6 +129,15 @@ function withDeadline(promise, ms) {
   return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
 }
 
+function storeLocalPlan(pendingPath, plan) {
+  return writeJson(pendingPath, {
+    plan,
+    tokenRaw: "",
+    allowedActions: Array.from(extractAllowedActions(plan)),
+    registeredAt: Date.now()
+  });
+}
+
 async function issueAndStore(config, pendingPath, request) {
   const startedAt = Date.now();
   await writeJson(pendingPath, { status: "issuing", startedAt, deadlineAt: startedAt + INTENT_DEADLINE_MS });
@@ -144,14 +161,25 @@ async function issueAndStore(config, pendingPath, request) {
   }
 }
 
+// Rows stay queued while the backend is unreachable or rejects the key, and
+// ship on the first tick after the 30 second verdict expires.
 async function shipQueuedAudit(config) {
   if (!config.apiKey) return;
+  const posture = await cachedPosture(config);
+  if (posture && posture.state !== "ok") return;
   const wal = createAuditWal({ dataDir: config.dataDir });
   const iapService = createIapService(config);
   for (;;) {
     const { rows, endOffset } = await wal.readBatch(100);
     if (rows.length === 0) return;
-    await iapService.shipAuditBatch(rows);
+    const started = Date.now();
+    try {
+      await iapService.shipAuditBatch(rows);
+    } catch (error) {
+      await recordBackendOutcome(config, typeof error?.status === "number" ? classifyStatus(error.status) : "unreachable", started);
+      throw error;
+    }
+    await recordBackendOutcome(config, "ok", started);
     await wal.advanceOffset(endOffset);
     process.stderr.write(`[armorcodex-policy] flushed ${rows.length} audit rows -> offset=${endOffset}\n`);
   }
@@ -345,14 +373,24 @@ async function run() {
       const summary = { steps: plan.steps.length, goal: parsed.data.goal };
 
       if (!config.intentEndpoint && !(config.useSdkIntent && config.apiKey)) {
-        await writeJson(pendingPath, {
-          plan,
-          tokenRaw: "",
-          allowedActions: Array.from(extractAllowedActions(plan)),
-          registeredAt: Date.now()
-        });
+        await storeLocalPlan(pendingPath, plan);
         return toTextResult(
           `Intent registered: ${plan.steps.length} steps. Plan stored locally (no ArmorIQ backend configured).`,
+          summary
+        );
+      }
+
+      const posture = await backendPosture(config);
+      if (posture === "unreachable") {
+        return toTextResult(
+          `Plan rejected (${BACKEND_UNREACHABLE}): the ArmorIQ backend did not answer, so no token was issued. ` +
+            `Run ${STATUS_COMMAND} for details.`
+        );
+      }
+      if (posture === "signed_out") {
+        await storeLocalPlan(pendingPath, plan);
+        return toTextResult(
+          `Intent registered: ${plan.steps.length} steps. Plan stored locally (the ArmorIQ backend rejected the stored key, local only mode).`,
           summary
         );
       }

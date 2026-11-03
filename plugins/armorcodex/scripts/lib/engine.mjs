@@ -20,7 +20,16 @@ import {
   parsePolicyTextCommand
 } from "./policy.mjs";
 import { handleArmorPolicyCommand, isArmorPolicyCommand } from "./armor-policy-commands.mjs";
-import { fitAuditRow } from "./audit-wal.mjs";
+import { createAuditWal, fitAuditRow } from "./audit-wal.mjs";
+import {
+  BACKEND_UNREACHABLE,
+  backendPosture,
+  formatArmorStatus,
+  isStatusCommand,
+  localOnly,
+  toolCapability,
+  unreachableReason
+} from "./backend-posture.mjs";
 import { appendNdjsonLine, readJson, writePrivateFile } from "./fs-store.mjs";
 import { readFile, unlink } from "node:fs/promises";
 import path from "node:path";
@@ -112,8 +121,8 @@ function readIntentTokenRaw(input, session) {
   return "";
 }
 
-async function denyAndAudit(input, config, reason) {
-  await auditToolCall(input, config, { status: "blocked", output: null, error_message: reason }, null);
+async function denyAndAudit(input, config, reason, errorMessage = reason) {
+  await auditToolCall(input, config, { status: "blocked", output: null, error_message: errorMessage }, null);
   return denyPreTool(reason);
 }
 
@@ -190,6 +199,11 @@ export async function handleUserPromptSubmit(input, config) {
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   if (!prompt || !sessionId) {
     return null;
+  }
+
+  if (isStatusCommand(prompt)) {
+    const { rows } = await createAuditWal({ dataDir: config.dataDir }).readBatch(Number.MAX_SAFE_INTEGER);
+    return blockPrompt(await formatArmorStatus(config, { queuedRows: rows.length }));
   }
 
   // --- Structured /armor policy commands (staged proposal -> confirm) ---
@@ -299,6 +313,20 @@ export async function handlePreToolUse(input, config) {
     )
   ) {
     return null;
+  }
+
+  // Reads run while the backend is down; every other capability, the web tools
+  // whitelisted below included, waits on the backend posture first.
+  const capability = toolCapability(toolName);
+  if (capability !== "read") {
+    const posture = await backendPosture(config);
+    if (posture === "unreachable") {
+      const reason = unreachableReason(toolName, capability);
+      if (shouldDeny(config)) return denyAndAudit(input, config, reason, BACKEND_UNREACHABLE);
+      process.stderr.write(`[armorcodex] monitor mode: ${reason}; allowing it\n`);
+    } else if (posture === "signed_out") {
+      config = localOnly(config);
+    }
   }
 
   // --- Whitelist: Codex introspection / coordination tools that have
@@ -608,6 +636,7 @@ async function buildAuditRow(input, config, outcome, unknownStep) {
     step_index: matchedStepIndex(session.plan, toolName, inputs) ?? unknownStep,
     action: toolName,
     tool: toolName,
+    capability: toolCapability(toolName),
     input: redactSecrets(inputs),
     executed_at: new Date().toISOString(),
     duration_ms: await takeToolDuration(config, input.tool_use_id),
