@@ -91,8 +91,9 @@ function deriveGoal(steps) {
   const parts = steps
     .map((step) => {
       if (!step || typeof step !== "object") return "";
-      const text = step.description ?? step.rationale ?? step.reason ?? step.why ?? step.action ?? step.tool;
-      return typeof text === "string" ? text.trim() : "";
+      return ["description", "rationale", "reason", "why", "action", "tool"]
+        .map((key) => (typeof step[key] === "string" ? step[key].trim() : ""))
+        .find(Boolean) ?? "";
     })
     .filter(Boolean);
   return parts.join("; ").slice(0, 500);

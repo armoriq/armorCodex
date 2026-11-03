@@ -159,7 +159,7 @@ test("a PreToolUse that outwaits the issuing deadline denies and asks for a new 
 test("a plan with steps and no goal registers, with the goal derived from the steps", async () => {
   await withServer(() => ({ status: 200, delayMs: 0 }), async ({ registerArgs, backend }) => {
     const reply = await registerArgs({
-      steps: [{ action: "Write", description: "write notes.txt" }, { action: "Bash" }]
+      steps: [{ action: "Write", description: "write notes.txt" }, { action: "Bash", description: " " }]
     });
     assert.match(reply, /Intent registered: 2 steps\. ArmorIQ token issued\./);
     assert.equal(backend.requests.length, 1);
