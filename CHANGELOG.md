@@ -2,6 +2,11 @@
 
 All notable changes to ArmorCodex are recorded here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- The installer runs `armoriq-dev login --backend <the plugin's backend>`, so the saved login is the one the plugin looks up. Before, an `ARMORIQ_ENV` or `ARMORCODEX_BACKEND_ENDPOINT` override made the installer save a login under the CLI's staging default that the plugin never loaded.
+
 ## [0.3.6] - 2026-10-12
 
 ### Added
