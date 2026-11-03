@@ -4,10 +4,8 @@ All notable changes to ArmorCodex are recorded here. Format follows [Keep a Chan
 
 ## [Unreleased]
 
-### Changed
-- With `ARMORIQ_ENV` unset, ArmorCodex talks to production (`api.armoriq.ai`, `iap.armoriq.ai`, `proxy.armoriq.ai`) instead of the staging endpoints `@armoriq/sdk-dev` is built for. `ARMORIQ_ENV=staging` and `ARMORCODEX_BACKEND_ENDPOINT` still select staging.
-- The installer runs `armoriq-dev login --backend <the plugin's backend>`, so the saved login is the one the plugin looks up. A login saved for staging is not used against production: log in again.
-- `ARMORCODEX_USE_PRODUCTION=false` (or the `use_production=false` option) now selects the local stack, as the option describes, instead of staging. Use `ARMORIQ_ENV=staging` to reach staging.
+### Fixed
+- The installer runs `armoriq-dev login --backend <the plugin's backend>`, so the saved login is the one the plugin looks up. Before, an `ARMORIQ_ENV` or `ARMORCODEX_BACKEND_ENDPOINT` override made the installer save a login under the CLI's staging default that the plugin never loaded.
 
 ## [0.3.6] - 2026-10-12
 

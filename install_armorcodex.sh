@@ -664,7 +664,7 @@ stop_without_login() {
 plugin_backend() {
   node --input-type=module -e \
     'const { loadSettings } = await import(process.argv[1]); process.stdout.write(loadSettings().backendEndpoint);' \
-    "${PLUGIN_PATH}/scripts/lib/config.mjs" 2>/dev/null || printf 'https://api.armoriq.ai'
+    "${PLUGIN_PATH}/scripts/lib/config.mjs" 2>/dev/null || printf 'https://staging-api.armoriq.ai'
 }
 
 plugin_has_login() {

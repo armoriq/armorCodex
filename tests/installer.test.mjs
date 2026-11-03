@@ -35,7 +35,7 @@ function saveCodexLogin(home, product = "armorcodex") {
   syncBuiltinESMExports();
   try {
     saveLoginProfile({
-      backend: build.ENDPOINTS.production.backend,
+      backend: build.ENDPOINTS[build.ARMORIQ_ENV].backend,
       product,
       apiKey: "ak_test_update",
       email: "a@example.test",
@@ -244,7 +244,7 @@ function runConnect(home, { prompts = "is_promptable() { return 1; }", env = {} 
   `], { encoding: "utf8", env: { PATH: process.env.PATH, HOME: home, ...env } });
 }
 
-test("the installer logs in to the backend the plugin resolves, production unless ARMORIQ_ENV says otherwise", (t) => {
+test("the installer logs in to the backend the plugin resolves, staging unless ARMORIQ_ENV says otherwise", (t) => {
   const root = mkdtempSync(join(tmpdir(), "armorcodex-login-backend-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const binDir = join(root, "bin");
@@ -254,9 +254,9 @@ test("the installer logs in to the backend the plugin resolves, production unles
   const prompts = "is_promptable() { return 0; }\nprompt_yes_no() { return 0; }";
   const PATH = `${binDir}${delimiter}${process.env.PATH}`;
   for (const [env, backend] of [
-    [{}, "https://api.armoriq.ai"],
-    [{ ARMORIQ_BACKEND_URL: "https://staging-api.armoriq.ai" }, "https://api.armoriq.ai"],
-    [{ ARMORIQ_ENV: "staging" }, "https://staging-api.armoriq.ai"],
+    [{}, "https://staging-api.armoriq.ai"],
+    [{ ARMORIQ_BACKEND_URL: "https://api.armoriq.ai" }, "https://staging-api.armoriq.ai"],
+    [{ ARMORIQ_ENV: "production" }, "https://api.armoriq.ai"],
     [{ ARMORCODEX_BACKEND_ENDPOINT: "http://127.0.0.1:3000" }, "http://127.0.0.1:3000"],
   ]) {
     const result = runConnect(root, { prompts, env: { PATH, ...env } });
@@ -269,7 +269,7 @@ test("only an armorcodex login the plugin loads skips the installer's login", (t
   const requireSdk = createRequire(new URL("../plugins/armorcodex/package.json", import.meta.url));
   const { saveLoginProfile } = requireSdk("@armoriq/sdk-dev");
   const build = requireSdk("@armoriq/sdk-dev/dist/_build_env.js");
-  const backend = build.ENDPOINTS.production.backend;
+  const backend = build.ENDPOINTS[build.ARMORIQ_ENV].backend;
   const homes = {};
   for (const name of ["claudeOnly", "v1", "codex"]) {
     homes[name] = mkdtempSync(join(tmpdir(), `armorcodex-connect-${name}-`));
@@ -625,7 +625,7 @@ for (const [name, prompts, failingLogin] of [
 
     assert.equal(result.status, 1, result.stdout + result.stderr);
     assert.doesNotMatch(result.stdout, /rolling back|removed plugin source|removed managed block/);
-    assert.match(result.stdout.replace(/\x1b\[[0-9;]*m/g, ""), /Run armoriq-dev login --product armorcodex --backend https:\/\/api\.armoriq\.ai, then start a new Codex session/);
+    assert.match(result.stdout.replace(/\x1b\[[0-9;]*m/g, ""), /Run armoriq-dev login --product armorcodex --backend https:\/\/staging-api\.armoriq\.ai, then start a new Codex session/);
     assert.equal(result.stdout.includes("login-called"), failingLogin);
     const after = installed(home, installHome);
     assert.equal(after.head, latest);
