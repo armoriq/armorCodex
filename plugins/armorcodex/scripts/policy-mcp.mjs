@@ -155,13 +155,14 @@ async function shipQueuedAudit(config) {
   for (;;) {
     const { rows, endOffset } = await wal.readBatch(100);
     if (rows.length === 0) return;
+    const started = Date.now();
     try {
       await iapService.shipAuditBatch(rows);
     } catch (error) {
-      await recordBackendOutcome(config, typeof error?.status === "number" ? classifyStatus(error.status) : "unreachable");
+      await recordBackendOutcome(config, typeof error?.status === "number" ? classifyStatus(error.status) : "unreachable", started);
       throw error;
     }
-    await recordBackendOutcome(config, "ok");
+    await recordBackendOutcome(config, "ok", started);
     await wal.advanceOffset(endOffset);
     process.stderr.write(`[armorcodex-policy] flushed ${rows.length} audit rows -> offset=${endOffset}\n`);
   }

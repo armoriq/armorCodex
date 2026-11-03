@@ -42,8 +42,12 @@ export function classifyStatus(status) {
   return "ok";
 }
 
+// `now` is when the call started, so a slow call that finishes late cannot
+// replace a verdict from a call that started after it.
 export async function recordBackendOutcome(config, state, now = Date.now()) {
   if (!config.apiKey || !config.backendEndpoint) return;
+  const saved = await readJson(postureFile(config), null);
+  if (saved?.backend === config.backendEndpoint && saved.key === keyFingerprint(config.apiKey) && saved.at > now) return;
   await writeJson(postureFile(config), {
     backend: config.backendEndpoint,
     key: keyFingerprint(config.apiKey),
@@ -68,6 +72,7 @@ export async function cachedPosture(config, now = Date.now()) {
 }
 
 export async function probeBackend(config) {
+  const started = Date.now();
   let state;
   try {
     const response = await postJson(
@@ -80,7 +85,7 @@ export async function probeBackend(config) {
   } catch {
     state = "unreachable";
   }
-  await recordBackendOutcome(config, state);
+  await recordBackendOutcome(config, state, started);
   return state;
 }
 

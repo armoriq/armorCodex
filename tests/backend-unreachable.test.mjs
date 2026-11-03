@@ -175,3 +175,16 @@ test("rows blocked while unreachable stay queued, then upload once the backend i
   assert.equal(shipped[0].status, "blocked");
   assert.equal(shipped[0].error_message, "backend_unreachable");
 });
+
+test("a slow call that finishes late does not replace a newer verdict", async (t) => {
+  const { recordBackendOutcome, cachedPosture } = await import("../plugins/armorcodex/scripts/lib/backend-posture.mjs");
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "armorcodex-posture-race-"));
+  t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
+  const config = { dataDir, apiKey: KEY, backendEndpoint: "https://backend.example" };
+  const now = Date.now();
+  await recordBackendOutcome(config, "ok", now);
+  await recordBackendOutcome(config, "unreachable", now - 2000);
+  assert.equal((await cachedPosture(config)).state, "ok");
+  await recordBackendOutcome(config, "unreachable", now + 1);
+  assert.equal((await cachedPosture(config)).state, "unreachable");
+});
