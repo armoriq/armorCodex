@@ -425,8 +425,17 @@ const ours = (entry) => entry?.type === "command"
   && /armorcodex/i.test(`${entry.command} ${entry.statusMessage ?? ""}`);
 const hasOurs = (group) => Array.isArray(group?.hooks) && group.hooks.some(ours);
 
+// Written back in the file's own indentation and trailing newline, so an
+// install followed by an uninstall leaves another tool's file byte-identical.
+let layout = { indent: 2, newline: "\n" };
+
 function readConfig() {
-  const config = JSON.parse(readFileSync(hooksPath, "utf8"));
+  const text = readFileSync(hooksPath, "utf8");
+  const config = JSON.parse(text);
+  layout = {
+    indent: text.match(/^([ \t]+)\S/m)?.[1] ?? (text.trim().includes("\n") ? 2 : 0),
+    newline: text.endsWith("\n") ? "\n" : "",
+  };
   if (!config.hooks || typeof config.hooks !== "object" || Array.isArray(config.hooks)) {
     throw new Error("top-level hooks must be an object");
   }
@@ -458,7 +467,7 @@ function removeOurs(hooks) {
 }
 
 function save(config, existed) {
-  writeFileSync(tempPath, `${JSON.stringify(config, null, 2)}\n`, { flag: "wx" });
+  writeFileSync(tempPath, `${JSON.stringify(config, null, layout.indent)}${layout.newline}`, { flag: "wx" });
   if (existed) chmodSync(tempPath, statSync(hooksPath).mode & 0o7777);
   renameSync(tempPath, hooksPath);
 }
