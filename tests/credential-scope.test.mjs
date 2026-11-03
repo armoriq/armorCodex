@@ -12,11 +12,17 @@ const requireSdk = createRequire(
 const { saveLoginProfile, saveProfile, loadLoginContext } =
   requireSdk("@armoriq/sdk-dev");
 const build = requireSdk("@armoriq/sdk-dev/dist/_build_env.js");
-const DEFAULT_BACKEND = build.ENDPOINTS[build.ARMORIQ_ENV].backend;
+const DEFAULT_BACKEND = build.ENDPOINTS.production.backend;
 const LOCAL = "http://127.0.0.1:3920";
 const KEY = "ak_test_savedlogin0000000000000000";
 
-test("with ARMORIQ_ENV unset, the login the SDK's CLI saves by default is loaded", () => {
+test("with ARMORIQ_ENV unset, a staging login is not used and the production login is", () => {
+  withLogins([{ backend: build.ENDPOINTS.staging.backend }], () => {
+    const config = loadConfig({});
+    assert.equal(config.backendEndpoint, "https://api.armoriq.ai");
+    assert.equal(config.apiKey, "");
+    assert.equal(loadConfig({ ARMORIQ_ENV: "staging" }).apiKey, KEY);
+  });
   withLogins([{ backend: DEFAULT_BACKEND }], () => {
     const config = loadConfig({});
     assert.equal(config.backendEndpoint, DEFAULT_BACKEND);
