@@ -4,14 +4,12 @@ import path from "node:path";
 import { parseBoolean, parseInteger, parseList } from "./common.mjs";
 import { sdkModule } from "./sdk.mjs";
 
-const { ENDPOINTS } = createRequire(import.meta.url)(
+const { ARMORIQ_ENV: BUILD_ENV, ENDPOINTS } = createRequire(import.meta.url)(
   "@armoriq/sdk-dev/dist/_build_env.js",
 );
 
-// Production even though @armoriq/sdk-dev is baked for staging: the dev
-// channel ships against the production backend.
 const ENV_NAMES = {
-  "": "production",
+  "": BUILD_ENV,
   production: "production",
   prod: "production",
   staging: "staging",

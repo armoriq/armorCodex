@@ -655,16 +655,8 @@ stop_without_login() {
   [[ "${HAD_INSTALL}" -eq 1 ]] || abort_install
   echo
   warn "Kept the existing ArmorCodex install, but it has no ArmorIQ login."
-  printf "  Run ${B}armoriq-dev login --product armorcodex --backend %s${N}, then start a new Codex session.\n\n" "$(plugin_backend)"
+  printf "  Run ${B}armoriq-dev login --product armorcodex${N}, then start a new Codex session.\n\n"
   exit 1
-}
-
-# The SDK CLI defaults to the backend it was built for, so the login is pointed
-# at the backend the plugin will look its key up under.
-plugin_backend() {
-  node --input-type=module -e \
-    'const { loadSettings } = await import(process.argv[1]); process.stdout.write(loadSettings().backendEndpoint);' \
-    "${PLUGIN_PATH}/scripts/lib/config.mjs" 2>/dev/null || printf 'https://api.armoriq.ai'
 }
 
 plugin_has_login() {
@@ -689,7 +681,7 @@ EOF
 
   if ! is_promptable; then
     err "No TTY available for interactive login."
-    printf "  Run ${B}armoriq-dev login --product armorcodex --backend %s${N} interactively.\n" "$(plugin_backend)"
+    printf "  Run ${B}armoriq-dev login --product armorcodex${N} interactively.\n"
     stop_without_login
   fi
 
@@ -698,12 +690,11 @@ EOF
   fi
 
   echo
-  local login_ok=0 backend
-  backend="$(plugin_backend)"
+  local login_ok=0
   if command -v armoriq-dev >/dev/null 2>&1; then
-    armoriq-dev login --product armorcodex --backend "${backend}" && login_ok=1
+    armoriq-dev login --product armorcodex && login_ok=1
   elif command -v npx >/dev/null 2>&1; then
-    npx @armoriq/sdk-dev login --product armorcodex --backend "${backend}" && login_ok=1
+    npx @armoriq/sdk-dev login --product armorcodex && login_ok=1
   else
     err "armoriq-dev CLI not found."
     stop_without_login
