@@ -222,8 +222,6 @@ test("uses 'unknown' when no turn_context names a model, and skips corrupt lines
   });
 });
 
-// Codex 0.153+ writes one token_usage_record per completed Responses API request
-// (codex-rs/core/src/session/mod.rs record_observed_response_completed).
 test("counts token_usage_record usage, including a compaction request no token_count reports", async () => {
   const hours = await byHour([
     { type: "turn_context", payload: { model: "gpt-5.5" } },

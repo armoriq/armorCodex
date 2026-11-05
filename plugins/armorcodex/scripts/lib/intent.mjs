@@ -155,16 +155,9 @@ export function checkToolAgainstPlan({ plan, toolName, toolInput }) {
     }
     sawConstrainedMatch = true;
     for (const candidate of inputCandidates) {
-      // Strict subset: every key in declared candidate matches actual input.
       if (isSubsetValue(candidate, toolInput)) {
         return { allowed: true };
       }
-      // Lenient fallback: agents (especially gpt-5.4) often declare inputs
-      // with field names that don't match the real tool (e.g. `cmd` instead
-      // of Codex's `command`). If NONE of the declared keys exist on the
-      // real input, treat it as an over-eager declaration and allow.
-      // The tool name itself was already matched; the parameter declaration
-      // was simply wrong-fielded, not a security violation.
       if (isPlainObject(candidate) && isPlainObject(toolInput)) {
         const declaredKeys = Object.keys(candidate);
         if (declaredKeys.length > 0) {
@@ -207,7 +200,6 @@ export function checkIntentTokenPlan({ intentTokenRaw, toolName, toolParams }) {
     };
   }
 
-  // Parameter-level enforcement: check tool params against plan step constraints
   if (isPlainObject(toolParams)) {
     const paramCheck = checkToolAgainstPlan({
       plan: parsed.plan,

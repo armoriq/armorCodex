@@ -1,43 +1,4 @@
-/**
- * Codex token-usage parsing.
- *
- * The shared SDK helper `summarizeTranscriptUsage` only understands the
- * Anthropic/Claude-Code transcript shape (`message.usage.{input_tokens,...}`).
- * Codex CLI writes a different rollout format, so we parse it ourselves and
- * still post through the single shared transport (`client.recordTokenUsage`).
- *
- * Codex rollout JSONL (one object per line) carries, among others:
- *   { type: "session_meta", payload: { id, session_id, forked_from_id, cwd, ... } }
- *   { type: "turn_context", payload: { model: "gpt-5.5", ... } }
- *   { type: "event_msg", timestamp, payload: { type: "token_count",
- *       info: { total_token_usage: { input_tokens, cached_input_tokens,
- *                                    output_tokens, reasoning_output_tokens,
- *                                    total_tokens }, ... } } }
- *   { type: "token_usage_record", timestamp, payload: { response_id,
- *       usage: { input_tokens, cached_input_tokens, cache_write_input_tokens,
- *                output_tokens, reasoning_output_tokens, total_tokens } } }
- *
- * A token_usage_record (Codex 0.153 and later) is the Responses API usage of
- * one completed request, compaction requests included. token_count carries a
- * running total that skips remote compaction requests and is overwritten on a
- * context-window overflow, so a rollout is counted from token_count growth only
- * up to its first token_usage_record and from the records after that.
- *
- * `total_token_usage` is cumulative for the rollout file. A fork's file starts
- * with a copy of its original's lines, token_count events and records included,
- * and its counter continues from there. Every copied line carries the fork's
- * write time as its timestamp; a copied task_started keeps its turn_id and
- * started_at. The counter can restart from zero inside one file.
- *
- * Codex's `input_tokens` INCLUDES `cached_input_tokens` and
- * `cache_write_input_tokens`, and `output_tokens` includes
- * `reasoning_output_tokens`. Entries follow the Claude convention:
- *   inputTokens          = input_tokens - cached_input_tokens - cache_write_input_tokens
- *   cacheReadTokens      = cached_input_tokens
- *   cacheWriteTokens     = cache_write_input_tokens
- *   outputTokens         = output_tokens
- *   reasoningOutputTokens = reasoning_output_tokens (part of outputTokens)
- */
+/** Codex input_tokens includes cached and cache-write tokens, and output_tokens includes reasoning tokens. */
 
 import { readFileSync } from "node:fs";
 
@@ -139,17 +100,11 @@ function parseRollout(raw) {
   return { meta, events, records, latestTaskSequence: taskSequence };
 }
 
-/**
- * Read a Codex rollout: its session_meta payload (null when absent), every
- * token_count event and every token_usage_record, each with the model and
- * timestamp in effect. Throws when the file cannot be read.
- */
 export function readRollout(rolloutPath) {
   const { meta, events, records } = parseRollout(readFileSync(rolloutPath, "utf8"));
   return { meta, events, records };
 }
 
-/** Identity of a token_count event: its cumulative totals. */
 export function usageSignature(totals) {
   return [...COUNT_FIELDS, "total_tokens"].map((k) => toCount(totals?.[k])).join("/");
 }
@@ -181,19 +136,6 @@ function readTurn(payload) {
 
 const utcHour = (time) => new Date(time).toISOString().slice(0, 13);
 
-/**
- * Usage of one rollout, per UTC hour (`YYYY-MM-DDTHH`) and model. Up to its first
- * token_usage_record it is the growth of the cumulative totals between
- * token_count events; a total lower than the one before starts a new count
- * from zero. From then on it is the sum of the records.
- *
- * In a fork, usage inside a turn that started before the fork was created is
- * history copied from another rollout. It lands in `copiedTurns[turnId]`,
- * in the UTC hour the turn started, with `items` the number of usage lines copied.
- * The first `copied.events` token_count events and `copied.records` records
- * count nothing, for forks whose turns carry no id. Copied events still set
- * the starting totals. `turns` lists the ids of the rollout's own turns.
- */
 function addCall(calls, entry, key, time) {
   if (key) (calls[utcHour(time)] ??= []).push({ ...entry, key, timestampMs: time });
 }
@@ -268,10 +210,6 @@ function subtractTotals(latest, baseline) {
   );
 }
 
-/**
- * One entry per token_usage_record of the rollout's latest task: one model
- * request each, keyed by its response id and timed when the request completed.
- */
 export function codexTurnUsageCalls(transcriptPath) {
   const { records, latestTaskSequence } = readUsageEvents(transcriptPath);
   return records

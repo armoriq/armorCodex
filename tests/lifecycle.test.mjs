@@ -65,7 +65,6 @@ test("handleSessionStart creates session and returns context", async () => {
   assert.ok(output?.hookSpecificOutput?.additionalContext);
   assert.match(output.hookSpecificOutput.additionalContext, /ArmorCodex active/i);
 
-  // Verify session was persisted
   const stateRaw = await readFile(config.runtimeFile, "utf8");
   const state = JSON.parse(stateRaw);
   assert.ok(state.sessions["sess-1"]);
@@ -75,12 +74,10 @@ test("handleSessionStart creates session and returns context", async () => {
 test("handleSessionEnd removes session", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorcodex-test-"));
   const config = buildConfig(tmp);
-  // Create session first
   await handleSessionStart(
     { hook_event_name: "SessionStart", session_id: "sess-2" },
     config
   );
-  // End it
   await handleSessionEnd(
     { hook_event_name: "SessionEnd", session_id: "sess-2" },
     config
@@ -121,10 +118,6 @@ test("handlePostToolUse returns null when audit disabled", async () => {
   assert.equal(output, null);
 });
 
-// Audit is fire-and-forget: enqueueAudit writes to a JSONL WAL under
-// <dataDir>/audit/current.jsonl, and a background flusher in policy-mcp.mjs
-// ships batches to /iap/audit. The tests below read the WAL directly to
-// verify the queued row instead of stubbing fetch.
 async function readWalRows(dataDir) {
   const { readFile } = await import("node:fs/promises");
   const walPath = path.join(dataDir, "audit", "current.jsonl");
@@ -153,10 +146,6 @@ test("handlePostToolUse enqueues audit row to WAL when enabled", async () => {
     },
     config
   );
-  // Give the fire-and-forget enqueue a microtask to flush to disk.
-  // Wait for the fire-and-forget enqueue's async fs writes (mkdir + appendFile)
-  // to land on disk. The handler returns synchronously after starting the
-  // promise; ~50ms is comfortable for the I/O on macOS/Linux.
   await new Promise((resolve) => setTimeout(resolve, 50));
 
   assert.equal(output, null);
@@ -184,9 +173,6 @@ test("handlePostToolUseFailure enqueues failed-status row to WAL", async () => {
     },
     config
   );
-  // Wait for the fire-and-forget enqueue's async fs writes (mkdir + appendFile)
-  // to land on disk. The handler returns synchronously after starting the
-  // promise; ~50ms is comfortable for the I/O on macOS/Linux.
   await new Promise((resolve) => setTimeout(resolve, 50));
 
   const rows = await readWalRows(config.dataDir);

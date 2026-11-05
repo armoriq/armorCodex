@@ -11,13 +11,6 @@ import {
   persistNextState
 } from "./policy.mjs";
 
-// Structured `/armor policy ...` command layer for ArmorCodex.
-//
-// This mirrors ArmorClaude's `/armor` command UX (staged proposal -> confirm)
-// but operates on ArmorCodex's native `{ rules: [] }` schema so the existing
-// evaluator (data-class + anyParam matchers) is preserved. Natural-language
-// `Policy ...` commands stay handled by policy.mjs for back-compat.
-
 const PROPOSAL_TTL_MS = 30 * 60 * 1000;
 
 const ACTION_WORDS = {
@@ -63,10 +56,6 @@ async function saveProfiles(config, data) {
   await writeJson(profilesPath(config), data);
 }
 
-// --- command surface detection ---------------------------------------------
-
-// Matches `/armor ...`, bare `armor policy|yes|no|... ` (guarded by a known
-// subcommand so ordinary prose starting with "armor" is not intercepted).
 export function isArmorPolicyCommand(prompt) {
   return Boolean(canonicalCommandText(prompt));
 }
@@ -92,8 +81,6 @@ export function canonicalCommandText(prompt) {
   return { rest };
 }
 
-// --- parsing ----------------------------------------------------------------
-
 function normalizeAction(word) {
   return ACTION_WORDS[word.trim().toLowerCase()] || "";
 }
@@ -103,7 +90,6 @@ function normalizeToolToken(tool) {
   return t;
 }
 
-// Parse "allow bash and apply_patch, deny apply_patch" into rule tuples.
 function parseNaturalRules(text) {
   const actionAlt = "allow|permit|deny|block|forbid|hold|ask|require[_ ]approval";
   const regex = new RegExp(
@@ -181,14 +167,11 @@ export function parseCommand(prompt) {
     return rules.length ? { cmd: "add", rules } : { cmd: "parse-error" };
   }
 
-  // Bare action form: "deny bash", "allow apply_patch and bash"
   const bareRules = parseNaturalRules(rest);
   if (bareRules.length) return { cmd: "add", rules: bareRules };
 
   return { cmd: "help" };
 }
-
-// --- proposed-policy builders (pure; no persistence) ------------------------
 
 function appendRules(currentRules, tuples, state) {
   const rules = [...currentRules];
@@ -216,8 +199,6 @@ function applyDefault(currentRules, decision) {
   return { rules: [...withoutCatchAll, { id, action: decision, tool: "*" }] };
 }
 
-// Server-scoped MCP trust: allow/deny every `mcp__<server>__*` tool. The rule
-// is inserted before any catch-all `*` rule so its specificity wins.
 function setMcpTrust(currentRules, server, action) {
   const glob = `mcp__${server}__*`;
   const rules = currentRules.filter((r) => normalizeToolName(r.tool) !== glob);
@@ -238,8 +219,6 @@ function applyTemplate(name, state) {
   }
   return working;
 }
-
-// --- diff + risk ------------------------------------------------------------
 
 export function formatRulesDiff(currentPolicy, proposedPolicy) {
   const cur = (currentPolicy.rules || []).map((r) => formatRule(r));
@@ -273,8 +252,6 @@ export function riskWarnings(policy) {
   }
   return [...new Set(warnings)];
 }
-
-// --- staging ----------------------------------------------------------------
 
 async function stagePending(config, state, proposedPolicy, reason, stagedBy) {
   const proposalId = `pol_${randomUUID().slice(0, 8)}`;
@@ -343,17 +320,12 @@ function helpText() {
   ].join("\n");
 }
 
-// --- main dispatcher --------------------------------------------------------
-
 export async function handleArmorPolicyCommand(prompt, config, actor = "unknown", { allowConfirm = true } = {}) {
   const parsed = parseCommand(prompt);
   if (!parsed) return null;
 
   const state = await loadPolicyState(config.policyFile);
 
-  // Applying a staged change is human-only. Read + stage are allowed from any
-  // caller (e.g. the MCP tool), but confirm/cancel must come from a human
-  // prompt so the model cannot self-approve a policy change.
   if (!allowConfirm && (parsed.cmd === "confirm" || parsed.cmd === "cancel")) {
     return "Applying policy changes is human-only. Confirm from the terminal with `armor yes` (or `armor policy confirm <id>`).";
   }

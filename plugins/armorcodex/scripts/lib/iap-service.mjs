@@ -1,14 +1,3 @@
-/**
- * IAP Verification Service
- *
- * Abstraction over ArmorIQ IAP backend operations:
- *  - verifyStep:    POST /iap/verify-step
- *  - verifyWithCsrg: POST /verify/action (CSRG Merkle proof)
- *  - createAuditLog: POST /iap/audit
- *
- * Ported from ArmorClaw's IAPVerificationService (iap-verfication.service.ts).
- */
-
 import {
   buildAuthHeaders,
   isPlainObject,
@@ -19,9 +8,6 @@ import {
 import { createAuditWal } from "./audit-wal.mjs";
 import { requireEndpoint } from "./config.mjs";
 
-// Shared WAL instance per dataDir. The MCP server, hook handlers, and any
-// fire-and-forget background flusher all enqueue to the same on-disk JSONL
-// so the audit pipeline is crash-safe and concurrent-safe.
 const walCache = new Map();
 function getAuditWal(config) {
   const key = config.dataDir;
@@ -33,19 +19,12 @@ function getAuditWal(config) {
   return wal;
 }
 
-/**
- * Create an IAP service instance from config.
- */
 export function createIapService(config) {
   const backendEndpoint = config.backendEndpoint || config.verifyStepEndpoint?.replace(/\/iap\/verify-step$/, "") || "";
   const timeoutMs = config.timeoutMs || 8000;
   const headers = buildAuthHeaders(config);
 
   return {
-    /**
-     * Verify a tool execution step with the IAP backend.
-     * Equivalent to ArmorClaw IAPVerificationService.verifyStep()
-     */
     async verifyStep(intentTokenRaw, csrgProofs, toolName) {
       const endpoint = config.verifyStepEndpoint;
       if (!endpoint || !config.csrgVerifyEnabled) {
@@ -117,10 +96,6 @@ export function createIapService(config) {
       };
     },
 
-    /**
-     * Verify action directly with CSRG service using Merkle proof.
-     * Equivalent to ArmorClaw IAPVerificationService.verifyWithCsrg()
-     */
     async verifyWithCsrg(path, value, proof, token, context) {
       if (!config.csrgVerifyEnabled) {
         throw new Error("CSRG verification is disabled");
@@ -155,10 +130,6 @@ export function createIapService(config) {
       };
     },
 
-    /**
-     * Create an audit log entry in the IAP service.
-     * Equivalent to ArmorClaw IAPVerificationService.createAuditLog()
-     */
     async createAuditLog(dto) {
       const response = await postJson(
         `${backendEndpoint}/iap/audit`,
@@ -177,26 +148,12 @@ export function createIapService(config) {
       return response.data;
     },
 
-    /**
-     * Enqueue an audit DTO to the local WAL. Returns immediately after the
-     * disk append (~1-2ms). A background flusher in policy-mcp.mjs drains
-     * the WAL in batches and POSTs to /iap/audit. Fire-and-forget callers
-     * use this to keep hook latency low.
-     */
     async enqueueAudit(dto) {
       const wal = getAuditWal(config);
       await wal.appendLine(dto);
     },
 
-    /**
-     * Ship a batch of audit rows via POST /iap/audit/batch (one HTTP call
-     * for N rows, ~N× faster than per-row POSTs). Matches armorClaude's
-     * createAuditLogBatch — same backend endpoint, same payload shape.
-     *
-     * Failures throw — caller should NOT advance the WAL offset on failure
-     * so the next tick retries the same rows. Backend idempotency
-     * (planId, to_hash unique) keeps retries safe.
-     */
+    /** Throws on failure; the caller must not advance the WAL offset or the failed rows are lost. */
     async shipAuditBatch(rows) {
       if (!Array.isArray(rows) || rows.length === 0) {
         return { written: 0, failures: [] };
@@ -225,10 +182,6 @@ export function createIapService(config) {
     }
   };
 }
-
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
 
 function getTokenForVerification(intentTokenRaw) {
   if (typeof intentTokenRaw !== "string") {
