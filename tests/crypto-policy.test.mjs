@@ -16,7 +16,7 @@ test("computePolicyDigest produces deterministic hash", () => {
   const d1 = computePolicyDigest(rules);
   const d2 = computePolicyDigest(rules);
   assert.equal(d1, d2);
-  assert.equal(d1.length, 64); // SHA-256 hex
+  assert.equal(d1.length, 64);
 });
 
 test("computePolicyDigest differs for different rules", () => {

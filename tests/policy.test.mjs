@@ -114,7 +114,6 @@ test("handlePreToolUse denies when policy blocks tool", async () => {
 test("handlePreToolUse denies missing intent when strict", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorcodex-test-"));
   const config = buildConfig(tmp, { intentRequired: true });
-  // `Bash` is not in the safe-tools whitelist, so intent enforcement runs.
   const output = await handlePreToolUse(
     {
       hook_event_name: "PreToolUse",
@@ -131,7 +130,6 @@ test("handlePreToolUse denies missing intent when strict", async () => {
 test("handlePreToolUse allows tool when local plan matches (no backend)", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorcodex-test-"));
   const config = buildConfig(tmp, { intentRequired: true });
-  // Seed a local plan as if register_intent_plan had been called
   const { writeFile } = await import("node:fs/promises");
   await writeFile(
     config.runtimeFile,
@@ -192,7 +190,6 @@ test("handlePreToolUse replaces stale local plan with the session's fresh pendin
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorcodex-test-"));
   const config = buildConfig(tmp, { intentRequired: true });
   const { writeFile } = await import("node:fs/promises");
-  // Seed an old "Read"-only plan in the session
   await writeFile(
     config.runtimeFile,
     JSON.stringify({
@@ -206,7 +203,6 @@ test("handlePreToolUse replaces stale local plan with the session's fresh pendin
     }),
     "utf8"
   );
-  // Drop a NEW pending plan that allows Bash (simulates register_intent_plan)
   await writeFile(
     path.join(tmp, "pending-plan.multi-1.json"),
     JSON.stringify({
@@ -252,9 +248,9 @@ test("evaluatePolicy: trailing-* glob scopes a tool family; exact match unchange
     ]
   };
   const ev = (tool) => evaluatePolicy({ policy, toolName: tool, toolParams: {} }).allowed;
-  assert.equal(ev("mcp__github__search"), false); // glob prefix
-  assert.equal(ev("mcp__github__create_pr"), false); // glob prefix
-  assert.equal(ev("mcp__gitlab__search"), true); // different server, not matched
-  assert.equal(ev("bash"), false); // exact match, unchanged
-  assert.equal(ev("apply_patch"), true); // no rule -> default allow
+  assert.equal(ev("mcp__github__search"), false);
+  assert.equal(ev("mcp__github__create_pr"), false);
+  assert.equal(ev("mcp__gitlab__search"), true);
+  assert.equal(ev("bash"), false);
+  assert.equal(ev("apply_patch"), true);
 });

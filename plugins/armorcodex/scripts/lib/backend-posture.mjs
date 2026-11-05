@@ -1,8 +1,3 @@
-// Backend unreachable posture (roadmap spec 0002, AC-11).
-//
-// ArmorCodex has no daemon: every hook and the MCP server are separate
-// processes, so the 30 second verdict lives on disk where all of them read it.
-
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { buildAuthHeaders, normalizeToolName, postJson } from "./common.mjs";
@@ -35,15 +30,12 @@ export function toolCapability(toolName) {
 const postureFile = (config) => path.join(config.dataDir, "backend-posture.json");
 const keyFingerprint = (apiKey) => createHash("sha256").update(apiKey).digest("hex").slice(0, 16);
 
-// "ok" | "unreachable" | "signed_out"
 export function classifyStatus(status) {
   if (status === 401) return "signed_out";
   if (status >= 500) return "unreachable";
   return "ok";
 }
 
-// `now` is when the call started, so a slow call that finishes late cannot
-// replace a verdict from a call that started after it.
 export async function recordBackendOutcome(config, state, now = Date.now()) {
   if (!config.apiKey || !config.backendEndpoint) return;
   const saved = await readJson(postureFile(config), null);
@@ -89,15 +81,11 @@ export async function probeBackend(config) {
   return state;
 }
 
-// "local" when signed out locally; otherwise the cached verdict, or a fresh
-// probe once the previous one is older than 30 seconds.
 export async function backendPosture(config) {
   if (!config.apiKey || !config.backendEndpoint) return "local";
   return (await cachedPosture(config))?.state ?? probeBackend(config);
 }
 
-// A 401 means the stored key no longer works: behave as signed out, so nothing
-// is sent to the backend and only local rules and the local plan check apply.
 export function localOnly(config) {
   return { ...config, apiKey: "", auditEnabled: false, observabilityEnabled: false, usageSyncEnabled: false };
 }

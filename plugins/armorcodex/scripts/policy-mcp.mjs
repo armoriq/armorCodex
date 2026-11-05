@@ -38,8 +38,6 @@ const POLICY_RULE_SCHEMA = z.object({
   tool: z.string().min(1),
   dataClass: z.enum(["PCI", "PAYMENT", "PHI", "PII"]).optional(),
   params: z.record(z.string(), z.unknown()).optional(),
-  // anyParam: matches a substring or operator spec across any string field
-  // in the tool input. Plain string is sugar for { $contains: <string> }.
   anyParam: z.union([z.string().min(1), MATCHER_OPERATORS]).optional()
 });
 
@@ -59,20 +57,11 @@ function toTextResult(text, extra = {}) {
   };
 }
 
-/**
- * Some MCP clients (and Codex itself) sometimes pass complex tool arguments
- * as JSON-encoded strings instead of structured objects. Accept either form.
- *
- *   { goal: "...", steps: "[{...}]" }   → parse steps as JSON
- *   { plan:  "{\"goal\":...}" }         → parse plan envelope as JSON
- *   { goal: "...", steps: [{...}] }     → pass through
- */
+/** Codex and some MCP clients send nested tool arguments as JSON strings, so accept either form. */
 function coercePlanArgs(args) {
   if (!args || typeof args !== "object") {
     return args;
   }
-  // If caller wrapped the entire plan in a `plan` field (string or object),
-  // unwrap it.
   if (args.plan !== undefined) {
     let unwrapped = args.plan;
     if (typeof unwrapped === "string") {
@@ -83,11 +72,9 @@ function coercePlanArgs(args) {
       delete args.plan;
     }
   }
-  // Coerce stringified arrays/objects on known fields.
   if (typeof args.steps === "string") {
     try { args = { ...args, steps: JSON.parse(args.steps) }; } catch { /* leave as-is */ }
   }
-  // The inputSchema advertises goal as optional, so models often omit it.
   if (!(typeof args.goal === "string" && args.goal.trim()) && Array.isArray(args.steps)) {
     const goal = deriveGoal(args.steps);
     if (goal) args = { ...args, goal };
@@ -161,8 +148,6 @@ async function issueAndStore(config, pendingPath, request) {
   }
 }
 
-// Rows stay queued while the backend is unreachable or rejects the key, and
-// ship on the first tick after the 30 second verdict expires.
 async function shipQueuedAudit(config) {
   if (!config.apiKey) return;
   const posture = await cachedPosture(config);
@@ -232,7 +217,6 @@ async function run() {
       }
 
       if (args.update) {
-        // Tolerate JSON-string update payloads (some clients stringify objects).
         let updateInput = args.update;
         if (typeof updateInput === "string") {
           try { updateInput = JSON.parse(updateInput); } catch { /* let validator complain */ }
@@ -319,9 +303,6 @@ async function run() {
     }
   );
 
-  // -----------------------------------------------------------------
-  // register_intent_plan — Codex calls this to declare its plan
-  // -----------------------------------------------------------------
   server.registerTool(
     "register_intent_plan",
     {
@@ -330,10 +311,6 @@ async function run() {
         "Declare the tools you intend to use for this task. " +
         "Required by ArmorCodex before any other tool call. " +
         "Without a registered plan, all tool calls will be blocked.",
-      // Accept the canonical {goal, steps} shape AND the string-serialized
-      // variants Codex sometimes emits (steps as a JSON string, or the
-      // whole plan wrapped in a `plan` field). The handler below coerces
-      // them to the canonical shape before validating with INTENT_PLAN_ZOD.
       inputSchema: {
         goal: z.string().min(1).optional()
           .describe("One-line summary of what the plan accomplishes"),
@@ -353,8 +330,6 @@ async function run() {
       }
     },
     async (args, extra) => {
-      // Codex sometimes serializes complex tool arguments as JSON strings
-      // (e.g. steps: "[{...}]" instead of steps: [{...}]). Tolerate both.
       const coerced = coercePlanArgs(args);
       const parsed = INTENT_PLAN_ZOD.safeParse(coerced);
       if (!parsed.success) {
