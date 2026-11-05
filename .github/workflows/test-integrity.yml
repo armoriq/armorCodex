@@ -1,0 +1,18 @@
+name: Test integrity
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  test-integrity:
+    name: Test integrity
+    uses: armoriq/.github/.github/workflows/reusable-test-integrity.yml@main
