@@ -14,7 +14,6 @@ const SERVER = fileURLToPath(new URL("../plugins/armorcodex/scripts/policy-mcp.m
 const SANDBOX = fileURLToPath(new URL("./helpers/mcp-sandbox.mjs", import.meta.url));
 const KEY = "ak_test_unreachable00000000000000000";
 
-// behavior: "hang" never answers, "503" fails every call, "401" rejects the key, "ok" accepts everything.
 function startBackend(behavior) {
   const state = { behavior, probes: 0, batches: [] };
   const server = http.createServer((req, res) => {

@@ -34,9 +34,6 @@ export function normalizeRule(rule) {
   if (isPlainObject(rule.params)) {
     normalized.params = rule.params;
   }
-  // anyParam: matcher applied across any string field in the tool input.
-  // Useful for free-text intents like "deny ~/.ssh" where we don't know
-  // which key the tool will store the path under.
   if (isMatcherSpec(rule.anyParam) || typeof rule.anyParam === "string") {
     normalized.anyParam =
       typeof rule.anyParam === "string"
@@ -84,8 +81,6 @@ function toolMatches(ruleTool, toolName) {
     return true;
   }
   const rt = normalizeToolName(ruleTool);
-  // Trailing-`*` glob so a rule can scope a family of tools, e.g.
-  // `mcp__github__*` matches every tool from the `github` MCP server.
   if (rt.length > 1 && rt.endsWith("*")) {
     return normalizeToolName(toolName).startsWith(rt.slice(0, -1));
   }
@@ -189,9 +184,6 @@ export function evaluatePolicy({ policy, toolName, toolParams }) {
     if (rule.params) {
       const result = matchParams(rule.params, toolParams || {});
       paramsMatched = result.matched;
-      // Surface "rule probably won't fire": rule references keys absent from
-      // this tool's input, which usually means the user's intent isn't
-      // expressible as-is.
       if (!result.matched && result.missingKeys.length > 0) {
         warnings.push({
           ruleId: rule.id,
@@ -204,8 +196,6 @@ export function evaluatePolicy({ policy, toolName, toolParams }) {
     if (!paramsMatched) {
       continue;
     }
-    // anyParam matches if ANY string field in the tool input satisfies the
-    // matcher. Useful when the user doesn't know which key holds the path.
     if (rule.anyParam) {
       if (!matchesAnyStringField(rule.anyParam, toolParams || {})) {
         continue;
@@ -304,9 +294,6 @@ function inferPolicyDataClass(text) {
   return undefined;
 }
 
-// A tool name must look like a real identifier — letters, digits, underscore,
-// hyphen, dot, colon — OR exactly "*". Anything else is rejected so free-text
-// like "all tools" or regex fragments can't become rule matchers.
 const VALID_TOOL_NAME = /^(?:\*|[A-Za-z][\w.:\-]{0,80})$/;
 
 function sanitizeToolName(candidate) {
@@ -316,17 +303,13 @@ function sanitizeToolName(candidate) {
   return VALID_TOOL_NAME.test(trimmed) ? trimmed : null;
 }
 
-// Detect a path or substring the user wants to block. Looks for things like
-// ~/.ssh, /etc/passwd, or quoted/backticked snippets after "block"/"deny".
 function inferAnyParamMatcher(text) {
-  // Quoted snippets first: most explicit.
   const quoted =
     text.match(/"([^"\n]{2,80})"/) ||
     text.match(/'([^'\n]{2,80})'/);
   if (quoted && quoted[1]) {
     return inferMatcherForPhrase(quoted[1]);
   }
-  // Path-like tokens: ~/..., /xxx/yyy, $HOME/...
   const pathMatch = text.match(/((?:~|\$\{?HOME\}?|\/)[\w./@\-+~]{2,120})/);
   if (pathMatch && pathMatch[1]) {
     const candidate = pathMatch[1].replace(/[.,;:)\]}]+$/, "");
@@ -343,15 +326,12 @@ function inferMatcherForPhrase(phrase) {
   if (/^(?:~|\$\{?HOME\}?|\/)/.test(trimmed)) {
     return { $pathContains: trimmed };
   }
-  // Looks like a regex: leave operator-based match.
   if (/[\\^$+?(){}[\]|]/.test(trimmed)) {
     return { $matches: trimmed };
   }
   return { $contains: trimmed };
 }
 
-// Real Codex tools we recognize. Used to disambiguate "block X for Y" where X
-// may or may not be a tool name. Falls back to "*" when X isn't here.
 const KNOWN_CODEX_TOOLS = new Set([
   "*",
   "bash", "apply_patch", "list_dir", "view_image", "mcp_resource",
@@ -390,10 +370,6 @@ function buildPolicyUpdateFromText(text, state, forceNewId = false) {
   const inferredTool = inferPolicyTool(text);
   const anyParam = inferAnyParamMatcher(text);
 
-  // If we found a path/phrase to match AND the inferred tool is a verb like
-  // "access" or any unknown name, the user means "block this content across
-  // all tools": promote tool to "*". A real tool name (Bash, apply_patch...)
-  // stays as-is so users can scope rules to a specific tool when they want.
   let tool = inferredTool;
   if (anyParam && tool !== "*") {
     const normalized = tool.toLowerCase();
@@ -426,9 +402,6 @@ export function parsePolicyTextCommand(text, state) {
     return { kind: "none" };
   }
 
-  // Only the bare "Policy help" / "Policy commands" form triggers help.
-  // Otherwise "Bash commands containing curl" inside a rule body would
-  // wrongly route here.
   if (/^\s*policy\s+(help|commands)\s*$/i.test(trimmed)) {
     return { kind: "help" };
   }
@@ -599,9 +572,6 @@ export async function applyPolicyCommand({ policyFilePath, state, command, actor
     const updates = Array.isArray(command.update.rules)
       ? command.update.rules.map((rule) => normalizeRule(rule)).filter(Boolean)
       : [];
-    // Allow empty rules in `replace` mode: this is how callers clear all
-    // policy rules atomically. Reject only when merge-mode update has nothing
-    // to add, since that would be a no-op.
     if (!updates.length && mode !== "replace") {
       return { state, message: "Policy update rejected: no valid rules." };
     }

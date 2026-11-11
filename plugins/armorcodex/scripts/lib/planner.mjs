@@ -1,32 +1,6 @@
-/**
- * Plan parsing for ArmorCodex.
- *
- * Two capture paths, one schema:
- *  1. Plan mode: parse the plan file for a fenced ```json block (preferred)
- *     or heuristic markdown extraction (fallback)
- *  2. No plan mode: Codex calls register_intent_plan MCP tool directly
- *     (handled in policy-mcp.mjs, not here)
- *
- * This module handles only PARSING — plan generation is done by Codex's own
- * LLM via the directive injected in UserPromptSubmit.
- */
-
 import { readFile } from "node:fs/promises";
 import { normalizeToolName } from "./common.mjs";
 
-// ---------------------------------------------------------------------------
-// JSON block extraction (preferred — matches the directive's format)
-// ---------------------------------------------------------------------------
-
-/**
- * Extract a fenced ```json block from markdown content.
- * The UserPromptSubmit directive tells Codex to include the plan as a
- * fenced JSON block in plan mode.
- *
- * Strategy: scan all ```json blocks and return the LAST one that parses
- * cleanly AND looks like an intent plan (has a `steps` array). This avoids
- * picking up an example/illustration block earlier in the file.
- */
 export function extractPlanJsonBlock(markdown) {
   if (!markdown) return null;
   const matches = Array.from(markdown.matchAll(/```json\s*([\s\S]*?)```/g));
@@ -47,15 +21,6 @@ export function extractPlanJsonBlock(markdown) {
   return null;
 }
 
-// ---------------------------------------------------------------------------
-// Plan file parsing (heuristic fallback)
-// ---------------------------------------------------------------------------
-
-/**
- * Parse a plan markdown file into a structured plan.
- * This is retained for compatibility with imported tests and future Codex
- * plan-file events; current Codex hooks do not expose ExitPlanMode.
- */
 export async function parsePlanFile(planFilePath) {
   if (!planFilePath) return null;
   let content;
@@ -68,15 +33,10 @@ export async function parsePlanFile(planFilePath) {
   return parsePlanMarkdown(content);
 }
 
-/**
- * Heuristic: extract tool intentions from markdown content.
- * Looks for backtick-wrapped tool names and numbered/bulleted steps.
- */
 export function parsePlanMarkdown(markdown) {
   const steps = [];
   const seenTools = new Set();
 
-  // Backtick-wrapped identifiers: `Read`, `mcp__server__tool`
   const backtickPattern = /`([A-Za-z][A-Za-z0-9_]*(?:__[A-Za-z0-9_]+)*)`/g;
   for (const match of markdown.matchAll(backtickPattern)) {
     const name = match[1]?.trim();
@@ -85,7 +45,6 @@ export function parsePlanMarkdown(markdown) {
     }
   }
 
-  // Numbered / bulleted steps
   const stepPattern = /^[\s]*(?:\d+[.)]\s+|[-*]\s+)(.+)/gm;
   for (const match of markdown.matchAll(stepPattern)) {
     const text = match[1]?.trim();
@@ -102,7 +61,6 @@ export function parsePlanMarkdown(markdown) {
     }
   }
 
-  // If no steps from list parsing, create steps from discovered tool names
   if (steps.length === 0) {
     for (const toolName of seenTools) {
       steps.push({
@@ -122,10 +80,6 @@ export function parsePlanMarkdown(markdown) {
     metadata: { goal, source: "plan-file-heuristic" }
   };
 }
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 const KNOWN_TOOLS = new Set([
   "read", "write", "edit", "bash", "glob", "grep", "agent",
@@ -149,10 +103,6 @@ function extractToolFromStepText(text) {
   return null;
 }
 
-/**
- * Resolve the plan file path for the current session.
- * Resolve a best-effort Codex-scoped plan path.
- */
 export function resolvePlanFilePath(input) {
   const transcriptPath =
     typeof input?.transcript_path === "string" ? input.transcript_path : "";

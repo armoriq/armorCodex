@@ -13,7 +13,6 @@ test("normalizeToolName aliases Codex shell tool names to bash", () => {
   for (const name of ["exec_command", "shell", "local_shell", "unified_exec", "container.exec", "Bash", "BASH"]) {
     assert.equal(normalizeToolName(name), "bash", `${name} should normalize to bash`);
   }
-  // Non-shell tools are unaffected (still lowercased).
   assert.equal(normalizeToolName("apply_patch"), "apply_patch");
   assert.equal(normalizeToolName("WebFetch"), "webfetch");
 });

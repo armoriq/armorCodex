@@ -54,10 +54,6 @@ export async function saveRuntimeState(runtimeFilePath, runtimeState) {
   await writeJson(runtimeFilePath, runtimeState);
 }
 
-// ---------------------------------------------------------------------------
-// Tool discovery — accumulate known tools across PreToolUse calls
-// ---------------------------------------------------------------------------
-
 export function upsertDiscoveredTool(runtimeState, toolName) {
   if (!toolName || typeof toolName !== "string") return;
   const name = toolName.trim();
