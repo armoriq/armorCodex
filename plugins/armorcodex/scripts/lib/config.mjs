@@ -2,6 +2,18 @@ import { homedir } from "node:os";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { parseBoolean, parseInteger, parseList } from "./common.mjs";
+import { credentialFor } from "./credentials-profile.mjs";
+
+const PRODUCT = "armorcodex";
+/** Set to "dev" on the dev branch; it suffixes the product in the client header. */
+const CHANNEL = "stable";
+
+/** The backend reads this to tell which build a device runs. */
+export const CLIENT_VERSION = `${PRODUCT}${CHANNEL === "stable" ? "" : `-${CHANNEL}`}/${
+  JSON.parse(
+    readFileSync(new URL("../../package.json", import.meta.url), "utf8")
+  ).version
+}`;
 
 const ENDPOINTS = {
   production: {
@@ -119,9 +131,11 @@ export function loadConfig(env = process.env) {
     try {
       const credPath = path.join(homedir(), ".armoriq", "credentials.json");
       const creds = JSON.parse(readFileSync(credPath, "utf-8"));
-      if (creds?.apiKey && typeof creds.apiKey === "string") {
-        apiKey = creds.apiKey;
-      }
+      const saved = credentialFor(creds, {
+        backend: backendEndpoint,
+        product: PRODUCT,
+      });
+      if (saved.apiKey) apiKey = saved.apiKey;
     } catch {
       // no credentials file — local-only mode
     }
@@ -148,6 +162,7 @@ export function loadConfig(env = process.env) {
     proxyEndpoint,
     csrgEndpoint,
     apiKey,
+    clientVersion: CLIENT_VERSION,
 
     // Observability ("Model A" trace export, per-plan via disk — see
     // scripts/lib/observability.mjs). Default ON whenever an API key is
