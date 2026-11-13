@@ -32,6 +32,7 @@ import {
 } from "./backend-posture.mjs";
 import { appendNdjsonLine, readJson, writePrivateFile } from "./fs-store.mjs";
 import { readFile, unlink } from "node:fs/promises";
+import { checkForUpdate, updateNotice } from "./update-check.mjs";
 import path from "node:path";
 import {
   getSession,
@@ -184,8 +185,9 @@ export async function handleSessionStart(input, config) {
 
   const modeLabel = config.mode === "enforce" ? "ENFORCING" : "MONITORING";
   const intentLabel = config.intentRequired ? "required" : "optional";
+  const notice = updateNotice(await checkForUpdate(config));
   return addPromptContext(
-    `ArmorCodex active (${modeLabel}, intent=${intentLabel})`,
+    `ArmorCodex active (${modeLabel}, intent=${intentLabel})${notice ? `\n${notice}` : ""}`,
     "SessionStart"
   );
 }

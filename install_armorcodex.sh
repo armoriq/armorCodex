@@ -29,7 +29,8 @@ set -euo pipefail
 # Non-interactive overrides:
 #   ARMORCODEX_MARKETPLACE_REPO   override marketplace source (testing)
 #   ARMORCODEX_GIT_URL            override fork source (testing)
-#   ARMORCODEX_GIT_REF            branch / tag (default main)
+#   ARMORCODEX_GIT_REF            branch / tag (default: the latest release tag)
+#   ARMORCODEX_RELEASE_API        GitHub API base used to resolve that tag
 #   ARMORCODEX_INSTALL_HOME       where to clone (default ~/.armoriq/armorCodex)
 #   ARMORIQ_FORCE_INSTALL=1       same as --force-install
 
@@ -44,7 +45,8 @@ N=$'\033[0m'
 
 MARKETPLACE_REPO="${ARMORCODEX_MARKETPLACE_REPO:-armoriq/armorCodex}"
 PLUGIN_GIT_URL="${ARMORCODEX_GIT_URL:-https://github.com/armoriq/armorCodex.git}"
-PLUGIN_GIT_REF="${ARMORCODEX_GIT_REF:-main}"
+PLUGIN_GIT_REF="${ARMORCODEX_GIT_REF:-}"
+RELEASE_API="${ARMORCODEX_RELEASE_API:-https://api.github.com}"
 INSTALL_HOME="${ARMORCODEX_INSTALL_HOME:-${HOME}/.armoriq/armorCodex}"
 DASHBOARD_URL="${ARMORCODEX_DASHBOARD_URL:-https://platform.armoriq.ai}"
 
@@ -317,15 +319,46 @@ upsert_managed_block() {
 # Plugin source + config wiring
 # ---------------------------------------------------------------------------
 
+# dev installs track the dev branch; main and release tags are one channel.
+checkout_channel() {
+  case "$1" in
+    dev) echo dev ;;
+    main | HEAD | v[0-9]*) echo stable ;;
+    *) echo "$1" ;;
+  esac
+}
+
 refuse_other_channel() {
   local branch command="install_armorcodex.sh"
   branch="$(git -C "${INSTALL_HOME}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
-  [[ "${branch}" == "${PLUGIN_GIT_REF}" ]] && return 0
+  [[ "$(checkout_channel "${branch}")" == "$(checkout_channel "${PLUGIN_GIT_REF}")" ]] && return 0
   [[ "${branch}" == "dev" ]] && command="install_armorcodex_dev.sh"
   err "${INSTALL_HOME} is on ${branch}, not ${PLUGIN_GIT_REF}. Nothing was changed."
   printf "  Update it with ${B}curl -fsSL https://armoriq.ai/%s | bash${N}\n" "${command}"
   printf "  To switch channels, uninstall first (${B}--uninstall${N}), then delete %s.\n" "${INSTALL_HOME}"
   exit 1
+}
+
+# An install must land on a version that was released and tested, not on
+# whatever happens to be on main. ARMORCODEX_GIT_REF overrides with any ref.
+resolve_git_ref() {
+  if [[ -n "${PLUGIN_GIT_REF}" ]]; then
+    return 0
+  fi
+  local tag
+  # `|| true` because set -e plus pipefail would otherwise abort the whole
+  # install when the machine is offline or the repo has no release yet.
+  tag="$(curl -fsSL --max-time 5 "${RELEASE_API%/}/repos/${MARKETPLACE_REPO}/releases/latest" 2>/dev/null \
+    | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' \
+    | head -n 1 \
+    | sed 's/.*"\([^"]*\)"$/\1/' || true)"
+  if [[ "${tag}" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+    PLUGIN_GIT_REF="${tag}"
+    info "installing release ${B}${tag}${N}"
+  else
+    PLUGIN_GIT_REF="main"
+    warn "couldn't resolve the latest release, falling back to ${B}main${N}"
+  fi
 }
 
 fetch_plugin_source() {
@@ -341,17 +374,20 @@ fetch_plugin_source() {
     return 0
   fi
 
+  resolve_git_ref
   mkdir -p "$(dirname "${INSTALL_HOME}")"
 
   if [[ -d "${INSTALL_HOME}/.git" ]]; then
     refuse_other_channel
     info "refreshing ${INSTALL_HOME} (git pull)"
+    # FETCH_HEAD rather than origin/<ref>: a release tag has no remote-tracking
+    # branch, and this resolves a tag and a branch the same way.
     git -C "${INSTALL_HOME}" fetch --quiet origin "${PLUGIN_GIT_REF}" >/dev/null
     git -C "${INSTALL_HOME}" reset --hard --quiet FETCH_HEAD >/dev/null
     ok "updated to ${PLUGIN_GIT_REF}"
   else
     info "cloning ${PLUGIN_GIT_URL} into ${INSTALL_HOME}"
-    git clone --quiet --depth 1 --branch "${PLUGIN_GIT_REF}" "${PLUGIN_GIT_URL}" "${INSTALL_HOME}"
+    git -c advice.detachedHead=false clone --quiet --depth 1 --branch "${PLUGIN_GIT_REF}" "${PLUGIN_GIT_URL}" "${INSTALL_HOME}"
     ok "cloned to ${INSTALL_HOME}"
   fi
 
@@ -534,6 +570,9 @@ install_npm_deps() {
   popd >/dev/null
 }
 
+# Pinned, not @latest: the CLI writes ~/.armoriq/credentials.json, and a float
+# onto a line that writes a format this plugin release cannot read is what took
+# credentials down for ten days.
 install_armoriq_cli() {
   info "installing ArmorIQ CLI ${B}(@armoriq/sdk-dev)${N}"
   if npm install -g @armoriq/sdk-dev@latest --silent --no-audit --no-fund >/dev/null 2>&1; then
