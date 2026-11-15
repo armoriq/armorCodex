@@ -1,0 +1,1 @@
+process.env.DO_NOT_TRACK = "1";
