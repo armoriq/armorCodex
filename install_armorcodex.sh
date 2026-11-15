@@ -609,9 +609,41 @@ EOF
   ok "ArmorIQ connected. Codex will auto-load the key."
 }
 
+plugin_backend() {
+  node --input-type=module - "${PLUGIN_PATH}/scripts/lib/config.mjs" <<'NODE'
+import { pathToFileURL } from "node:url";
+const { loadConfig } = await import(pathToFileURL(process.argv[2]).href);
+process.stdout.write(loadConfig().backendEndpoint);
+NODE
+}
+
 finale() {
   echo
   printf "${G}${B}ArmorCodex is installed.${N}\n"
+
+  node --input-type=module - "$(plugin_backend)" 2>/dev/null <<'NODE' || true
+import { closeSync, mkdirSync, openSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import path from "node:path";
+try {
+  const dnt = process.env.DO_NOT_TRACK?.trim().toLowerCase();
+  const disabled = process.env.ARMORIQ_USAGE_PING_DISABLED?.trim().toLowerCase();
+  if (["1", "true"].includes(dnt) || ["1", "true", "yes"].includes(disabled)) process.exit(0);
+  if (!["https://api.armoriq.ai", "https://staging-api.armoriq.ai", "https://staging-api.armoriq.io"].includes(process.argv[2])) process.exit(0);
+  try {
+    const settings = JSON.parse(readFileSync(path.join(homedir(), ".armoriq/settings.json"), "utf8"));
+    if (!settings || typeof settings !== "object" || Array.isArray(settings) ||
+        (Object.prototype.hasOwnProperty.call(settings, "usagePing") &&
+         (typeof settings.usagePing !== "boolean" || !settings.usagePing))) process.exit(0);
+  } catch (error) {
+    if (error.code !== "ENOENT") process.exit(0);
+  }
+  const dir = path.join(homedir(), ".armoriq/reach/v1/armorcodex");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  closeSync(openSync(path.join(dir, "notice-shown"), "wx", 0o600));
+  console.log("ArmorIQ sends an anonymous daily usage ping (a random install id, plugin and version, OS, signed in or not, and daily counts of plans and blocks); turn it off with ARMORIQ_USAGE_PING_DISABLED=1 or DO_NOT_TRACK=1.");
+} catch {}
+NODE
 
   section "Quick start"
   cat <<EOF

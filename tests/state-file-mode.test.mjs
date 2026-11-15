@@ -73,7 +73,7 @@ test("the hook router makes an existing data dir 0700", async () => {
   const dataDir = await openDataDir();
   const child = spawn(process.execPath, [HOOK_ROUTER], {
     stdio: ["pipe", "ignore", "ignore"],
-    env: { PATH: process.env.PATH, HOME: dataDir, ARMORCODEX_DATA_DIR: dataDir, ARMORIQ_API_KEY: "" }
+    env: { PATH: process.env.PATH, HOME: dataDir, ARMORCODEX_DATA_DIR: dataDir, ARMORIQ_API_KEY: "", DO_NOT_TRACK: "1" }
   });
   child.stdin.end("");
   await new Promise((resolve) => child.once("exit", resolve));
