@@ -1,0 +1,229 @@
+{
+  "version": 1,
+  "endpoint": {
+    "method": "POST",
+    "path": "/install-pings",
+    "contentType": "application/json",
+    "maxBodyBytes": 4096,
+    "successStatus": 204
+  },
+  "schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["schemaVersion", "installId", "plugin", "pluginVersion", "hostAgent", "hostVersion", "os", "signedIn", "environment", "localCounts"],
+    "properties": {
+      "schemaVersion": {
+        "type": "integer",
+        "const": 1
+      },
+      "installId": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+      },
+      "plugin": {
+        "type": "string",
+        "enum": ["armorclaude", "armorcodex", "armoropencode", "armorantigravity"]
+      },
+      "pluginVersion": {
+        "type": "string",
+        "pattern": "^\\d{1,6}\\.\\d{1,6}\\.\\d{1,6}(-[0-9A-Za-z.-]{1,32})?$",
+        "maxLength": 64
+      },
+      "hostAgent": {
+        "type": "string",
+        "enum": ["claude-code", "codex", "opencode", "antigravity"]
+      },
+      "hostVersion": {
+        "type": ["string", "null"],
+        "pattern": "^\\d{1,6}\\.\\d{1,6}\\.\\d{1,6}(-[0-9A-Za-z.-]{1,32})?$",
+        "maxLength": 64
+      },
+      "os": {
+        "type": "string",
+        "enum": ["macos", "linux", "windows", "other"]
+      },
+      "signedIn": {
+        "type": "boolean"
+      },
+      "environment": {
+        "type": "string",
+        "enum": ["production", "staging"]
+      },
+      "localCounts": {
+        "type": "array",
+        "maxItems": 7,
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["day", "plans", "blocked", "held"],
+          "properties": {
+            "day": {
+              "type": "string",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+            },
+            "plans": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100000
+            },
+            "blocked": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100000
+            },
+            "held": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100000
+            }
+          }
+        }
+      }
+    }
+  },
+  "extraRules": [
+    {"id": "calendar-valid-day", "rule": "Each localCounts day must be a real calendar date in the Gregorian calendar, including leap year rules. A YYYY-MM-DD shape alone is insufficient; reject dates such as 2026-02-30."},
+    {"id": "distinct-days", "rule": "Every localCounts entry must have a distinct day; reject duplicate days."},
+    {"id": "plugin-host-pair", "rule": "Only these plugin and hostAgent pairs are allowed: armorclaude/claude-code, armorcodex/codex, armoropencode/opencode, armorantigravity/antigravity."}
+  ],
+  "examples": {
+    "valid": [
+      {"schemaVersion": 1, "installId": "e77b035b-79b5-4be4-9984-87400678dfe1", "plugin": "armorclaude", "pluginVersion": "1.2.3", "hostAgent": "claude-code", "hostVersion": null, "os": "macos", "signedIn": false, "environment": "production", "localCounts": []},
+      {"schemaVersion": 1, "installId": "e77b035b-79b5-4be4-9984-87400678dfe1", "plugin": "armorcodex", "pluginVersion": "1.2.3", "hostAgent": "codex", "hostVersion": "2.3.4-beta.1", "os": "linux", "signedIn": false, "environment": "production", "localCounts": []},
+      {"schemaVersion": 1, "installId": "e77b035b-79b5-4be4-9984-87400678dfe1", "plugin": "armoropencode", "pluginVersion": "1.2.3", "hostAgent": "opencode", "hostVersion": null, "os": "windows", "signedIn": false, "environment": "production", "localCounts": [{"day": "2000-02-29", "plans": 0, "blocked": 100000, "held": 1}]},
+      {"schemaVersion": 1, "installId": "e77b035b-79b5-4be4-9984-87400678dfe1", "plugin": "armorantigravity", "pluginVersion": "1.2.3", "hostAgent": "antigravity", "hostVersion": "2.3.4-beta.1", "os": "other", "signedIn": false, "environment": "production", "localCounts": []},
+      {"schemaVersion": 1, "installId": "e77b035b-79b5-4be4-9984-87400678dfe1", "plugin": "armorclaude", "pluginVersion": "1.2.3", "hostAgent": "claude-code", "hostVersion": null, "os": "macos", "signedIn": true, "environment": "staging", "localCounts": []},
+      {"schemaVersion": 1, "installId": "e77b035b-79b5-4be4-9984-87400678dfe1", "plugin": "armorcodex", "pluginVersion": "0.0.0-dev.1", "hostAgent": "codex", "hostVersion": "2.3.4-beta.1", "os": "linux", "signedIn": true, "environment": "staging", "localCounts": [{"day": "2026-11-13", "plans": 1, "blocked": 2, "held": 3}]},
+      {"schemaVersion": 1, "installId": "e77b035b-79b5-4be4-9984-87400678dfe1", "plugin": "armoropencode", "pluginVersion": "1.2.3", "hostAgent": "opencode", "hostVersion": null, "os": "windows", "signedIn": true, "environment": "staging", "localCounts": []},
+      {"schemaVersion": 1, "installId": "e77b035b-79b5-4be4-9984-87400678dfe1", "plugin": "armorantigravity", "pluginVersion": "123456.123456.123456-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "hostAgent": "antigravity", "hostVersion": "2.3.4-beta.1", "os": "other", "signedIn": true, "environment": "staging", "localCounts": [{"day": "2026-11-07", "plans": 100000, "blocked": 0, "held": 0}, {"day": "2026-11-08", "plans": 1, "blocked": 100000, "held": 1}, {"day": "2026-11-09", "plans": 2, "blocked": 2, "held": 100000}, {"day": "2026-11-10", "plans": 3, "blocked": 3, "held": 3}, {"day": "2026-11-11", "plans": 4, "blocked": 4, "held": 4}, {"day": "2026-11-12", "plans": 5, "blocked": 5, "held": 5}, {"day": "2026-11-13", "plans": 6, "blocked": 6, "held": 6}]}
+    ],
+    "invalid": [
+      {"reason": "missing-field", "body": {"schemaVersion": 1, "installId": "e77b035b-79b5-4be4-9984-87400678dfe1", "plugin": "armorclaude", "pluginVersion": "1.2.3", "hostAgent": "claude-code", "hostVersion": null, "os": "macos", "environment": "production", "localCounts": []}},
+      {"reason": "extra-top-level-field", "body": {"schemaVersion": 1, "installId": "e77b035b-79b5-4be4-9984-87400678dfe1", "plugin": "armorclaude", "pluginVersion": "1.2.3", "hostAgent": "claude-code", "hostVersion": null, "os": "macos", "signedIn": false, "environment": "production", "localCounts": [], "unexpected": true}},
+      {"reason": "extra-count-field", "body": {"schemaVersion": 1, "installId": "e77b035b-79b5-4be4-9984-87400678dfe1", "plugin": "armorclaude", "pluginVersion": "1.2.3", "hostAgent": "claude-code", "hostVersion": null, "os": "macos", "signedIn": false, "environment": "production", "localCounts": [{"day": "2026-11-13", "plans": 0, "blocked": 0, "held": 0, "unexpected": true}]}},
+      {"reason": "uppercase-uuid", "body": {"schemaVersion": 1, "installId": "E77B035B-79B5-4BE4-9984-87400678DFE1", "plugin": "armorclaude", "pluginVersion": "1.2.3", "hostAgent": "claude-code", "hostVersion": null, "os": "macos", "signedIn": false, "environment": "production", "localCounts": []}},
+      {"reason": "non-v4-uuid", "body": {"schemaVersion": 1, "installId": "e77b035b-79b5-5be4-9984-87400678dfe1", "plugin": "armorclaude", "pluginVersion": "1.2.3", "hostAgent": "claude-code", "hostVersion": null, "os": "macos", "signedIn": false, "environment": "production", "localCounts": []}},
+      {"reason": "unknown-plugin", "body": {"schemaVersion": 1, "installId": "e77b035b-79b5-4be4-9984-87400678dfe1", "plugin": "unknown", "pluginVersion": "1.2.3", "hostAgent": "claude-code", "hostVersion": null, "os": "macos", "signedIn": false, "environment": "production", "localCounts": []}},
+      {"reason": "unknown-host-agent", "body": {"schemaVersion": 1, "installId": "e77b035b-79b5-4be4-9984-87400678dfe1", "plugin": "armorclaude", "pluginVersion": "1.2.3", "hostAgent": "unknown", "hostVersion": null, "os": "macos", "signedIn": false, "environment": "production", "localCounts": []}},
+      {"reason": "plugin-host-pair", "body": {"schemaVersion": 1, "installId": "e77b035b-79b5-4be4-9984-87400678dfe1", "plugin": "armorclaude", "pluginVersion": "1.2.3", "hostAgent": "codex", "hostVersion": null, "os": "macos", "signedIn": false, "environment": "production", "localCounts": []}},
+      {"reason": "bad-version", "body": {"schemaVersion": 1, "installId": "e77b035b-79b5-4be4-9984-87400678dfe1", "plugin": "armorclaude", "pluginVersion": "v1.2.3", "hostAgent": "claude-code", "hostVersion": null, "os": "macos", "signedIn": false, "environment": "production", "localCounts": []}},
+      {"reason": "version-too-long", "body": {"schemaVersion": 1, "installId": "e77b035b-79b5-4be4-9984-87400678dfe1", "plugin": "armorclaude", "pluginVersion": "1.2.3-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "hostAgent": "claude-code", "hostVersion": null, "os": "macos", "signedIn": false, "environment": "production", "localCounts": []}},
+      {"reason": "bad-host-version", "body": {"schemaVersion": 1, "installId": "e77b035b-79b5-4be4-9984-87400678dfe1", "plugin": "armorclaude", "pluginVersion": "1.2.3", "hostAgent": "claude-code", "hostVersion": "2.3", "os": "macos", "signedIn": false, "environment": "production", "localCounts": []}},
+      {"reason": "host-version-too-long", "body": {"schemaVersion": 1, "installId": "e77b035b-79b5-4be4-9984-87400678dfe1", "plugin": "armorclaude", "pluginVersion": "1.2.3", "hostAgent": "claude-code", "hostVersion": "1.2.3-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "os": "macos", "signedIn": false, "environment": "production", "localCounts": []}},
+      {"reason": "unknown-os", "body": {"schemaVersion": 1, "installId": "e77b035b-79b5-4be4-9984-87400678dfe1", "plugin": "armorclaude", "pluginVersion": "1.2.3", "hostAgent": "claude-code", "hostVersion": null, "os": "darwin", "signedIn": false, "environment": "production", "localCounts": []}},
+      {"reason": "signed-in-string", "body": {"schemaVersion": 1, "installId": "e77b035b-79b5-4be4-9984-87400678dfe1", "plugin": "armorclaude", "pluginVersion": "1.2.3", "hostAgent": "claude-code", "hostVersion": null, "os": "macos", "signedIn": "true", "environment": "production", "localCounts": []}},
+      {"reason": "unknown-environment", "body": {"schemaVersion": 1, "installId": "e77b035b-79b5-4be4-9984-87400678dfe1", "plugin": "armorclaude", "pluginVersion": "1.2.3", "hostAgent": "claude-code", "hostVersion": null, "os": "macos", "signedIn": false, "environment": "development", "localCounts": []}},
+      {"reason": "too-many-counts", "body": {"schemaVersion": 1, "installId": "e77b035b-79b5-4be4-9984-87400678dfe1", "plugin": "armorclaude", "pluginVersion": "1.2.3", "hostAgent": "claude-code", "hostVersion": null, "os": "macos", "signedIn": false, "environment": "production", "localCounts": [{"day": "2026-11-07", "plans": 100000, "blocked": 0, "held": 0}, {"day": "2026-11-08", "plans": 1, "blocked": 100000, "held": 1}, {"day": "2026-11-09", "plans": 2, "blocked": 2, "held": 100000}, {"day": "2026-11-10", "plans": 3, "blocked": 3, "held": 3}, {"day": "2026-11-11", "plans": 4, "blocked": 4, "held": 4}, {"day": "2026-11-12", "plans": 5, "blocked": 5, "held": 5}, {"day": "2026-11-13", "plans": 6, "blocked": 6, "held": 6}, {"day": "2026-11-06", "plans": 0, "blocked": 0, "held": 0}]}},
+      {"reason": "negative-count", "body": {"schemaVersion": 1, "installId": "e77b035b-79b5-4be4-9984-87400678dfe1", "plugin": "armorclaude", "pluginVersion": "1.2.3", "hostAgent": "claude-code", "hostVersion": null, "os": "macos", "signedIn": false, "environment": "production", "localCounts": [{"day": "2026-11-13", "plans": -1, "blocked": 0, "held": 0}]}},
+      {"reason": "count-too-large", "body": {"schemaVersion": 1, "installId": "e77b035b-79b5-4be4-9984-87400678dfe1", "plugin": "armorclaude", "pluginVersion": "1.2.3", "hostAgent": "claude-code", "hostVersion": null, "os": "macos", "signedIn": false, "environment": "production", "localCounts": [{"day": "2026-11-13", "plans": 0, "blocked": 100001, "held": 0}]}},
+      {"reason": "non-integer-count", "body": {"schemaVersion": 1, "installId": "e77b035b-79b5-4be4-9984-87400678dfe1", "plugin": "armorclaude", "pluginVersion": "1.2.3", "hostAgent": "claude-code", "hostVersion": null, "os": "macos", "signedIn": false, "environment": "production", "localCounts": [{"day": "2026-11-13", "plans": 0, "blocked": 0, "held": 0.5}]}},
+      {"reason": "bad-day-format", "body": {"schemaVersion": 1, "installId": "e77b035b-79b5-4be4-9984-87400678dfe1", "plugin": "armorclaude", "pluginVersion": "1.2.3", "hostAgent": "claude-code", "hostVersion": null, "os": "macos", "signedIn": false, "environment": "production", "localCounts": [{"day": "2026-2-03", "plans": 0, "blocked": 0, "held": 0}]}},
+      {"reason": "calendar-valid-day", "body": {"schemaVersion": 1, "installId": "e77b035b-79b5-4be4-9984-87400678dfe1", "plugin": "armorclaude", "pluginVersion": "1.2.3", "hostAgent": "claude-code", "hostVersion": null, "os": "macos", "signedIn": false, "environment": "production", "localCounts": [{"day": "2026-02-30", "plans": 0, "blocked": 0, "held": 0}]}},
+      {"reason": "distinct-days", "body": {"schemaVersion": 1, "installId": "e77b035b-79b5-4be4-9984-87400678dfe1", "plugin": "armorclaude", "pluginVersion": "1.2.3", "hostAgent": "claude-code", "hostVersion": null, "os": "macos", "signedIn": false, "environment": "production", "localCounts": [{"day": "2026-11-13", "plans": 0, "blocked": 0, "held": 0}, {"day": "2026-11-13", "plans": 1, "blocked": 0, "held": 0}]}},
+      {"reason": "schema-version", "body": {"schemaVersion": 2, "installId": "e77b035b-79b5-4be4-9984-87400678dfe1", "plugin": "armorclaude", "pluginVersion": "1.2.3", "hostAgent": "claude-code", "hostVersion": null, "os": "macos", "signedIn": false, "environment": "production", "localCounts": []}}
+    ]
+  },
+  "origins": {
+    "production": ["https://api.armoriq.ai"],
+    "staging": ["https://staging-api.armoriq.ai", "https://staging-api.armoriq.io"]
+  },
+  "originRules": "Exact origin match only. Any other scheme, host, port, path prefix, or a URL with user info sends nothing. The configured backend must equal a listed origin exactly. Send only to that origin plus /install-pings, with HTTPS and no redirects followed.",
+  "optOut": {
+    "env": {
+      "DO_NOT_TRACK": {
+        "disablingValues": ["1", "true"],
+        "caseInsensitive": true,
+        "trimmed": true
+      },
+      "ARMORIQ_USAGE_PING_DISABLED": {
+        "disablingValues": ["1", "true", "yes"],
+        "caseInsensitive": true,
+        "trimmed": true
+      }
+    },
+    "settings": {
+      "path": "~/.armoriq/settings.json",
+      "key": "usagePing",
+      "disablingValue": false,
+      "missing": "enabled",
+      "malformed": "disabled",
+      "unreadable": "disabled",
+      "wrongType": "disabled"
+    },
+    "pluginSettings": {
+      "armorclaude": {
+        "source": "userConfig",
+        "key": "disable_usage_ping",
+        "disabledValue": true
+      },
+      "armorcodex": null,
+      "armoropencode": {
+        "source": "options",
+        "key": "usagePing",
+        "disabledValue": false
+      },
+      "armorantigravity": {
+        "source": "config.json",
+        "key": "usagePing",
+        "disabledValue": false
+      }
+    },
+    "precedence": "Any disabling source wins. No enabled setting or unrecognised environment value can override an opt out. When disabled, send nothing and write no claim, counter or install id file. Check again immediately before sending. A backend outside the origins table also disables the ping.",
+    "vectorRules": "Each vector has env, settings and enabled. settings null means a missing global settings file; an object is its parsed content; malformed means a parse failure. When settingsJson is present, it supplies the parsed file content instead of settings, including null; any non object or array is malformed and disables the ping. A present usagePing key with a non boolean value also makes the file malformed. settingsReadable false represents an unreadable file regardless of settings. Optional plugin and pluginConfig give that plugin's own configuration from the source in pluginSettings. Omitted environment variables and plugin settings do not disable the ping. The vectors assume a backend in the origins table.",
+    "testVectors": [
+      {"env": {}, "settings": null, "enabled": true},
+      {"env": {}, "settings": {}, "enabled": true},
+      {"env": {}, "settings": {"usagePing": true}, "enabled": true},
+      {"env": {}, "settings": {"usagePing": false}, "enabled": false},
+      {"env": {}, "settings": "malformed", "enabled": false},
+      {"env": {}, "settings": null, "settingsReadable": false, "enabled": false},
+      {"env": {"DO_NOT_TRACK": "1"}, "settings": null, "enabled": false},
+      {"env": {"DO_NOT_TRACK": "true"}, "settings": null, "enabled": false},
+      {"env": {"DO_NOT_TRACK": "TRUE"}, "settings": null, "enabled": false},
+      {"env": {"DO_NOT_TRACK": "yes"}, "settings": null, "enabled": true},
+      {"env": {"DO_NOT_TRACK": " true "}, "settings": null, "enabled": false},
+      {"env": {"DO_NOT_TRACK": " 1 "}, "settings": null, "enabled": false},
+      {"env": {"ARMORIQ_USAGE_PING_DISABLED": "1"}, "settings": null, "enabled": false},
+      {"env": {"ARMORIQ_USAGE_PING_DISABLED": "true"}, "settings": null, "enabled": false},
+      {"env": {"ARMORIQ_USAGE_PING_DISABLED": "yes"}, "settings": null, "enabled": false},
+      {"env": {"ARMORIQ_USAGE_PING_DISABLED": " TrUe "}, "settings": null, "enabled": false},
+      {"env": {"ARMORIQ_USAGE_PING_DISABLED": " YeS "}, "settings": null, "enabled": false},
+      {"env": {"ARMORIQ_USAGE_PING_DISABLED": "0"}, "settings": null, "enabled": true},
+      {"env": {"ARMORIQ_USAGE_PING_DISABLED": "false"}, "settings": null, "enabled": true},
+      {"env": {"ARMORIQ_USAGE_PING_DISABLED": ""}, "settings": null, "enabled": true},
+      {"env": {"DO_NOT_TRACK": "1", "ARMORIQ_USAGE_PING_DISABLED": "false"}, "settings": {"usagePing": true}, "enabled": false},
+      {"env": {"DO_NOT_TRACK": "0", "ARMORIQ_USAGE_PING_DISABLED": "yes"}, "settings": {"usagePing": true}, "enabled": false},
+      {"env": {"DO_NOT_TRACK": "0", "ARMORIQ_USAGE_PING_DISABLED": "false"}, "settings": {"usagePing": false}, "enabled": false},
+      {"env": {"ARMORIQ_USAGE_PING_DISABLED": "false"}, "settings": "malformed", "enabled": false},
+      {"env": {}, "settings": {"usagePing": "false"}, "enabled": false},
+      {"env": {}, "settings": {"usagePing": 0}, "enabled": false},
+      {"env": {}, "settings": {"usagePing": null}, "enabled": false},
+      {"env": {}, "settings": null, "settingsJson": [], "enabled": false},
+      {"env": {}, "settings": null, "settingsJson": "x", "enabled": false},
+      {"env": {}, "settings": null, "settingsJson": null, "enabled": false},
+      {"env": {}, "settings": {"usagePing": true}, "plugin": "armorclaude", "pluginConfig": {"disable_usage_ping": true}, "enabled": false},
+      {"env": {}, "settings": null, "plugin": "armorclaude", "pluginConfig": {"disable_usage_ping": false}, "enabled": true},
+      {"env": {}, "settings": {"usagePing": true}, "plugin": "armoropencode", "pluginConfig": {"usagePing": false}, "enabled": false},
+      {"env": {}, "settings": null, "plugin": "armoropencode", "pluginConfig": {"usagePing": true}, "enabled": true},
+      {"env": {}, "settings": {"usagePing": true}, "plugin": "armorantigravity", "pluginConfig": {"usagePing": false}, "enabled": false},
+      {"env": {}, "settings": null, "plugin": "armorantigravity", "pluginConfig": {"usagePing": true}, "enabled": true},
+      {"env": {}, "settings": null, "plugin": "armorcodex", "enabled": true},
+      {"env": {}, "settings": {"usagePing": false}, "plugin": "armoropencode", "pluginConfig": {"usagePing": true}, "enabled": false}
+    ]
+  },
+  "osMapping": {
+    "darwin": "macos",
+    "linux": "linux",
+    "win32": "windows",
+    "*": "other"
+  },
+  "notice": "ArmorIQ sends an anonymous daily usage ping (a random install id, plugin and version, OS, signed in or not, and daily counts of plans and blocks); turn it off with ARMORIQ_USAGE_PING_DISABLED=1 or DO_NOT_TRACK=1.",
+  "installId": {
+    "path": "~/.armoriq/install-id",
+    "format": "lowercase UUID v4 then a newline",
+    "fileMode": "0600",
+    "dirMode": "0700"
+  },
+  "localCountsLine": ["{\"t\":\"plan\"}\n", "{\"t\":\"blocked\"}\n", "{\"t\":\"held\"}\n"]
+}

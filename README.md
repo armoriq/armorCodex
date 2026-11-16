@@ -112,6 +112,40 @@ earlier history.
 `/hooks` in Codex once and trust ArmorCodex's `SessionEnd` hook. The other ArmorCodex hooks are
 unchanged and keep their trust. Without it the worker still exits when Codex itself exits.
 
+## Data & Privacy
+
+ArmorCodex sends one small anonymous usage ping on the first session or prompt of each UTC
+day, whether you are signed in or not. It sends a random install id, the plugin name and
+version, the host agent and its version (when known), your OS, whether you are signed in,
+the backend environment, and daily counts of plans, blocks and approval requests made while
+signed out. Counts cover up to seven earlier UTC days. The install id lives in
+`~/.armoriq/install-id`, is shared by the ArmorIQ plugins in that home, and is separate from
+sign in. It is never used to identify your account or sent anywhere except the daily ping.
+
+The ping never sends prompts, plans, tool names, arguments, paths, repo names, emails,
+keys, the sign in device id, or IP addresses. ArmorIQ's app never stores the sender's IP
+address, although Google Cloud's request logs record it at the infrastructure level.
+Anonymous ping rows and daily counts are kept indefinitely. Signed in token usage reports
+have their own controls and payload.
+
+You can turn the ping off with any of these:
+
+- Set `DO_NOT_TRACK=1` or `DO_NOT_TRACK=true`.
+- Set `ARMORIQ_USAGE_PING_DISABLED=1`, `true`, or `yes`.
+- Set `"usagePing": false` in `~/.armoriq/settings.json`, keeping any other settings.
+
+Environment values ignore case and surrounding spaces. A malformed or unreadable settings
+file, a value of the wrong type, or a backend outside the supported production and staging
+origins also disables the ping. Disabled pings create no install id, ping claim or counter
+files. No reminder changes your ping setting.
+
+If you are not signed in, ArmorCodex also shows a sign in reminder at session start, at
+most once per UTC day. It appears only to you and makes no network request. Hide it with
+`ARMORIQ_SIGNIN_REMINDER_DISABLED=1` (also `true` or `yes`, ignoring case and surrounding
+spaces), or set `"signInReminder": false` in `~/.armoriq/settings.json`. A malformed or
+unreadable settings file or a value of the wrong type hides it for that run. `DO_NOT_TRACK`
+and `usagePing` do not hide this reminder.
+
 ## Policy Commands
 
 Structured `armor` commands (staged: nothing applies until you confirm):

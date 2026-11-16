@@ -14,6 +14,7 @@ import {
 } from "./lib/engine.mjs";
 import { ensurePrivateDir } from "./lib/fs-store.mjs";
 import { observeHook } from "./lib/observability.mjs";
+import { withReach } from "./lib/reach.mjs";
 import { launchLiveUsage, trackUsageSession } from "./lib/usage-sync-launch.mjs";
 
 let currentEvent = "";
@@ -88,6 +89,7 @@ async function main() {
       return;
   }
 
+  output = withReach(event, input, config, output);
   if (output) {
     emitJson(output);
   }

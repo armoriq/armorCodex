@@ -17,11 +17,13 @@ This document describes what ArmorCodex captures, how long ArmorIQ keeps it, and
 | Local audit WAL | Customer machine, `~/.codex/armorcodex/audit/` | Cleared on plugin uninstall or by user | `rm -rf ~/.codex/armorcodex/` |
 | Pending intent plan files | Customer machine, `~/.codex/armorcodex/pending-plan.json` | Replaced per prompt, removed on session end | n/a (ephemeral) |
 | Account metadata (email, org membership) | ArmorIQ backend | While account active, 30 days after deletion | Account deletion request |
+| Anonymous daily install pings and signed out daily counts | ArmorIQ backend, separate from accounts | Indefinite | Turn off future pings with `ARMORIQ_USAGE_PING_DISABLED=1`, `DO_NOT_TRACK=1`, or `"usagePing": false` in `~/.armoriq/settings.json`; account deletion cannot locate these anonymous rows |
 
 ## What ArmorCodex does NOT capture
 
 ArmorCodex never captures or transmits the following from a customer machine:
 
+- **In the anonymous daily ping:** prompts, plans, tool names, arguments, paths, repo names, emails, keys, the sign in device id, or IP addresses. Google Cloud's request logs record the sender's IP at the infrastructure level; ArmorIQ's app never stores it. See [Data & Privacy](README.md#data--privacy).
 - **Credentials, API keys, OAuth tokens, or session cookies** — the arg-sanitizer scrubs any field name matching `password|secret|token|key|credential|auth` before any payload leaves the host.
 - **Source file contents** — only tool *names* and *redacted* argument shapes are recorded. File paths are recorded; file bodies are not.
 - **Restricted data types** — PCI cardholder data, PHI, government IDs, biometric identifiers. The data classifier in `scripts/lib/policy.mjs` detects and refuses to forward payloads matching these classes.

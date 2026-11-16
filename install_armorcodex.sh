@@ -81,6 +81,7 @@ fi
 
 CONFIG_TOML="${HOME}/.codex/config.toml"
 GLOBAL_HOOKS="${HOME}/.codex/hooks.json"
+HOOKS_UNTRUSTED=0
 PLUGIN_PATH="${PLUGIN_ROOT}/${PLUGIN_SUBDIR}"
 BOOTSTRAP_PATH="${PLUGIN_PATH}/scripts/bootstrap.mjs"
 
@@ -551,6 +552,20 @@ ensure_global_hooks() {
     repaired:*) ok "added missing ArmorCodex ${result#repaired:} hook(s) to ${GLOBAL_HOOKS}" ;;
     *) ok "global hooks already reference ArmorCodex" ;;
   esac
+  trust_codex_hooks
+}
+
+# Codex skips a hooks.json hook until it is trusted, so without this step a
+# fresh install enforces nothing. Recorded the way /hooks records it, for
+# ArmorCodex's own hooks only.
+trust_codex_hooks() {
+  if (cd "${HOME}" && node "${PLUGIN_PATH}/scripts/trust-hooks.mjs" "${GLOBAL_HOOKS}" "${BOOTSTRAP_PATH}") >/dev/null 2>&1; then
+    ok "trusted the ArmorCodex hooks in Codex"
+    return 0
+  fi
+  HOOKS_UNTRUSTED=1
+  warn "couldn't mark the ArmorCodex hooks as trusted, so Codex will not run them yet"
+  printf "  Start ${B}codex${N}, run ${B}/hooks${N}, and trust the ArmorCodex hooks.\n"
 }
 
 remove_codex_hooks() {
@@ -570,9 +585,6 @@ install_npm_deps() {
   popd >/dev/null
 }
 
-# Pinned, not @latest: the CLI writes ~/.armoriq/credentials.json, and a float
-# onto a line that writes a format this plugin release cannot read is what took
-# credentials down for ten days.
 install_armoriq_cli() {
   info "installing ArmorIQ CLI ${B}(@armoriq/sdk-dev)${N}"
   if npm install -g @armoriq/sdk-dev@latest --silent --no-audit --no-fund >/dev/null 2>&1; then
@@ -675,6 +687,10 @@ verify_install() {
     warn "global hooks file missing at ${GLOBAL_HOOKS}"
     issues=$((issues+1))
   fi
+  if [[ "${HOOKS_UNTRUSTED}" -eq 1 ]]; then
+    warn "ArmorCodex hooks are not trusted yet: start ${B}codex${N}, run ${B}/hooks${N}, and trust them"
+    issues=$((issues+1))
+  fi
   if [[ "${issues}" -eq 0 ]]; then
     ok "armorcodex is wired up correctly"
   else
@@ -769,6 +785,30 @@ EOF
 finale() {
   echo
   printf "${G}${B}ArmorCodex is installed.${N}\n"
+
+  node --input-type=module - "$(plugin_backend)" 2>/dev/null <<'NODE' || true
+import { closeSync, mkdirSync, openSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import path from "node:path";
+try {
+  const dnt = process.env.DO_NOT_TRACK?.trim().toLowerCase();
+  const disabled = process.env.ARMORIQ_USAGE_PING_DISABLED?.trim().toLowerCase();
+  if (["1", "true"].includes(dnt) || ["1", "true", "yes"].includes(disabled)) process.exit(0);
+  if (!["https://api.armoriq.ai", "https://staging-api.armoriq.ai", "https://staging-api.armoriq.io"].includes(process.argv[2])) process.exit(0);
+  try {
+    const settings = JSON.parse(readFileSync(path.join(homedir(), ".armoriq/settings.json"), "utf8"));
+    if (!settings || typeof settings !== "object" || Array.isArray(settings) ||
+        (Object.prototype.hasOwnProperty.call(settings, "usagePing") &&
+         (typeof settings.usagePing !== "boolean" || !settings.usagePing))) process.exit(0);
+  } catch (error) {
+    if (error.code !== "ENOENT") process.exit(0);
+  }
+  const dir = path.join(homedir(), ".armoriq/reach/v1/armorcodex");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  closeSync(openSync(path.join(dir, "notice-shown"), "wx", 0o600));
+  console.log("ArmorIQ sends an anonymous daily usage ping (a random install id, plugin and version, OS, signed in or not, and daily counts of plans and blocks); turn it off with ARMORIQ_USAGE_PING_DISABLED=1 or DO_NOT_TRACK=1.");
+} catch {}
+NODE
 
   section "Quick start"
   cat <<EOF

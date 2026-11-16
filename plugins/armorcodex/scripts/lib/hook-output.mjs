@@ -35,3 +35,13 @@ export function addPromptContext(context, hookEventName = "UserPromptSubmit") {
     }
   };
 }
+
+/**
+ * `additionalContext` reaches the model only. Codex surfaces the top-level
+ * `systemMessage` to the person at the terminal, as a `warning` entry on the
+ * `hook/completed` event the client renders, so anything the user is meant to
+ * act on goes here instead.
+ */
+export function withSystemMessage(output, message) {
+  return message ? { ...output, systemMessage: message } : output;
+}

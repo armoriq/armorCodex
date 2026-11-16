@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -302,15 +302,24 @@ test("SessionStart surfaces a pending update from state without any network call
     JSON.stringify({ lastCheckedAt: Math.floor(Date.now() / 1000), latestVersion: "v9.9.9" })
   );
 
+  // A release checkout, whatever branch the tree running this test is on.
+  const liveRoot = mkdtempSync(join(tmpdir(), "armorcodex-release-checkout-"));
+  t.after(() => rmSync(liveRoot, { recursive: true, force: true }));
+  mkdirSync(join(liveRoot, ".git"));
+  writeFileSync(join(liveRoot, ".git", "HEAD"), "0123456789abcdef0123456789abcdef01234567\n");
+
   const output = await handleSessionStart(
     { hook_event_name: "SessionStart", session_id: "sess-update", source: "startup" },
-    config
+    config,
+    { liveRoot }
   );
 
-  const context = sessionContext(output);
-  assert.match(context, /ArmorCodex active \(ENFORCING, intent=required\)/);
-  assert.match(context, /ArmorCodex v9\.9\.9 is available \(running 0\.3\.3\)/);
-  assert.match(context, /curl -fsSL https:\/\/armoriq\.ai\/install_armorcodex\.sh \| bash/);
+  assert.equal(sessionContext(output), "ArmorCodex active (ENFORCING, intent=required)");
+  // systemMessage, not additionalContext: the notice is for the person, and
+  // the model must not be handed an install command to run mid-session.
+  assert.match(output.systemMessage, /ArmorCodex v9\.9\.9 is available \(running 0\.3\.3\)/);
+  assert.match(output.systemMessage, /curl -fsSL https:\/\/armoriq\.ai\/install_armorcodex\.sh \| bash/);
+  assert.doesNotMatch(sessionContext(output), /curl -fsSL/);
   assert.ok(
     JSON.parse(readFileSync(config.runtimeFile, "utf8")).sessions["sess-update"],
     "the session is still recorded"
@@ -330,6 +339,7 @@ test("SessionStart says nothing extra when the cached release matches the runnin
   );
 
   assert.equal(sessionContext(output), "ArmorCodex active (ENFORCING, intent=required)");
+  assert.equal(output.systemMessage, undefined);
 });
 
 test("SessionStart with the opt-out set never reads or writes update state", async (t) => {
@@ -347,4 +357,5 @@ test("SessionStart with the opt-out set never reads or writes update state", asy
   );
 
   assert.equal(sessionContext(output), "ArmorCodex active (ENFORCING, intent=required)");
+  assert.equal(output.systemMessage, undefined);
 });
