@@ -33,6 +33,22 @@ Bash result -> PostToolUse -> audit log to ArmorIQ IAP
 
 ## Install
 
+Requirements: Codex 0.162 or newer and Node.js 20 or newer. Older Codex sends no session id with MCP calls, so ArmorCodex rejects every plan registration. The installer checks both versions and stops if either is too old.
+
+### Install or Update
+
+The same command installs ArmorCodex and updates an existing install. Run it again whenever Tools says a new version is out:
+
+```bash
+# Stable (platform.armoriq.ai)
+curl -fsSL https://armoriq.ai/install_armorcodex.sh | bash
+
+# Dev (staging)
+curl -fsSL https://armoriq.ai/install_armorcodex_dev.sh | bash
+```
+
+An update fetches the latest plugin into `~/.armoriq/armorCodex`, rewires `~/.codex/config.toml` and `~/.codex/hooks.json`, and refreshes the npm dependencies. Your ArmorIQ login is kept. Each command updates only an install of its own channel; run against the other channel's install, it stops without changing anything. If the installer finds no login, it leaves the install in place, prints the login command to run, and exits with status 1. Release notes are in [CHANGELOG.md](CHANGELOG.md) and on the repo's GitHub releases.
+
 ### From This Checkout
 
 ```bash
@@ -63,7 +79,7 @@ ArmorCodex ships a Codex plugin manifest at `.codex-plugin/plugin.json` and an M
 
 ## Configuration
 
-Sign in with `armoriq login --product armorcodex --backend https://api.armoriq.ai` (production) or `--backend https://staging-api.armoriq.ai` (staging, with `ARMORIQ_ENV=staging`). If you point ArmorCodex at another backend, pass that origin instead. ArmorCodex reads the API key from `~/.armoriq/credentials.json`.
+Sign in with `armoriq-dev login --product armorcodex`. ArmorCodex reads the saved login for its backend and product.
 
 Core environment variables:
 
@@ -72,10 +88,29 @@ Core environment variables:
 | `ARMORCODEX_MODE` | `enforce` | `enforce` blocks failures; `monitor` logs only |
 | `ARMORCODEX_INTENT_REQUIRED` | `true` | Require a registered intent plan before Bash |
 | `ARMORCODEX_DATA_DIR` | `~/.codex/armorcodex` | Runtime, policy, and pending-plan storage |
+| `ARMORCODEX_VALIDITY_SECONDS` | `3600` | Intent token lifetime. Values above 3600 are capped at 3600, the most ArmorIQ issues |
 | `ARMORCODEX_DEBUG` | `false` | Debug logs on stderr |
-| `ARMORIQ_API_KEY` | from `~/.armoriq/credentials.json` | ArmorIQ backend key |
 | `ARMORCODEX_AUDIT_ENABLED` | true when API key exists | Send audit logs |
 | `ARMORCODEX_CRYPTO_POLICY_ENABLED` | `false` | Enable Merkle policy binding |
+| `ARMORCODEX_OBSERVABILITY_DISABLED` | `false` | Stop sending execution traces; also stops the token usage sync. Same as the `disable_observability` plugin option |
+| `ARMORCODEX_USAGE_SYNC_DISABLED` | `false` | Stop the token usage sync and keep traces. Applies only while observability is on. Same as the `disable_usage_sync` plugin option |
+
+### Token usage sync
+
+While observability is on, ArmorCodex uploads token counts per session, model, UTC date and UTC
+hour, with the session's working directory and the device name. It sends no prompts or transcript
+text, and only usage dated after the current login unless the dashboard asks the device for its
+earlier history.
+
+- Each `Stop` uploads that session's usage (its rollout and its subagents' rollouts) on its own.
+- `plugins/armorcodex/scripts/usage-worker.mjs --serve` runs while at least one Codex session is
+  open: `SessionStart` registers the session and starts it, `SessionEnd` removes the session, and
+  it exits when none is left. Every 60 seconds it uploads sessions that changed without a `Stop`,
+  retries failed uploads, and handles the dashboard's earlier-history request.
+
+`SessionEnd` is a new hook. Codex runs a hook only after you trust it, so after updating run
+`/hooks` in Codex once and trust ArmorCodex's `SessionEnd` hook. The other ArmorCodex hooks are
+unchanged and keep their trust. Without it the worker still exits when Codex itself exits.
 
 ## Data & Privacy
 

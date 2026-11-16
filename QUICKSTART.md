@@ -33,13 +33,21 @@ Then ask Codex to run a shell command. ArmorCodex will inject an instruction to 
 ## 4. Optional ArmorIQ Backend
 
 ```bash
-# production
-armoriq login --product armorcodex --backend https://api.armoriq.ai
-# staging (set ARMORIQ_ENV=staging for the hooks)
-armoriq login --product armorcodex --backend https://staging-api.armoriq.ai
+armoriq-dev login --product armorcodex
 ```
 
-Without an API key, ArmorCodex still performs local policy and local plan enforcement. With an API key, it can request signed intent tokens and send audit logs.
+Without a saved login, ArmorCodex performs local policy and local plan enforcement. After login, it can request signed intent tokens and send audit logs.
+
+## Update
+
+Re-run the installer you installed with. It updates the existing install in place and keeps your login:
+
+```bash
+curl -fsSL https://armoriq.ai/install_armorcodex.sh | bash       # stable
+curl -fsSL https://armoriq.ai/install_armorcodex_dev.sh | bash   # dev
+```
+
+If it finds no ArmorIQ login, it keeps the install and prints the login command to run.
 
 ## Current Limitation
 

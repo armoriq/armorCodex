@@ -17,7 +17,6 @@ function buildConfig(tmpDir, overrides = {}) {
     dataDir: tmpDir,
     policyFile: path.join(tmpDir, "policy.json"),
     runtimeFile: path.join(tmpDir, "runtime.json"),
-    useProduction: false,
     backendEndpoint: "http://127.0.0.1:3000",
     iapEndpoint: "http://127.0.0.1:8000",
     proxyEndpoint: "http://127.0.0.1:3001",

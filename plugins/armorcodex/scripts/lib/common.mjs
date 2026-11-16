@@ -1,16 +1,11 @@
 import { createHash } from "node:crypto";
+import { CLIENT_HEADERS } from "./client-identity.mjs";
 
 export function isPlainObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-// Codex exposes its shell/command tool under several names depending on the
-// harness (exec_command, shell, local_shell, unified_exec, container.exec) but
-// reports it as "Bash" at the PreToolUse hook. Alias them all to "bash" so an
-// intent plan that declares any of them matches the actual tool call — and so
-// a policy rule written for "bash" covers the whole shell family. Without this,
-// a plan step named "exec_command" drifts against a "Bash" tool call, forcing
-// the agent into a register-and-retry loop.
+// Codex names its shell tool differently per harness but reports it as Bash at PreToolUse.
 const TOOL_ALIASES = {
   exec_command: "bash",
   shell: "bash",
@@ -19,9 +14,14 @@ const TOOL_ALIASES = {
   "container.exec": "bash",
 };
 
+export function codexHookName(name) {
+  const trimmed = name.trim();
+  return /^mcp__/i.test(trimmed) ? trimmed : trimmed.replace("__", "");
+}
+
 export function normalizeToolName(name) {
   if (typeof name !== "string") return "";
-  const normalized = name.trim().toLowerCase();
+  const normalized = codexHookName(name).toLowerCase();
   return TOOL_ALIASES[normalized] ?? normalized;
 }
 
@@ -87,14 +87,6 @@ export function isSubsetValue(candidate, target) {
   return candidate === target;
 }
 
-// ---------------------------------------------------------------------------
-// Operator-based matcher: supports $contains, $startsWith, $endsWith,
-// $matches (regex), $pathContains (path-canonicalized substring), $equals.
-//
-// Rule fragments may use either a plain literal (exact match, same as
-// isSubsetValue behaviour) or an operator object: { $contains: "..." }.
-// ---------------------------------------------------------------------------
-
 const OPERATOR_KEYS = new Set([
   "$equals",
   "$contains",
@@ -111,29 +103,17 @@ export function isMatcherSpec(value) {
   return keys.every((k) => OPERATOR_KEYS.has(k));
 }
 
-// Canonicalize a path/string for $pathContains matching. Operates on free
-// text: the rule needle and the tool input may be a path like /etc/passwd,
-// a path-with-prefix like "ls -la ~/.ssh", or a tool param like file_path.
-// Rule: keep enough structure so substring match Just Works.
 function canonicalizePath(input) {
   if (typeof input !== "string") return "";
   let p = input.trim();
-  // ~ becomes $HOME (only at a path boundary so we don't mangle shell tokens
-  // like "echo ~hi").
   p = p.replace(/(^|[\s"'`(=:])~(?=\/)/g, "$1$HOME");
-  // $HOME or ${HOME} becomes <HOME> sentinel.
   p = p.replace(/\$\{?HOME\}?/g, "<HOME>");
-  // Real home prefixes (Linux + macOS) become <HOME> sentinel so a rule
-  // mentioning ~/.ssh matches actual paths like /Users/foo/.ssh and
-  // /home/bar/.ssh.
   p = p.replace(/\/(?:home|Users)\/[^/\s'"`)]+/gi, "<HOME>");
-  // Collapse repeated slashes, lowercase for case-insensitive substring.
   p = p.replace(/\\/g, "/").replace(/\/+/g, "/");
   return p.toLowerCase();
 }
 
 export function matchesScalar(spec, actual) {
-  // Plain literal: exact match (preserves existing behaviour).
   if (!isMatcherSpec(spec)) {
     return spec === actual;
   }
@@ -185,12 +165,6 @@ export function matchesScalar(spec, actual) {
   return true;
 }
 
-/**
- * Recursive matcher for rule.params against actual tool input.
- * Returns { matched, missingKeys }. missingKeys lists rule keys that have no
- * counterpart in the tool input, so callers can surface "rule probably won't
- * fire" warnings.
- */
 export function matchParams(ruleParams, toolInput) {
   if (ruleParams === undefined || ruleParams === null) {
     return { matched: true, missingKeys: [] };
@@ -246,11 +220,6 @@ export function matchParams(ruleParams, toolInput) {
   return { matched: true, missingKeys: [] };
 }
 
-/**
- * Apply a single matcher spec across ANY string field in a tool input.
- * Used for rules like "deny anything mentioning ~/.ssh" where the user
- * doesn't know which parameter key the tool uses.
- */
 export function matchesAnyStringField(spec, toolInput, depth = 0) {
   if (depth > 4) return false;
   if (toolInput === null || toolInput === undefined) return false;
@@ -316,24 +285,12 @@ export function sanitizeParams(params, limits) {
   return isPlainObject(sanitized) ? sanitized : {};
 }
 
-// ---------------------------------------------------------------------------
-// Secret redaction — applied to audit payloads before they leave the host.
-// Kept deliberately cheap: a handful of regexes run against strings only,
-// no deep rebuild when nothing matches.
-// ---------------------------------------------------------------------------
-
 const SECRET_PATTERNS = [
-  // Bearer / Authorization tokens in free text
   /\b(Bearer\s+)[A-Za-z0-9._\-+/=]{12,}/gi,
-  // AWS access keys
   /\bAKIA[0-9A-Z]{16}\b/g,
-  // Generic long hex / base64 tokens prefixed by common secret field names
   /\b((?:api[_-]?key|secret|token|password|passwd|pwd|authorization)\s*[:=]\s*)["']?[A-Za-z0-9._\-+/=]{12,}["']?/gi,
-  // GitHub personal access tokens
   /\bghp_[A-Za-z0-9]{30,}\b/g,
-  // JWT-ish three-part tokens
   /\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\b/g,
-  // Private key blocks
   /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g
 ];
 
@@ -392,10 +349,6 @@ export function sha256Hex(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
-// ---------------------------------------------------------------------------
-// HTTP helpers (shared by intent.mjs and iap-service.mjs)
-// ---------------------------------------------------------------------------
-
 export async function postJson(url, payload, headers, timeoutMs) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -422,8 +375,7 @@ export async function postJson(url, payload, headers, timeoutMs) {
 }
 
 export function buildAuthHeaders(config) {
-  const headers = { "Content-Type": "application/json" };
-  if (config.clientVersion) headers["X-ArmorIQ-Client"] = config.clientVersion;
+  const headers = { "Content-Type": "application/json", ...CLIENT_HEADERS };
   if (config.apiKey) {
     headers.Authorization = `Bearer ${config.apiKey}`;
     headers["X-API-Key"] = config.apiKey;

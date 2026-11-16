@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { createRequire } from "node:module";
 import { loadConfig, requireEndpoint } from "../plugins/armorcodex/scripts/lib/config.mjs";
 import { getSdkClient } from "../plugins/armorcodex/scripts/lib/intent.mjs";
 import { createCryptoPolicyService } from "../plugins/armorcodex/scripts/lib/crypto-policy.mjs";
@@ -14,6 +15,9 @@ const ROWS = {
   local: ["http://127.0.0.1:3000", "http://127.0.0.1:3001", "http://127.0.0.1:8080"],
 };
 const CUSTOM = "http://127.0.0.1:3930";
+const { ARMORIQ_ENV: BUILD_ENV } = createRequire(
+  new URL("../plugins/armorcodex/package.json", import.meta.url),
+)("@armoriq/sdk-dev/dist/_build_env.js");
 
 const paired = (config) => [config.backendEndpoint, config.proxyEndpoint, config.iapEndpoint, config.csrgEndpoint];
 
@@ -59,7 +63,7 @@ test("requireEndpoint names the variable a custom backend is missing", () => {
   assert.throws(() => requireEndpoint(config, "proxyEndpoint"), /http:\/\/127\.0\.0\.1:3930.*PROXY_ENDPOINT/);
   assert.throws(() => requireEndpoint(config, "iapEndpoint"), /IAP_ENDPOINT/);
   assert.throws(() => requireEndpoint(config, "csrgEndpoint"), /CSRG_URL.*IAP_ENDPOINT/);
-  assert.equal(requireEndpoint(loadConfig({}), "proxyEndpoint"), ROWS.production[1]);
+  assert.equal(requireEndpoint(loadConfig({}), "proxyEndpoint"), ROWS[BUILD_ENV][1]);
 });
 
 test("the SDK client is never built with an endpoint config did not resolve", () => {

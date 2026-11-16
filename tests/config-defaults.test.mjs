@@ -1,6 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createRequire } from "node:module";
 import { loadConfig } from "../plugins/armorcodex/scripts/lib/config.mjs";
+
+const { ARMORIQ_ENV: BUILD_ENV } = createRequire(
+  new URL("../plugins/armorcodex/package.json", import.meta.url),
+)("@armoriq/sdk-dev/dist/_build_env.js");
 
 const PRODUCTION = {
   backendEndpoint: "https://api.armoriq.ai",
@@ -23,6 +28,8 @@ const LOCAL = {
   csrgEndpoint: "http://127.0.0.1:8080",
 };
 
+const BY_ENV = { production: PRODUCTION, staging: STAGING, local: LOCAL };
+
 function endpoints(config) {
   return {
     backendEndpoint: config.backendEndpoint,
@@ -36,10 +43,9 @@ test("production defaults match the SDK production endpoint table", () => {
   assert.deepEqual(endpoints(loadConfig({ ARMORIQ_ENV: "production" })), PRODUCTION);
 });
 
-test("no ARMORIQ_ENV means production", () => {
+test("no ARMORIQ_ENV means the environment the SDK was built for", () => {
   const config = loadConfig({});
-  assert.equal(config.useProduction, true);
-  assert.deepEqual(endpoints(config), PRODUCTION);
+  assert.deepEqual(endpoints(config), BY_ENV[BUILD_ENV]);
 });
 
 test("the use_production option selects the same production defaults", () => {
@@ -50,19 +56,17 @@ test("the use_production option selects the same production defaults", () => {
 test("ARMORIQ_ENV=staging selects the SDK staging endpoints (#102)", () => {
   for (const value of ["staging", " Staging ", "STAGING"]) {
     const config = loadConfig({ ARMORIQ_ENV: value });
-    assert.equal(config.useProduction, false, value);
     assert.deepEqual(endpoints(config), STAGING, value);
   }
 });
 
 test("ARMORIQ_ENV=local selects the SDK local endpoints, IAP on 8080 (#102)", () => {
   const config = loadConfig({ ARMORIQ_ENV: "local" });
-  assert.equal(config.useProduction, false);
   assert.deepEqual(endpoints(config), LOCAL);
 });
 
 test("ARMORIQ_ENV takes armorClaude's names and refuses anything else", () => {
-  assert.deepEqual(endpoints(loadConfig({ ARMORIQ_ENV: " " })), PRODUCTION);
+  assert.deepEqual(endpoints(loadConfig({ ARMORIQ_ENV: " " })), BY_ENV[BUILD_ENV]);
   assert.deepEqual(endpoints(loadConfig({ ARMORIQ_ENV: "prod" })), PRODUCTION);
   assert.deepEqual(endpoints(loadConfig({ ARMORIQ_ENV: "Stage" })), endpoints(loadConfig({ ARMORIQ_ENV: "staging" })));
   for (const value of ["dev", "development", "test"]) {
@@ -73,12 +77,15 @@ test("ARMORIQ_ENV takes armorClaude's names and refuses anything else", () => {
   }
 });
 
-test("use_production=true wins over staging, and use_production=false without an env means local", () => {
+test("use_production=true wins over staging, and use_production=false only turns production into local", () => {
   assert.deepEqual(
     endpoints(loadConfig({ ARMORIQ_ENV: "staging", CODEX_PLUGIN_OPTION_USE_PRODUCTION: "true" })),
     PRODUCTION
   );
-  assert.deepEqual(endpoints(loadConfig({ ARMORCODEX_USE_PRODUCTION: "false" })), LOCAL);
+  assert.deepEqual(
+    endpoints(loadConfig({ ARMORCODEX_USE_PRODUCTION: "false" })),
+    BUILD_ENV === "production" ? LOCAL : BY_ENV[BUILD_ENV]
+  );
   assert.deepEqual(
     endpoints(loadConfig({ ARMORIQ_ENV: "staging", ARMORCODEX_USE_PRODUCTION: "false" })),
     STAGING
@@ -98,4 +105,10 @@ test("per-endpoint overrides still win over the staging table", () => {
     proxyEndpoint: "http://127.0.0.1:3932",
     csrgEndpoint: "http://127.0.0.1:3931",
   });
+});
+
+test("token validity is capped at the 3600 s CSRG accepts", () => {
+  assert.equal(loadConfig({ ARMORCODEX_VALIDITY_SECONDS: "7200" }).validitySeconds, 3600);
+  assert.equal(loadConfig({ ARMORCODEX_VALIDITY_SECONDS: "600" }).validitySeconds, 600);
+  assert.equal(loadConfig({}).validitySeconds, 3600);
 });

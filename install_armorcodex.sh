@@ -16,15 +16,13 @@ set -euo pipefail
 #   3. ~/.codex/hooks.json with absolute paths  (so hooks fire from any folder)
 #   4. plugin npm dependencies                  (so the first hook fire is fast)
 #
-# Idempotent: re-running won't double-write any block. Will not overwrite a
-# user's existing global hooks file unless --force-hooks is passed; updates do
-# repair missing ArmorCodex lifecycle hooks without replacing other entries.
+# Idempotent: re-running won't double-write any block. ArmorCodex hooks are
+# merged into an existing global hooks file, keeping other tools' hooks.
 # If the plugin and credentials are already in place, the script runs in update
 # mode (refresh checkout + SDK + npm deps, skip the login prompt).
 #
 # Flags:
 #   --uninstall       remove ArmorCodex blocks
-#   --force-hooks     overwrite existing ~/.codex/hooks.json
 #   --force-install   force the full install flow even if already installed
 #   --update          force update mode even without credentials
 #
@@ -48,7 +46,7 @@ MARKETPLACE_REPO="${ARMORCODEX_MARKETPLACE_REPO:-armoriq/armorCodex}"
 PLUGIN_GIT_URL="${ARMORCODEX_GIT_URL:-https://github.com/armoriq/armorCodex.git}"
 PLUGIN_GIT_REF="${ARMORCODEX_GIT_REF:-main}"
 INSTALL_HOME="${ARMORCODEX_INSTALL_HOME:-${HOME}/.armoriq/armorCodex}"
-DASHBOARD_URL="${ARMORCODEX_DASHBOARD_URL:-https://tools.armoriq.ai}"
+DASHBOARD_URL="${ARMORCODEX_DASHBOARD_URL:-https://platform.armoriq.ai}"
 
 # Recover if the caller is running this from a deleted directory (common when
 # piping curl into bash from /tmp).
@@ -66,12 +64,15 @@ fi
 # Plugin sources live under plugins/<name>/ per the Codex marketplace spec.
 # Older checkouts kept everything at repo root, so accept both layouts.
 PLUGIN_SUBDIR="plugins/armorcodex"
+LOCAL_CHECKOUT=0
 if [[ -n "${SCRIPT_DIR}" && -f "${SCRIPT_DIR}/${PLUGIN_SUBDIR}/scripts/bootstrap.mjs" ]]; then
   PLUGIN_ROOT="${SCRIPT_DIR}"
+  LOCAL_CHECKOUT=1
 elif [[ -n "${SCRIPT_DIR}" && -f "${SCRIPT_DIR}/scripts/bootstrap.mjs" ]]; then
   # Legacy flat-layout fallback so existing checkouts keep working.
   PLUGIN_ROOT="${SCRIPT_DIR}"
   PLUGIN_SUBDIR="."
+  LOCAL_CHECKOUT=1
 else
   PLUGIN_ROOT="${INSTALL_HOME}"
 fi
@@ -84,15 +85,14 @@ BOOTSTRAP_PATH="${PLUGIN_PATH}/scripts/bootstrap.mjs"
 MARK_BEGIN="# >>> ArmorCodex managed block (do not edit manually) >>>"
 MARK_END="# <<< ArmorCodex managed block <<<"
 
-FORCE_HOOKS=0
 DO_UNINSTALL=0
+HAD_INSTALL=0
 FORCE_MODE=""
 if [[ "${ARMORIQ_FORCE_INSTALL:-0}" == "1" ]]; then
   FORCE_MODE="install"
 fi
 for arg in "$@"; do
   case "$arg" in
-    --force-hooks) FORCE_HOOKS=1 ;;
     --uninstall) DO_UNINSTALL=1 ;;
     --force-install) FORCE_MODE="install" ;;
     --update) FORCE_MODE="update" ;;
@@ -133,17 +133,109 @@ EOF
 # Prereq checks
 # ---------------------------------------------------------------------------
 
-require_cmd() {
-  if ! command -v "$1" >/dev/null 2>&1; then
-    err "missing required command: $1"
-    case "$1" in
-      codex) echo "  install Codex from https://developers.openai.com/codex" 1>&2 ;;
-      node)  echo "  install Node.js >= 20 from https://nodejs.org" 1>&2 ;;
-      git)   echo "  install git from https://git-scm.com/downloads" 1>&2 ;;
-      npm)   echo "  npm comes bundled with Node.js" 1>&2 ;;
-    esac
+# --- Prerequisites -----------------------------------------------------------
+# A missing tool is offered for install through the machine's package manager
+# when someone is at the terminal to say yes. Otherwise the installer says how
+# to get it. Nothing is installed without a yes.
+
+# `curl ... | sudo bash` writes the plugin and the login under root's home
+# instead of the user's, so the user never sees them.
+refuse_sudo() {
+  if [[ "${EUID}" -eq 0 && -n "${SUDO_USER:-}" ]]; then
+    err "don't run this installer with sudo"
+    echo "  run it as yourself: curl -fsSL https://armoriq.ai/install_armorcodex_dev.sh | bash" 1>&2
     exit 1
   fi
+}
+
+pkg_manager() {
+  if command -v brew >/dev/null 2>&1; then echo brew
+  elif command -v apt-get >/dev/null 2>&1; then echo apt-get
+  elif command -v dnf >/dev/null 2>&1; then echo dnf
+  fi
+}
+
+# The packages that provide a tool under a package manager.
+pkg_for() {
+  case "$1:$2" in
+    node:brew|npm:brew) echo "node" ;;
+    node:*|npm:*)       echo "nodejs npm" ;;
+    python3:brew)       echo "python" ;;
+    *)                  echo "$1" ;;
+  esac
+}
+
+# offer_install TOOL HINT: succeeds once TOOL is on PATH.
+offer_install() {
+  local tool="$1" hint="$2" pm pkgs
+  command -v "${tool}" >/dev/null 2>&1 && return 0
+  pm="$(pkg_manager)"
+  if [[ -n "${pm}" ]] && is_promptable && prompt_yes_no "${tool} is not installed. Install it with ${pm} now?" Y; then
+    pkgs="$(pkg_for "${tool}" "${pm}")"
+    case "${pm}" in
+      brew)    brew install ${pkgs} ;;
+      apt-get) sudo apt-get update -qq && sudo apt-get install -y ${pkgs} ;;
+      dnf)     sudo dnf install -y ${pkgs} ;;
+    esac || true
+    hash -r
+    if command -v "${tool}" >/dev/null 2>&1; then
+      ok "${tool} installed"
+      return 0
+    fi
+  fi
+  err "${tool} is not installed"
+  echo "  ${hint}" 1>&2
+  return 1
+}
+
+# Plugins are cloned from GitHub over HTTPS. A git config that rewrites GitHub
+# HTTPS addresses to SSH (url.<ssh>.insteadOf) turns that into an SSH clone,
+# which fails with "Permission denied (publickey)" when no GitHub SSH key is
+# set up. Check the clone path first; if only the user's git config is in the
+# way, skip that config for this install's git calls and leave it unchanged.
+check_github_access() {
+  local url="$1" rules
+  if GIT_TERMINAL_PROMPT=0 git ls-remote -q "${url}" HEAD >/dev/null 2>&1; then
+    return 0
+  fi
+  if GIT_TERMINAL_PROMPT=0 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+    git ls-remote -q "${url}" HEAD >/dev/null 2>&1; then
+    warn "your git config stops git from downloading ${url} over HTTPS"
+    rules="$(git config --get-regexp '^url\..*\.insteadof$' 2>/dev/null | grep -i 'github' || true)"
+    if [[ -n "${rules}" ]]; then
+      info "it rewrites GitHub addresses to SSH: ${D}${rules//$'\n'/; }${N}"
+    fi
+    info "this install skips your git config for its own downloads; the config itself is unchanged"
+    export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+    return 0
+  fi
+  err "can't download ${url}"
+  echo "  check your network or proxy can reach github.com over HTTPS, then run this installer again" 1>&2
+  return 1
+}
+
+require_cmd() {
+  case "$1" in
+    codex)    require_codex ;;
+    node|npm) offer_install "$1" "install Node.js >= 20 from https://nodejs.org (npm comes with it)" || exit 1 ;;
+    git)      offer_install git "install git from https://git-scm.com/downloads" || exit 1 ;;
+    *)        offer_install "$1" "install $1, then run this installer again" || exit 1 ;;
+  esac
+}
+
+require_codex() {
+  command -v codex >/dev/null 2>&1 && return 0
+  if is_promptable && prompt_yes_no "Codex is not installed. Install it with npm install -g @openai/codex?" Y; then
+    npm install -g @openai/codex --no-audit --no-fund || true
+    hash -r
+    if command -v codex >/dev/null 2>&1; then
+      ok "Codex installed"
+      return 0
+    fi
+  fi
+  err "Codex is not installed"
+  echo "  install Codex from https://developers.openai.com/codex, then run this installer again" 1>&2
+  exit 1
 }
 
 check_node_version() {
@@ -152,6 +244,23 @@ check_node_version() {
   major="$(printf '%s' "${raw#v}" | cut -d. -f1)"
   if [[ -z "${major}" || "${major}" -lt 20 ]]; then
     err "Node.js >= 20 required (found ${raw:-none})"
+    exit 1
+  fi
+}
+
+check_codex_version() {
+  local raw major minor
+  raw="$(codex --version 2>/dev/null | head -1 || true)"
+  if [[ ! "${raw}" =~ ([0-9]+)\.([0-9]+)\.[0-9]+ ]]; then
+    err "could not read the Codex version (got: ${raw:-no output}); Codex 0.162 or newer is required"
+    exit 1
+  fi
+  major="${BASH_REMATCH[1]}"
+  minor="${BASH_REMATCH[2]}"
+  if (( major == 0 && minor < 162 )); then
+    err "Codex 0.162 or newer is required (found ${raw})"
+    echo "  ArmorCodex needs the session id that Codex 0.162 and later send with MCP calls." 1>&2
+    echo "  Update Codex (https://developers.openai.com/codex) and run this installer again." 1>&2
     exit 1
   fi
 }
@@ -208,12 +317,24 @@ upsert_managed_block() {
 # Plugin source + config wiring
 # ---------------------------------------------------------------------------
 
+refuse_other_channel() {
+  local branch command="install_armorcodex.sh"
+  branch="$(git -C "${INSTALL_HOME}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+  [[ "${branch}" == "${PLUGIN_GIT_REF}" ]] && return 0
+  [[ "${branch}" == "dev" ]] && command="install_armorcodex_dev.sh"
+  err "${INSTALL_HOME} is on ${branch}, not ${PLUGIN_GIT_REF}. Nothing was changed."
+  printf "  Update it with ${B}curl -fsSL https://armoriq.ai/%s | bash${N}\n" "${command}"
+  printf "  To switch channels, uninstall first (${B}--uninstall${N}), then delete %s.\n" "${INSTALL_HOME}"
+  exit 1
+}
+
 fetch_plugin_source() {
   # Local-first: when this script is run from inside a checkout (bootstrap.mjs
   # already present next to it), install THAT local code and never clone. This
   # is how local testing wires Codex at your working branch. curl-pipe installs
-  # (no local checkout) still clone from GitHub below.
-  if [[ -f "${BOOTSTRAP_PATH}" ]]; then
+  # have no script file, so an existing INSTALL_HOME is refreshed below rather
+  # than mistaken for a local checkout.
+  if [[ "${LOCAL_CHECKOUT}" -eq 1 ]]; then
     local branch
     branch="$(git -C "${PLUGIN_ROOT}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo 'no-git')"
     info "installing LOCAL checkout at ${PLUGIN_ROOT} (${branch})"
@@ -223,9 +344,10 @@ fetch_plugin_source() {
   mkdir -p "$(dirname "${INSTALL_HOME}")"
 
   if [[ -d "${INSTALL_HOME}/.git" ]]; then
+    refuse_other_channel
     info "refreshing ${INSTALL_HOME} (git pull)"
     git -C "${INSTALL_HOME}" fetch --quiet origin "${PLUGIN_GIT_REF}" >/dev/null
-    git -C "${INSTALL_HOME}" reset --hard --quiet "origin/${PLUGIN_GIT_REF}" >/dev/null
+    git -C "${INSTALL_HOME}" reset --hard --quiet FETCH_HEAD >/dev/null
     ok "updated to ${PLUGIN_GIT_REF}"
   else
     info "cloning ${PLUGIN_GIT_URL} into ${INSTALL_HOME}"
@@ -249,10 +371,7 @@ fetch_plugin_source() {
 ensure_config_toml() {
   # ARMORCODEX_USE_SDK_INTENT=true tells the MCP register_intent_plan tool to
   # call the ArmorIQ SDK so plans are registered with the backend (signed JWT
-  # + dashboard visibility). The SDK round-trip is bounded by
-  # ARMORCODEX_INTENT_DEADLINE_MS (default 500ms) so Codex's ~1s MCP transport
-  # timeout is never violated; if the deadline is missed the call continues in
-  # the background and the local plan is used as the fallback.
+  # + dashboard visibility).
   # Managed block holds only the ArmorCodex MCP server table (unique to us,
   # safe to replace idempotently on re-run).
   local snippet
@@ -260,7 +379,7 @@ ensure_config_toml() {
 [mcp_servers.armorcodex-policy]
 command = "node"
 args = ["${BOOTSTRAP_PATH}", "mcp"]
-env = { ARMORCODEX_USE_SDK_INTENT = "true", ARMORCODEX_INTENT_DEADLINE_MS = "500" }
+env = { ARMORCODEX_USE_SDK_INTENT = "true" }
 EOF
   )"
   upsert_managed_block "${CONFIG_TOML}" "${snippet}"
@@ -282,151 +401,145 @@ EOF
   ok "wired config.toml: hooks + mcp_servers.armorcodex-policy"
 }
 
-ensure_global_hooks() {
-  if [[ -f "${GLOBAL_HOOKS}" && "${FORCE_HOOKS}" -eq 0 ]]; then
-    if grep -q "ArmorCodex" "${GLOBAL_HOOKS}" 2>/dev/null; then
-      local repair_result
-      if ! repair_result="$(node --input-type=module - "${GLOBAL_HOOKS}" "${BOOTSTRAP_PATH}" <<'NODE'
-import {
-  chmodSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+codex_hooks_json() {
+  node --input-type=module - "$1" "${GLOBAL_HOOKS}" "${BOOTSTRAP_PATH}" <<'NODE'
+import { chmodSync, existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 
-const [hooksPath, bootstrapPath] = process.argv.slice(2);
+const [mode, hooksPath, bootstrapPath] = process.argv.slice(2);
 const tempPath = `${hooksPath}.armorcodex.tmp-${process.pid}`;
+const command = `node ${bootstrapPath} router`;
+const hook = (extra) => ({ type: "command", command, ...extra });
+const GROUPS = {
+  SessionStart: { matcher: "startup|resume", hooks: [hook({ statusMessage: "Starting ArmorCodex" })] },
+  UserPromptSubmit: { hooks: [hook({ statusMessage: "Loading ArmorCodex intent policy" })] },
+  PreToolUse: { matcher: "*", hooks: [hook({ statusMessage: "Checking ArmorCodex policy" })] },
+  PermissionRequest: { matcher: "*", hooks: [hook({ statusMessage: "Checking ArmorCodex approval policy" })] },
+  PostToolUse: { matcher: "*", hooks: [hook({ statusMessage: "Auditing ArmorCodex command" })] },
+  Stop: { hooks: [hook({ timeout: 30 })] },
+  SessionEnd: { hooks: [hook({ timeout: 30 })] },
+};
 
-try {
-  const config = JSON.parse(readFileSync(hooksPath, "utf8"));
+const ours = (entry) => entry?.type === "command"
+  && typeof entry.command === "string"
+  && entry.command.endsWith("bootstrap.mjs router")
+  && /armorcodex/i.test(`${entry.command} ${entry.statusMessage ?? ""}`);
+const hasOurs = (group) => Array.isArray(group?.hooks) && group.hooks.some(ours);
+
+// Written back in the file's own indentation and trailing newline, so an
+// install followed by an uninstall leaves another tool's file byte-identical.
+let layout = { indent: 2, newline: "\n" };
+
+function readConfig() {
+  const text = readFileSync(hooksPath, "utf8");
+  const config = JSON.parse(text);
+  layout = {
+    indent: text.match(/^([ \t]+)\S/m)?.[1] ?? (text.trim().includes("\n") ? 2 : 0),
+    newline: text.endsWith("\n") ? "\n" : "",
+  };
   if (!config.hooks || typeof config.hooks !== "object" || Array.isArray(config.hooks)) {
     throw new Error("top-level hooks must be an object");
   }
-
-  const stopCommand = `node ${bootstrapPath} router`;
-  if (config.hooks.Stop !== undefined && !Array.isArray(config.hooks.Stop)) {
-    throw new Error("hooks.Stop must be an array");
+  for (const [event, groups] of Object.entries(config.hooks)) {
+    if (!Array.isArray(groups)) throw new Error(`hooks.${event} must be an array`);
   }
+  return config;
+}
 
-  const stopEntries = config.hooks.Stop ?? [];
-  const hasCurrentStopHook = stopEntries.some((entry) =>
-    Array.isArray(entry?.hooks)
-      && entry.hooks.some((hook) => hook?.type === "command" && hook.command === stopCommand),
-  );
-  if (hasCurrentStopHook) {
-    process.stdout.write("present");
-  } else {
-    stopEntries.push({
-      hooks: [
-        { type: "command", command: stopCommand, timeout: 30 },
-      ],
-    });
-    config.hooks.Stop = stopEntries;
+function addMissing(hooks) {
+  const added = Object.keys(GROUPS).filter((event) => !(hooks[event] ?? []).some(hasOurs));
+  for (const event of added) hooks[event] = [...(hooks[event] ?? []), GROUPS[event]];
+  return added;
+}
 
-    writeFileSync(tempPath, `${JSON.stringify(config, null, 2)}\n`, { flag: "wx" });
-    chmodSync(tempPath, statSync(hooksPath).mode);
-    renameSync(tempPath, hooksPath);
-    process.stdout.write("repaired");
+function stripGroup(group) {
+  return hasOurs(group) ? { ...group, hooks: group.hooks.filter((entry) => !ours(entry)) } : group;
+}
+
+function removeOurs(hooks) {
+  let removed = 0;
+  for (const [event, groups] of Object.entries(hooks)) {
+    const kept = groups.map(stripGroup).filter((group) => !Array.isArray(group?.hooks) || group.hooks.length > 0);
+    removed += groups.filter(hasOurs).length;
+    if (kept.length > 0) hooks[event] = kept;
+    else delete hooks[event];
   }
+  return removed;
+}
+
+function save(config, existed) {
+  writeFileSync(tempPath, `${JSON.stringify(config, null, layout.indent)}${layout.newline}`, { flag: "wx" });
+  if (existed) chmodSync(tempPath, statSync(hooksPath).mode & 0o7777);
+  renameSync(tempPath, hooksPath);
+}
+
+function add() {
+  const existed = existsSync(hooksPath);
+  const config = existed ? readConfig() : { hooks: {} };
+  const added = addMissing(config.hooks);
+  if (added.length === 0) return "present";
+  save(config, existed);
+  return existed ? `repaired:${added.join(", ")}` : "created";
+}
+
+function remove() {
+  if (!existsSync(hooksPath)) return "absent";
+  const config = readConfig();
+  if (removeOurs(config.hooks) === 0) return "absent";
+  if (Object.keys(config.hooks).length === 0 && Object.keys(config).length === 1) {
+    rmSync(hooksPath, { force: true });
+    return "removed";
+  }
+  save(config, true);
+  return "stripped";
+}
+
+try {
+  process.stdout.write(mode === "remove" ? remove() : add());
 } catch (error) {
   rmSync(tempPath, { force: true });
   console.error(error instanceof Error ? error.message : String(error));
   process.exit(1);
 }
 NODE
-      )"; then
-        warn "couldn't safely repair existing ArmorCodex hooks"
-        info "leaving ${GLOBAL_HOOKS} unchanged"
-        return 0
-      fi
-      if [[ "${repair_result}" == "repaired" ]]; then
-        ok "added missing ArmorCodex Stop hook to ${GLOBAL_HOOKS}"
-      else
-        ok "global hooks already reference ArmorCodex"
-      fi
-      return 0
-    fi
-    warn "global ${GLOBAL_HOOKS} exists and is unrelated"
-    info "skipping (re-run with --force-hooks to overwrite)"
-    info "or merge ${PLUGIN_ROOT}/.codex/hooks.json into it manually"
+}
+
+ensure_global_hooks() {
+  local result
+  if ! result="$(codex_hooks_json add)"; then
+    warn "couldn't safely merge ArmorCodex hooks into ${GLOBAL_HOOKS}"
+    info "leaving ${GLOBAL_HOOKS} unchanged"
     return 0
   fi
-
-  cat > "${GLOBAL_HOOKS}" <<EOF
-{
-  "hooks": {
-    "SessionStart": [
-      {
-        "matcher": "startup|resume",
-        "hooks": [
-          { "type": "command", "command": "node ${BOOTSTRAP_PATH} router", "statusMessage": "Starting ArmorCodex" }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          { "type": "command", "command": "node ${BOOTSTRAP_PATH} router", "statusMessage": "Loading ArmorCodex intent policy" }
-        ]
-      }
-    ],
-    "PreToolUse": [
-      {
-        "matcher": "*",
-        "hooks": [
-          { "type": "command", "command": "node ${BOOTSTRAP_PATH} router", "statusMessage": "Checking ArmorCodex policy" }
-        ]
-      }
-    ],
-    "PermissionRequest": [
-      {
-        "matcher": "*",
-        "hooks": [
-          { "type": "command", "command": "node ${BOOTSTRAP_PATH} router", "statusMessage": "Checking ArmorCodex approval policy" }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "*",
-        "hooks": [
-          { "type": "command", "command": "node ${BOOTSTRAP_PATH} router", "statusMessage": "Auditing ArmorCodex command" }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          { "type": "command", "command": "node ${BOOTSTRAP_PATH} router", "timeout": 30 }
-        ]
-      }
-    ]
-  }
+  case "${result}" in
+    created) ok "installed global ArmorCodex hooks at ${GLOBAL_HOOKS}" ;;
+    repaired:*) ok "added missing ArmorCodex ${result#repaired:} hook(s) to ${GLOBAL_HOOKS}" ;;
+    *) ok "global hooks already reference ArmorCodex" ;;
+  esac
 }
-EOF
-  ok "installed global ArmorCodex hooks at ${GLOBAL_HOOKS}"
+
+remove_codex_hooks() {
+  local result
+  result="$(codex_hooks_json remove)" || { warn "couldn't safely remove ArmorCodex hooks from ${GLOBAL_HOOKS}"; return 0; }
+  case "${result}" in
+    removed) info "removed ${GLOBAL_HOOKS}" ;;
+    stripped) info "removed the ArmorCodex hooks from ${GLOBAL_HOOKS}" ;;
+  esac
 }
 
 install_npm_deps() {
   pushd "${PLUGIN_PATH}" >/dev/null
-  if [[ -d node_modules/@armoriq/sdk && -d node_modules/zod && -d node_modules/@modelcontextprotocol/sdk ]]; then
-    info "npm dependencies already present"
-  else
-    info "installing npm dependencies (--omit=dev)"
-    npm install --omit=dev --silent --no-audit --no-fund >/dev/null
-    ok "npm dependencies installed"
-  fi
+  info "installing npm dependencies (--omit=dev)"
+  npm install --omit=dev --silent --no-audit --no-fund >/dev/null
+  ok "npm dependencies installed"
   popd >/dev/null
 }
 
 install_armoriq_cli() {
-  info "installing ArmorIQ CLI ${B}(@armoriq/sdk)${N}"
-  if npm install -g @armoriq/sdk@latest --silent --no-audit --no-fund >/dev/null 2>&1; then
-    ok "armoriq CLI ready"
+  info "installing ArmorIQ CLI ${B}(@armoriq/sdk-dev)${N}"
+  if npm install -g @armoriq/sdk-dev@latest --silent --no-audit --no-fund >/dev/null 2>&1; then
+    ok "armoriq-dev CLI ready"
   else
-    warn "couldn't install globally, use ${B}npx @armoriq/sdk${N} instead"
+    warn "couldn't install globally, use ${B}npx @armoriq/sdk-dev${N} instead"
   fi
 }
 
@@ -495,12 +608,8 @@ finish_update_banner() {
   else
     info "Plugin: ${INSTALL_HOME} (refreshed)"
   fi
-  info "SDK:    @armoriq/sdk (latest)"
+  info "SDK:    @armoriq/sdk-dev (latest)"
   info "Hooks:  ${GLOBAL_HOOKS} (verified)"
-  if [[ ! -f "${HOME}/.armoriq/credentials.json" ]]; then
-    echo
-    printf "  Run ${G}${B}armoriq login --product armorcodex${N} to authenticate.\n"
-  fi
   echo
 }
 
@@ -542,15 +651,35 @@ abort_install() {
   if [[ -f "${CONFIG_TOML}" ]]; then
     strip_managed_block "${CONFIG_TOML}" 2>/dev/null && info "removed managed block from ${CONFIG_TOML}" || true
   fi
-  if [[ -f "${GLOBAL_HOOKS}" ]] && grep -q "ArmorCodex" "${GLOBAL_HOOKS}" 2>/dev/null; then
-    rm -f "${GLOBAL_HOOKS}" && info "removed ${GLOBAL_HOOKS}" || true
-  fi
-  if [[ -d "${INSTALL_HOME}" ]]; then
+  remove_codex_hooks
+  if [[ "${LOCAL_CHECKOUT}" -eq 0 && -d "${INSTALL_HOME}" ]]; then
     rm -rf "${INSTALL_HOME}" && info "removed plugin source ${INSTALL_HOME}" || true
   fi
   echo
   printf "  Get an account at ${C}${B}https://armoriq.ai${N} and re-run when ready.\n\n"
   exit 1
+}
+
+stop_without_login() {
+  [[ "${HAD_INSTALL}" -eq 1 ]] || abort_install
+  echo
+  warn "Kept the existing ArmorCodex install, but it has no ArmorIQ login."
+  printf "  Run ${B}armoriq-dev login --product armorcodex --backend %s${N}, then start a new Codex session.\n\n" "$(plugin_backend)"
+  exit 1
+}
+
+# The SDK CLI defaults to the backend it was built for, so the login is pointed
+# at the backend the plugin will look its key up under.
+plugin_backend() {
+  node --input-type=module -e \
+    'const { loadSettings } = await import(process.argv[1]); process.stdout.write(loadSettings().backendEndpoint);' \
+    "${PLUGIN_PATH}/scripts/lib/config.mjs" 2>/dev/null || printf 'https://staging-api.armoriq.ai'
+}
+
+plugin_has_login() {
+  node --input-type=module -e \
+    'const { loadConfig } = await import(process.argv[1]); process.exit(loadConfig().apiKey ? 0 : 1);' \
+    "${PLUGIN_PATH}/scripts/lib/config.mjs" >/dev/null 2>&1
 }
 
 connect_to_armoriq() {
@@ -562,59 +691,40 @@ connect_to_armoriq() {
 
 EOF
 
-  if [[ -n "${ARMORIQ_API_KEY:-}" ]] || [[ -f "$HOME/.armoriq/credentials.json" ]]; then
-    ok "ArmorIQ credentials already present"
+  if plugin_has_login; then
+    ok "ArmorIQ login for ArmorCodex found"
     return 0
   fi
 
   if ! is_promptable; then
     err "No TTY available for interactive login."
-    printf "  Set ${B}ARMORIQ_API_KEY${N} or run interactively.\n"
-    abort_install
+    printf "  Run ${B}armoriq-dev login --product armorcodex --backend %s${N} interactively.\n" "$(plugin_backend)"
+    stop_without_login
   fi
 
   if ! prompt_yes_no "Connect your ArmorIQ account now?" "Y"; then
-    abort_install
+    stop_without_login
   fi
 
   echo
-  # Pass --product so the browser approval page renders ArmorCodex branding.
-  # Older CLIs without --product fall back to ARMORIQ_PRODUCT env var, which
-  # newer CLIs also honor; older ones simply ignore it.
-  local product="armorcodex"
-  local login_ok=0
-  if command -v armoriq >/dev/null 2>&1; then
-    if armoriq login --help 2>&1 | grep -q -- '--product'; then
-      armoriq login --product "${product}" && login_ok=1
-    else
-      ARMORIQ_PRODUCT="${product}" armoriq login && login_ok=1
-    fi
+  local login_ok=0 backend
+  backend="$(plugin_backend)"
+  if command -v armoriq-dev >/dev/null 2>&1; then
+    armoriq-dev login --product armorcodex --backend "${backend}" && login_ok=1
   elif command -v npx >/dev/null 2>&1; then
-    if npx @armoriq/sdk login --help 2>&1 | grep -q -- '--product'; then
-      npx @armoriq/sdk login --product "${product}" && login_ok=1
-    else
-      ARMORIQ_PRODUCT="${product}" npx @armoriq/sdk login && login_ok=1
-    fi
+    npx @armoriq/sdk-dev login --product armorcodex --backend "${backend}" && login_ok=1
   else
-    err "armoriq CLI not found."
-    abort_install
+    err "armoriq-dev CLI not found."
+    stop_without_login
   fi
 
-  if [[ "${login_ok}" -ne 1 ]] || [[ ! -f "$HOME/.armoriq/credentials.json" ]]; then
-    err "ArmorIQ login did not complete."
-    abort_install
+  if [[ "${login_ok}" -ne 1 ]] || ! plugin_has_login; then
+    err "ArmorIQ login did not complete for ArmorCodex's backend."
+    stop_without_login
   fi
 
   echo
   ok "ArmorIQ connected. Codex will auto-load the key."
-}
-
-plugin_backend() {
-  node --input-type=module - "${PLUGIN_PATH}/scripts/lib/config.mjs" <<'NODE'
-import { pathToFileURL } from "node:url";
-const { loadConfig } = await import(pathToFileURL(process.argv[2]).href);
-process.stdout.write(loadConfig().backendEndpoint);
-NODE
 }
 
 finale() {
@@ -669,7 +779,6 @@ EOF
   cat <<EOF
 
   ${D}bash $(realpath "${SCRIPT_PATH}" 2>/dev/null || echo install_armorcodex.sh) --uninstall${N}
-  ${D}bash $(realpath "${SCRIPT_PATH}" 2>/dev/null || echo install_armorcodex.sh) --force-hooks${N}
 
   Hooks: ${C}${GLOBAL_HOOKS}${N}
   Config: ${C}${CONFIG_TOML}${N}
@@ -688,10 +797,7 @@ uninstall() {
     strip_managed_block "${CONFIG_TOML}"
     ok "removed managed block from ${CONFIG_TOML}"
   fi
-  if [[ -f "${GLOBAL_HOOKS}" ]] && grep -q "ArmorCodex" "${GLOBAL_HOOKS}" 2>/dev/null; then
-    rm -f "${GLOBAL_HOOKS}"
-    ok "removed ${GLOBAL_HOOKS}"
-  fi
+  remove_codex_hooks
   ok "uninstalled. ArmorCodex marketplace registration (if any) left in place."
   info "to remove that too: codex plugin marketplace remove armorcodex"
 }
@@ -706,15 +812,20 @@ main() {
     exit 0
   fi
 
+  refuse_sudo
   banner
 
   section "Checking prerequisites"
-  require_cmd codex
   require_cmd node
   require_cmd npm
   require_cmd git
   check_node_version
+  require_cmd codex
+  check_codex_version
+  check_github_access "${PLUGIN_GIT_URL}" || exit 1
   ok "prerequisites OK ($(codex --version 2>/dev/null | head -1), $(node --version))"
+
+  is_armorcodex_installed && HAD_INSTALL=1
 
   local mode
   mode="$(detect_mode)"
@@ -722,6 +833,7 @@ main() {
     section "Updating ArmorCodex"
     run_update_path
     verify_install
+    connect_to_armoriq
     finish_update_banner
     exit 0
   fi

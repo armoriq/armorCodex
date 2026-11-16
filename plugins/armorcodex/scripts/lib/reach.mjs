@@ -24,7 +24,6 @@ import { fileURLToPath } from "node:url";
 const INSTALL_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\n$/;
 const WORKER = fileURLToPath(new URL("../reach-ping.mjs", import.meta.url));
 const PACKAGE = new URL("../../package.json", import.meta.url);
-const SDK_PACKAGE = new URL("../../node_modules/@armoriq/sdk/package.json", import.meta.url);
 const ORIGINS = new Map([
   ["https://api.armoriq.ai", "production"],
   ["https://staging-api.armoriq.ai", "staging"],
@@ -38,8 +37,16 @@ const PLAN_SUCCESS = /^Intent registered/;
 const NOTICE =
   "ArmorIQ sends an anonymous daily usage ping (a random install id, plugin and version, OS, signed in or not, and daily counts of plans and blocks); turn it off with ARMORIQ_USAGE_PING_DISABLED=1 or DO_NOT_TRACK=1.";
 
+// The stable channel depends on @armoriq/sdk and the dev channel on
+// @armoriq/sdk-dev; each ships its own CLI name.
+function sdkPackageUrl() {
+  const { dependencies = {} } = JSON.parse(readFileSync(PACKAGE, "utf8"));
+  const name = ["@armoriq/sdk", "@armoriq/sdk-dev"].find((dep) => dependencies[dep]) ?? "@armoriq/sdk";
+  return new URL(`../../node_modules/${name}/package.json`, import.meta.url);
+}
+
 export function loginCommand(backend) {
-  const sdkPackage = JSON.parse(readFileSync(SDK_PACKAGE, "utf8"));
+  const sdkPackage = JSON.parse(readFileSync(sdkPackageUrl(), "utf8"));
   const clis =
     sdkPackage.bin !== null && typeof sdkPackage.bin === "object" ? Object.keys(sdkPackage.bin) : [];
   if (clis.length !== 1)

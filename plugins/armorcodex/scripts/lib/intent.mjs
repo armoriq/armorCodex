@@ -1,4 +1,3 @@
-import armoriqSdk from "@armoriq/sdk";
 import {
   buildAuthHeaders,
   isPlainObject,
@@ -9,9 +8,10 @@ import {
   readString,
   sha256Hex
 } from "./common.mjs";
+import { CLIENT } from "./client-identity.mjs";
 import { requireEndpoint } from "./config.mjs";
+import { sdkModule } from "./sdk.mjs";
 
-const { ArmorIQClient } = armoriqSdk;
 const sdkClientCache = new Map();
 
 function buildSdkClientKey(config) {
@@ -22,8 +22,7 @@ function buildSdkClientKey(config) {
     config.contextId,
     config.iapEndpoint,
     config.proxyEndpoint,
-    config.backendEndpoint,
-    config.useProduction ? "prod" : "dev"
+    config.backendEndpoint
   ].join("|");
 }
 
@@ -33,41 +32,21 @@ export function getSdkClient(config) {
   if (cached) {
     return cached;
   }
-  const client = new ArmorIQClient({
+  const client = new (sdkModule("client").ArmorIQClient)({
     apiKey: config.apiKey,
     userId: config.userId,
     agentId: config.agentId,
     contextId: config.contextId,
-    useProduction: config.useProduction,
     iapEndpoint: requireEndpoint(config, "iapEndpoint"),
     proxyEndpoint: requireEndpoint(config, "proxyEndpoint"),
     backendEndpoint: config.backendEndpoint,
     timeout: config.timeoutMs,
     maxRetries: config.maxRetries,
-    verifySsl: config.verifySsl
+    verifySsl: config.verifySsl,
+    client: CLIENT
   });
   sdkClientCache.set(key, client);
   return client;
-}
-
-function buildFallbackPlan(payload) {
-  const goal = typeof payload.prompt === "string" ? payload.prompt : "ArmorCodex intent";
-  const plan = { steps: [], metadata: { goal, source: "codex" } };
-  if (typeof payload.toolName === "string" && payload.toolName.trim()) {
-    plan.steps.push({
-      action: payload.toolName.trim(),
-      mcp: payload.mcpName || "codex",
-      metadata: isPlainObject(payload.toolInput) ? { inputs: payload.toolInput } : {}
-    });
-  }
-  return plan;
-}
-
-function resolvePlan(payload) {
-  if (isPlainObject(payload.plan)) {
-    return payload.plan;
-  }
-  return buildFallbackPlan(payload);
 }
 
 export function extractPlanFromIntentToken(raw) {
@@ -100,44 +79,24 @@ export function extractPlanFromIntentToken(raw) {
   return { plan: planCandidate, expiresAt };
 }
 
+function stepAction(step) {
+  if (typeof step.action === "string") return step.action;
+  return typeof step.tool === "string" ? step.tool : "";
+}
+
+function stepMatchesTool(step, normalizedTool) {
+  return isPlainObject(step) && normalizeToolName(stepAction(step)) === normalizedTool;
+}
+
 export function extractAllowedActions(plan) {
   const allowed = new Set();
   const steps = Array.isArray(plan?.steps) ? plan.steps : [];
   for (const step of steps) {
-    if (!isPlainObject(step)) {
-      continue;
-    }
-    const action =
-      typeof step.action === "string"
-        ? step.action
-        : typeof step.tool === "string"
-          ? step.tool
-          : "";
-    if (action.trim()) {
-      allowed.add(normalizeToolName(action));
+    if (isPlainObject(step) && stepAction(step).trim()) {
+      allowed.add(normalizeToolName(stepAction(step)));
     }
   }
   return allowed;
-}
-
-function findPlanStep(plan, toolName) {
-  const steps = Array.isArray(plan?.steps) ? plan.steps : [];
-  const normalizedTool = normalizeToolName(toolName);
-  for (const step of steps) {
-    if (!isPlainObject(step)) {
-      continue;
-    }
-    const action =
-      typeof step.action === "string"
-        ? step.action
-        : typeof step.tool === "string"
-          ? step.tool
-          : "";
-    if (normalizeToolName(action) === normalizedTool) {
-      return step;
-    }
-  }
-  return null;
 }
 
 function getStepInputCandidates(step) {
@@ -161,16 +120,7 @@ export function findPlanStepIndices(plan, toolName, toolParams) {
   const paramMatches = [];
   for (let idx = 0; idx < steps.length; idx += 1) {
     const step = steps[idx];
-    if (!isPlainObject(step)) {
-      continue;
-    }
-    const action =
-      typeof step.action === "string"
-        ? step.action
-        : typeof step.tool === "string"
-          ? step.tool
-          : "";
-    if (normalizeToolName(action) !== normalizedTool) {
+    if (!stepMatchesTool(step, normalizedTool)) {
       continue;
     }
     matches.push(idx);
@@ -190,21 +140,7 @@ export function checkToolAgainstPlan({ plan, toolName, toolInput }) {
   if (!steps.length) {
     return { allowed: false, reason: "ArmorCodex intent plan is empty" };
   }
-  const matches = [];
-  for (const step of steps) {
-    if (!isPlainObject(step)) {
-      continue;
-    }
-    const action =
-      typeof step.action === "string"
-        ? step.action
-        : typeof step.tool === "string"
-          ? step.tool
-          : "";
-    if (normalizeToolName(action) === normalizedTool) {
-      matches.push(step);
-    }
-  }
+  const matches = steps.filter((step) => stepMatchesTool(step, normalizedTool));
   if (!matches.length) {
     return { allowed: false, reason: `ArmorCodex intent drift: tool not in plan (${toolName})` };
   }
@@ -219,16 +155,9 @@ export function checkToolAgainstPlan({ plan, toolName, toolInput }) {
     }
     sawConstrainedMatch = true;
     for (const candidate of inputCandidates) {
-      // Strict subset: every key in declared candidate matches actual input.
       if (isSubsetValue(candidate, toolInput)) {
         return { allowed: true };
       }
-      // Lenient fallback: agents (especially gpt-5.4) often declare inputs
-      // with field names that don't match the real tool (e.g. `cmd` instead
-      // of Codex's `command`). If NONE of the declared keys exist on the
-      // real input, treat it as an over-eager declaration and allow.
-      // The tool name itself was already matched; the parameter declaration
-      // was simply wrong-fielded, not a security violation.
       if (isPlainObject(candidate) && isPlainObject(toolInput)) {
         const declaredKeys = Object.keys(candidate);
         if (declaredKeys.length > 0) {
@@ -271,7 +200,6 @@ export function checkIntentTokenPlan({ intentTokenRaw, toolName, toolParams }) {
     };
   }
 
-  // Parameter-level enforcement: check tool params against plan step constraints
   if (isPlainObject(toolParams)) {
     const paramCheck = checkToolAgainstPlan({
       plan: parsed.plan,
@@ -554,6 +482,9 @@ export function validateCsrgProofHeaders(proofs, required) {
 }
 
 export async function requestIntent(config, payload) {
+  if (!isPlainObject(payload.plan)) {
+    throw new Error("ArmorCodex requests an intent token only for a registered plan");
+  }
   if (config.intentEndpoint) {
     const response = await postJson(
       config.intentEndpoint,
@@ -594,7 +525,7 @@ export async function requestIntent(config, payload) {
     return { skipped: true };
   }
   const client = getSdkClient(config);
-  const plan = resolvePlan({ ...payload, mcpName: config.mcpName });
+  const plan = payload.plan;
   const metadata = {
     source: "codex",
     session_id: payload.session_id,
@@ -602,7 +533,9 @@ export async function requestIntent(config, payload) {
     ...payload.metadata
   };
   const capture = client.capturePlan(config.llmId, payload.prompt || "", plan, metadata);
-  const token = await client.getIntentToken(capture, payload.policy, payload.validitySeconds);
+  const token = await client.getIntentToken(capture, payload.policy, payload.validitySeconds, {
+    contextId: payload.session_id
+  });
   const tokenRaw = JSON.stringify(token);
   const parsedFromToken = extractPlanFromIntentToken(tokenRaw);
   return {
@@ -610,7 +543,8 @@ export async function requestIntent(config, payload) {
     source: "armoriq-sdk",
     tokenRaw,
     plan: parsedFromToken?.plan || plan,
-    expiresAt: Number.isFinite(token.expiresAt) ? token.expiresAt : parsedFromToken?.expiresAt
+    expiresAt: Number.isFinite(token.expiresAt) ? token.expiresAt : parsedFromToken?.expiresAt,
+    planCheck: token.planCheck
   };
 }
 
