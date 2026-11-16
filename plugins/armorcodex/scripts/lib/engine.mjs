@@ -1,5 +1,5 @@
 import { isPlainObject, normalizeToolName, nowEpochSeconds, redactSecrets, sanitizeParams } from "./common.mjs";
-import { addPromptContext, blockPrompt, denyPermissionRequest, denyPreTool } from "./hook-output.mjs";
+import { addPromptContext, blockPrompt, denyPermissionRequest, denyPreTool, withSystemMessage } from "./hook-output.mjs";
 import {
   checkIntentTokenPlan,
   checkToolAgainstPlan,
@@ -32,6 +32,7 @@ import {
 } from "./backend-posture.mjs";
 import { appendNdjsonLine, readJson, writePrivateFile } from "./fs-store.mjs";
 import { readFile, unlink } from "node:fs/promises";
+import { autoUpdate } from "./update-apply.mjs";
 import path from "node:path";
 import {
   getSession,
@@ -169,7 +170,7 @@ function matchedStepIndex(plan, toolName, toolInput) {
 // SessionStart
 // ---------------------------------------------------------------------------
 
-export async function handleSessionStart(input, config) {
+export async function handleSessionStart(input, config, updateOptions = {}) {
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   if (!sessionId) return null;
 
@@ -184,9 +185,13 @@ export async function handleSessionStart(input, config) {
 
   const modeLabel = config.mode === "enforce" ? "ENFORCING" : "MONITORING";
   const intentLabel = config.intentRequired ? "required" : "optional";
-  return addPromptContext(
-    `ArmorCodex active (${modeLabel}, intent=${intentLabel})`,
-    "SessionStart"
+
+  // The update notice is for the person, not the model: handed to the model it
+  // reads as an instruction to run the install command mid-session.
+  const update = await autoUpdate(config, updateOptions);
+  return withSystemMessage(
+    addPromptContext(`ArmorCodex active (${modeLabel}, intent=${intentLabel})`, "SessionStart"),
+    update.notice
   );
 }
 

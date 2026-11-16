@@ -4,11 +4,20 @@ All notable changes to ArmorCodex are recorded here. Format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [0.3.7] - 2026-11-16
+
 ### Added
-- From main: a small anonymous usage ping once per UTC day, an install notice, and a once-a-day sign in reminder when signed out. See "Data & Privacy" in the README for what is sent and how to turn it off.
+- Auto-update. At most once a day SessionStart checks the repo's latest release. A newer release is cloned at its tag beside the install, its dependencies installed with `npm ci`, and it is swapped in by rename at the next session start; the replaced copy is kept at `~/.armoriq/armorCodex.previous`. The person sees a notice; the model does not. Installs on the dev branch are left alone. `ARMORCODEX_NO_AUTO_UPDATE=1` turns it off.
+- The installer checks out the latest release tag instead of the tip of `main`. `ARMORCODEX_GIT_REF` still picks any branch or tag.
+- A small anonymous usage ping once per UTC day, an install notice, and a once-a-day sign in reminder when signed out. See "Data & Privacy" in the README for what is sent and how to turn it off.
+
+### Changed
+- Brings every change from 0.3.4 to 0.3.6 (below) to the stable channel, on production: depends on `@armoriq/sdk` ^0.8.24, and the plugin and the `armoriq` CLI default to `https://api.armoriq.ai`. `ARMORIQ_ENV=staging` selects staging.
 
 ### Fixed
-- The installer runs `armoriq-dev login --backend <the plugin's backend>`, so the saved login is the one the plugin looks up. Before, an `ARMORIQ_ENV` or `ARMORCODEX_BACKEND_ENDPOINT` override made the installer save a login under the CLI's staging default that the plugin never loaded.
+- Logins saved by the `armoriq` CLI as a versioned credentials file are read, as is the older flat file.
+- A fresh install now enforces. Codex skips untrusted hooks, and the installer never trusted ArmorCodex's, so a new install ran no hook. The installer now records trust for its own hooks through `codex app-server`, the way `/hooks` does, and if that fails it says to run `/hooks` in Codex and trust them.
+- The installer runs `armoriq login --backend <the plugin's backend>`, so the saved login is the one the plugin looks up. Before, an `ARMORIQ_ENV` or `ARMORCODEX_BACKEND_ENDPOINT` override made the installer save a login under the CLI's staging default that the plugin never loaded.
 
 ## [0.3.6] - 2026-10-12
 

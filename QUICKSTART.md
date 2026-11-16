@@ -40,7 +40,7 @@ Without a saved login, ArmorCodex performs local policy and local plan enforceme
 
 ## Update
 
-Re-run the installer you installed with. It updates the existing install in place and keeps your login:
+A stable install updates itself: the session after a release prepares it, and the next session switches to it. To update now, re-run the installer you installed with. It updates the existing install in place and keeps your login:
 
 ```bash
 curl -fsSL https://armoriq.ai/install_armorcodex.sh | bash       # stable
