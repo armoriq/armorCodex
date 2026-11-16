@@ -68,7 +68,12 @@ const contextDir = (h) => {
   const root = path.join(h, "data", "usage-live");
   return path.join(root, readdirSync(root)[0]);
 };
-const readJsonFile = (file) => (existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : null);
+// tryFileLock creates worker.lock empty and then writes the pid, so a poll can
+// land between the two. An empty file is "not written yet", not corrupt JSON.
+const readJsonFile = (file) => {
+  const text = existsSync(file) ? readFileSync(file, "utf8") : "";
+  return text === "" ? null : JSON.parse(text);
+};
 const workerPid = (h) => Number(readJsonFile(path.join(contextDir(h), "worker.lock")) ?? 0);
 const sessionsOf = (h) => readJsonFile(path.join(contextDir(h), "sessions.json")) ?? {};
 const reportsOf = (b, mode) => b.reports.filter((r) => r.mode === mode);
