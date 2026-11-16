@@ -111,6 +111,7 @@ export const env = (h, url, extra = {}) => ({
   ARMORCODEX_BACKEND_ENDPOINT: url,
   IAP_ENDPOINT: url,
   PROXY_ENDPOINT: url,
+  ARMORCODEX_NO_AUTO_UPDATE: "1",
   ...(process.env.NODE_OPTIONS ? { NODE_OPTIONS: process.env.NODE_OPTIONS } : {}),
   ...extra,
 });

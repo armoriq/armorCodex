@@ -307,10 +307,12 @@ test("SessionStart surfaces a pending update from state without any network call
     config
   );
 
-  const context = sessionContext(output);
-  assert.match(context, /ArmorCodex active \(ENFORCING, intent=required\)/);
-  assert.match(context, /ArmorCodex v9\.9\.9 is available \(running 0\.3\.3\)/);
-  assert.match(context, /curl -fsSL https:\/\/armoriq\.ai\/install_armorcodex\.sh \| bash/);
+  assert.equal(sessionContext(output), "ArmorCodex active (ENFORCING, intent=required)");
+  // systemMessage, not additionalContext: the notice is for the person, and
+  // the model must not be handed an install command to run mid-session.
+  assert.match(output.systemMessage, /ArmorCodex v9\.9\.9 is available \(running 0\.3\.3\)/);
+  assert.match(output.systemMessage, /curl -fsSL https:\/\/armoriq\.ai\/install_armorcodex\.sh \| bash/);
+  assert.doesNotMatch(sessionContext(output), /curl -fsSL/);
   assert.ok(
     JSON.parse(readFileSync(config.runtimeFile, "utf8")).sessions["sess-update"],
     "the session is still recorded"
@@ -330,6 +332,7 @@ test("SessionStart says nothing extra when the cached release matches the runnin
   );
 
   assert.equal(sessionContext(output), "ArmorCodex active (ENFORCING, intent=required)");
+  assert.equal(output.systemMessage, undefined);
 });
 
 test("SessionStart with the opt-out set never reads or writes update state", async (t) => {
@@ -347,4 +350,5 @@ test("SessionStart with the opt-out set never reads or writes update state", asy
   );
 
   assert.equal(sessionContext(output), "ArmorCodex active (ENFORCING, intent=required)");
+  assert.equal(output.systemMessage, undefined);
 });
