@@ -81,6 +81,7 @@ fi
 
 CONFIG_TOML="${HOME}/.codex/config.toml"
 GLOBAL_HOOKS="${HOME}/.codex/hooks.json"
+HOOKS_UNTRUSTED=0
 PLUGIN_PATH="${PLUGIN_ROOT}/${PLUGIN_SUBDIR}"
 BOOTSTRAP_PATH="${PLUGIN_PATH}/scripts/bootstrap.mjs"
 
@@ -551,6 +552,20 @@ ensure_global_hooks() {
     repaired:*) ok "added missing ArmorCodex ${result#repaired:} hook(s) to ${GLOBAL_HOOKS}" ;;
     *) ok "global hooks already reference ArmorCodex" ;;
   esac
+  trust_codex_hooks
+}
+
+# Codex skips a hooks.json hook until it is trusted, so without this step a
+# fresh install enforces nothing. Recorded the way /hooks records it, for
+# ArmorCodex's own hooks only.
+trust_codex_hooks() {
+  if (cd "${HOME}" && node "${PLUGIN_PATH}/scripts/trust-hooks.mjs" "${GLOBAL_HOOKS}" "${BOOTSTRAP_PATH}") >/dev/null 2>&1; then
+    ok "trusted the ArmorCodex hooks in Codex"
+    return 0
+  fi
+  HOOKS_UNTRUSTED=1
+  warn "couldn't mark the ArmorCodex hooks as trusted, so Codex will not run them yet"
+  printf "  Start ${B}codex${N}, run ${B}/hooks${N}, and trust the ArmorCodex hooks.\n"
 }
 
 remove_codex_hooks() {
@@ -673,6 +688,10 @@ verify_install() {
   fi
   if [[ ! -f "${GLOBAL_HOOKS}" ]]; then
     warn "global hooks file missing at ${GLOBAL_HOOKS}"
+    issues=$((issues+1))
+  fi
+  if [[ "${HOOKS_UNTRUSTED}" -eq 1 ]]; then
+    warn "ArmorCodex hooks are not trusted yet: start ${B}codex${N}, run ${B}/hooks${N}, and trust them"
     issues=$((issues+1))
   fi
   if [[ "${issues}" -eq 0 ]]; then
