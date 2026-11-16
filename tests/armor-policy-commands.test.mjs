@@ -20,7 +20,6 @@ test("isArmorPolicyCommand detects /armor and bare forms, ignores prose", () => 
   assert.equal(isArmorPolicyCommand("armor policy add deny bash"), true);
   assert.equal(isArmorPolicyCommand("/armor yes"), true);
   assert.equal(isArmorPolicyCommand("just talking about armor plating"), false);
-  // Natural-language `Policy ...` is handled by the legacy path, not here.
   assert.equal(isArmorPolicyCommand("Policy new: deny bash"), false);
 });
 
@@ -44,11 +43,9 @@ test("add stages a proposal without applying; confirm applies it", async () => {
   const config = await tempConfig();
   const staged = await handleArmorPolicyCommand("/armor policy add deny bash", config, "tester");
   assert.match(staged, /Proposed policy change/);
-  // Not yet applied.
   let state = await loadPolicyState(config.policyFile);
   assert.equal(state.version, 0);
   assert.equal(state.policy.rules.length, 0);
-  // Confirm.
   const applied = await handleArmorPolicyCommand("/armor yes", config, "tester");
   assert.match(applied, /Policy updated to v1/);
   state = await loadPolicyState(config.policyFile);
@@ -65,7 +62,6 @@ test("confirm with no staged proposal is a no-op message", async () => {
 
 test("confirm rejects a proposal whose base version no longer matches", async () => {
   const config = await tempConfig();
-  // Hand-write a pending proposal with a stale base version.
   await writeFile(
     path.join(config.dataDir, "policy-pending.json"),
     JSON.stringify({
@@ -92,7 +88,7 @@ test("applying is human-only: confirm blocked when allowConfirm is false", async
   const blocked = await handleArmorPolicyCommand("/armor yes", config, "mcp", { allowConfirm: false });
   assert.match(blocked, /human-only/);
   const state = await loadPolicyState(config.policyFile);
-  assert.equal(state.version, 0); // never applied by the non-human caller
+  assert.equal(state.version, 0);
 });
 
 test("identical proposal is reported as no change", async () => {

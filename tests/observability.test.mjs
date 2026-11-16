@@ -1,35 +1,126 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { access, appendFile, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { access, appendFile, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { randomUUID } from "node:crypto";
+import { createRequire } from "node:module";
 
 import { denyPermissionRequest } from "../plugins/armorcodex/scripts/lib/hook-output.mjs";
 import { observeHook } from "../plugins/armorcodex/scripts/lib/observability.mjs";
 
+const { OtelSession } = createRequire(new URL("../plugins/armorcodex/package.json", import.meta.url))(
+  "@armoriq/sdk",
+);
+
+function protoFields(buf) {
+  const fields = [];
+  let i = 0;
+  const varint = () => {
+    let value = 0n;
+    for (let shift = 0n; ; shift += 7n) {
+      const byte = buf[i++];
+      value |= BigInt(byte & 0x7f) << shift;
+      if (byte < 0x80) return value;
+    }
+  };
+  while (i < buf.length) {
+    const key = Number(varint());
+    const no = key >> 3;
+    const wire = key & 7;
+    if (wire === 0) fields.push({ no, value: varint() });
+    else if (wire === 1) {
+      fields.push({ no, double: buf.readDoubleLE(i), fixed: buf.readBigUInt64LE(i) });
+      i += 8;
+    } else if (wire === 5) i += 4;
+    else if (wire === 2) {
+      const len = Number(varint());
+      fields.push({ no, bytes: buf.subarray(i, i + len) });
+      i += len;
+    } else throw new Error(`unsupported wire type ${wire}`);
+  }
+  return fields;
+}
+
+const field = (buf, no) => protoFields(buf).filter((f) => f.no === no);
+
+// AnyValue: string_value(1), bool_value(2), int_value(3), double_value(4)
+function anyValue(buf) {
+  const [f] = protoFields(buf);
+  if (!f) return undefined;
+  if (f.no === 1) return f.bytes.toString("utf8");
+  if (f.no === 2) return f.value === 1n;
+  if (f.no === 3) return Number(f.value);
+  if (f.no === 4) return f.double;
+  return undefined;
+}
+
+// ExportTraceServiceRequest -> ResourceSpans(1) -> ScopeSpans(2) -> Span(2): name(5), attributes(9)
+function decodeSpans(body) {
+  const spans = [];
+  for (const resourceSpans of field(body, 1)) {
+    for (const scopeSpans of field(resourceSpans.bytes, 2)) {
+      for (const span of field(scopeSpans.bytes, 2)) {
+        const attributes = {};
+        for (const kv of field(span.bytes, 9)) {
+          const key = field(kv.bytes, 1)[0]?.bytes.toString("utf8");
+          const value = field(kv.bytes, 2)[0];
+          if (key && value) attributes[key] = anyValue(value.bytes);
+        }
+        const ms = (no) => Number(field(span.bytes, no)[0].fixed / 1_000_000n);
+        const status = field(span.bytes, 15)[0];
+        spans.push({
+          name: field(span.bytes, 5)[0]?.bytes.toString("utf8"),
+          spanId: field(span.bytes, 2)[0]?.bytes.toString("hex"),
+          attributes,
+          startMs: ms(7),
+          endMs: ms(8),
+          statusCode: status ? Number(field(status.bytes, 3)[0]?.value ?? 0n) : 0,
+        });
+      }
+    }
+  }
+  return spans;
+}
+
 async function startIngestServer() {
-  const requests = [];
+  const exports = [];
+  const clients = [];
   const server = createServer(async (request, response) => {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
-    requests.push({
-      method: request.method,
-      url: request.url,
-      body: JSON.parse(Buffer.concat(chunks).toString("utf8")),
-    });
-    response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify({ accepted: 1, rejected: 0 }));
+    clients.push(`${request.url} ${request.headers["x-armoriq-client"]}`);
+    if (request.url === "/observability/policy/lease") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(
+        JSON.stringify({
+          captureMode: "enhanced",
+          revision: 1,
+          expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+          contentCaptureAllowed: true,
+          externalContentCaptureAllowed: true,
+        }),
+      );
+      return;
+    }
+    if (request.method === "POST" && request.url === "/v1/traces") {
+      const body = Buffer.concat(chunks);
+      exports.push({ raw: body.toString("latin1"), spans: decodeSpans(body) });
+    }
+    response.writeHead(200, { "content-type": "application/x-protobuf" });
+    response.end();
   });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
   const address = server.address();
   return {
     endpoint: `http://127.0.0.1:${address.port}`,
-    requests,
+    exports,
+    clients,
     close: async () => {
+      server.closeAllConnections();
       server.close();
       await once(server, "close");
     },
@@ -54,20 +145,11 @@ function obsConfig(dataDir, endpoint) {
   };
 }
 
-function tokenCount(total, last) {
-  return {
-    type: "event_msg",
-    payload: {
-      type: "token_count",
-      info: {
-        total_token_usage: total,
-        last_token_usage: last,
-      },
-    },
-  };
+function usageRecord(timestamp, responseId, usage) {
+  return { timestamp, type: "token_usage_record", payload: { response_id: responseId, usage } };
 }
 
-test("Stop ships exactly one per-turn generation span without cumulative double count", async (t) => {
+test("Stop ships one generation span per model request of the turn, ending at the request's time", async (t) => {
   const dataDir = await mkdtemp(path.join(tmpdir(), "armorcodex-obs-"));
   const rolloutPath = path.join(dataDir, "rollout.jsonl");
   const ingest = await startIngestServer();
@@ -75,115 +157,146 @@ test("Stop ships exactly one per-turn generation span without cumulative double 
     await ingest.close();
     await rm(dataDir, { recursive: true, force: true });
   });
+  const base = Date.now() - 60_000;
+  t.mock.timers.enable({ apis: ["Date"], now: base });
+  const iso = (offsetMs) => new Date(base + offsetMs).toISOString();
+  const sessionId = randomUUID();
+  const config = obsConfig(dataDir, ingest.endpoint);
+  const turn = (requests) => [
+    { type: "event_msg", payload: { type: "task_started" } },
+    { type: "turn_context", payload: { model: "gpt-5.5" } },
+    ...requests,
+    { type: "event_msg", payload: { type: "task_complete" } },
+  ];
+  const write = (lines) => appendFile(rolloutPath, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`, "utf8");
+
+  await write(turn([usageRecord(iso(500), "resp_earlier", { input_tokens: 900, cached_input_tokens: 100, output_tokens: 9 })]));
+  await observeHook("UserPromptSubmit", { session_id: sessionId, prompt: "First turn" }, null, config);
+  t.mock.timers.setTime(base + 1_000);
+  await observeHook("Stop", { session_id: sessionId, transcript_path: rolloutPath }, null, config);
+
+  t.mock.timers.setTime(base + 2_000);
+  await observeHook("UserPromptSubmit", { session_id: sessionId, prompt: "Second turn" }, null, config);
+  const inputs = [20_000, 25_000, 28_000, 30_000, 34_000, 40_680];
+  await write(
+    turn(inputs.map((input, i) =>
+      usageRecord(iso(3_000 + i * 1_000), `resp_${i}`, { input_tokens: input, cached_input_tokens: 15_000, output_tokens: 100 }),
+    )),
+  );
+  t.mock.timers.setTime(base + 10_000);
+  await observeHook("Stop", { session_id: sessionId, transcript_path: rolloutPath }, null, config);
+
+  const generations = ingest.exports.flatMap((e) => e.spans).filter((span) => span.name === "gen_ai.chat");
+  assert.equal(generations.length, 7);
+  const second = generations.slice(1);
+  assert.deepEqual(second.map((span) => span.endMs - base), [3_000, 4_000, 5_000, 6_000, 7_000, 8_000]);
+  assert.equal(new Set(generations.map((span) => span.spanId)).size, 7);
+  const total = (key) => second.reduce((sum, span) => sum + span.attributes[key], 0);
+  assert.equal(total("gen_ai.usage.input_tokens") + total("gen_ai.usage.cache_read_tokens"), 177_680);
+  assert.equal(total("gen_ai.usage.output_tokens"), 600);
+  for (const span of generations) {
+    assert.equal(span.attributes["gen_ai.usage.cost_usd"], undefined);
+    assert.equal(span.attributes["armoriq.cost.provenance"], undefined);
+    assert.equal(span.attributes["armoriq.timing.provenance"], "reported");
+    assert.equal(span.attributes["armoriq.session_id"], sessionId);
+  }
+});
+
+test("Stop still ships the turn and logs the error when a model span fails", async (t) => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "armorcodex-obs-"));
+  const rolloutPath = path.join(dataDir, "rollout.jsonl");
+  const ingest = await startIngestServer();
+  t.after(async () => {
+    await ingest.close();
+    await rm(dataDir, { recursive: true, force: true });
+  });
+  t.mock.method(OtelSession.prototype, "recordModel", async () => {
+    throw new Error("model span failed");
+  });
+  const stderr = [];
+  t.mock.method(process.stderr, "write", (chunk) => {
+    stderr.push(String(chunk));
+    return true;
+  });
 
   const sessionId = randomUUID();
   const config = obsConfig(dataDir, ingest.endpoint);
-  const firstTotals = {
-    input_tokens: 120,
-    cached_input_tokens: 20,
-    output_tokens: 10,
-    total_tokens: 130,
-  };
-  const firstTurn = [
-    { type: "event_msg", payload: { type: "task_started" } },
-    { type: "turn_context", payload: { model: "gpt-4.1" } },
-    tokenCount(firstTotals, firstTotals),
-    { type: "event_msg", payload: { type: "task_complete" } },
-  ];
-  await writeFile(rolloutPath, firstTurn.map((line) => JSON.stringify(line)).join("\n"), "utf8");
-
-  await observeHook(
-    "UserPromptSubmit",
-    { session_id: sessionId, prompt: "First turn" },
-    null,
-    config,
-  );
-  await observeHook(
-    "Stop",
-    { session_id: sessionId, transcript_path: rolloutPath },
-    null,
-    config,
-  );
-
-  const secondTurnUsage = {
-    input_tokens: 80,
-    cached_input_tokens: 30,
-    output_tokens: 15,
-    total_tokens: 95,
-  };
-  const finalTotals = {
-    input_tokens: 200,
-    cached_input_tokens: 50,
-    output_tokens: 25,
-    total_tokens: 225,
-  };
-  const secondTurn = [
-    { type: "event_msg", payload: { type: "task_started" } },
-    { type: "turn_context", payload: { model: "gpt-4.1" } },
-    tokenCount(finalTotals, secondTurnUsage),
-    { type: "event_msg", payload: { type: "task_complete" } },
-  ];
-  await appendFile(
+  await writeFile(
     rolloutPath,
-    `\n${secondTurn.map((line) => JSON.stringify(line)).join("\n")}`,
+    [
+      { type: "event_msg", payload: { type: "task_started" } },
+      { type: "turn_context", payload: { model: "gpt-4.1" } },
+      usageRecord(new Date().toISOString(), "resp_1", { input_tokens: 120, cached_input_tokens: 20, output_tokens: 10 }),
+    ]
+      .map((line) => JSON.stringify(line))
+      .join("\n"),
     "utf8",
   );
-
+  await observeHook("UserPromptSubmit", { session_id: sessionId, prompt: "List" }, null, config);
   await observeHook(
-    "UserPromptSubmit",
-    { session_id: sessionId, prompt: "Second turn" },
-    null,
+    "PreToolUse",
+    { session_id: sessionId, tool_name: "Bash", tool_input: { command: "ls" } },
+    { hookSpecificOutput: { permissionDecision: "allow" } },
     config,
   );
-  await observeHook(
-    "Stop",
-    { session_id: sessionId, transcript_path: rolloutPath },
-    null,
-    config,
-  );
+  await observeHook("Stop", { session_id: sessionId, transcript_path: rolloutPath }, null, config);
 
-  assert.equal(ingest.requests.length, 2);
-  const generationSpans = ingest.requests.map((request) => {
-    const spans = request.body.batches.flatMap((batch) => batch.spans);
-    const generations = spans.filter((span) => span.kind === "generation");
-    assert.equal(generations.length, 1);
-    assert.ok(generations[0].attributes.costUsd > 0);
-    return generations[0];
-  });
-
-  assert.deepEqual(
-    generationSpans.map((span) => ({
-      inputTokens: span.attributes.inputTokens,
-      outputTokens: span.attributes.outputTokens,
-      cacheReadTokens: span.attributes.cacheReadTokens,
-    })),
-    [
-      { inputTokens: 100, outputTokens: 10, cacheReadTokens: 20 },
-      { inputTokens: 50, outputTokens: 15, cacheReadTokens: 30 },
-    ],
-  );
-
-  const summed = generationSpans.reduce(
-    (totals, span) => ({
-      inputTokens: totals.inputTokens + span.attributes.inputTokens,
-      outputTokens: totals.outputTokens + span.attributes.outputTokens,
-      cacheReadTokens: totals.cacheReadTokens + span.attributes.cacheReadTokens,
-    }),
-    { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 },
-  );
-  assert.deepEqual(summed, {
-    inputTokens: finalTotals.input_tokens - finalTotals.cached_input_tokens,
-    outputTokens: finalTotals.output_tokens,
-    cacheReadTokens: finalTotals.cached_input_tokens,
-  });
+  const spans = ingest.exports.flatMap((e) => e.spans);
+  assert.deepEqual(spans.map((span) => span.name).sort(), ["armoriq.agent.run", "armoriq.policy.evaluate"]);
+  assert.equal(spans.find((span) => span.name === "armoriq.agent.run").statusCode, 2);
+  assert.match(stderr.join(""), /Stop could not replay the turn: model span failed/);
+  assert.deepEqual(await readdir(dataDir), ["rollout.jsonl"]);
 });
 
-test("PermissionRequest denial ships as a denied policy call with its reason", async (t) => {
+test("Stop replays each span at its hook's time, and a tool's policy span carries the tool's call id", async (t) => {
   const dataDir = await mkdtemp(path.join(tmpdir(), "armorcodex-obs-"));
   const ingest = await startIngestServer();
   t.after(async () => {
     await ingest.close();
     await rm(dataDir, { recursive: true, force: true });
+  });
+  const base = Date.now() - 60_000;
+  t.mock.timers.enable({ apis: ["Date"], now: base });
+  const at = (offsetMs) => t.mock.timers.setTime(base + offsetMs);
+
+  const sessionId = randomUUID();
+  const config = obsConfig(dataDir, ingest.endpoint);
+  const allow = { hookSpecificOutput: { permissionDecision: "allow" } };
+  const deny = { hookSpecificOutput: { permissionDecision: "deny" } };
+  const bash = { session_id: sessionId, tool_name: "Bash", tool_input: { command: "ls" }, tool_use_id: "call_bash" };
+  await observeHook("UserPromptSubmit", { session_id: sessionId, prompt: "List" }, null, config);
+  at(1_000);
+  await observeHook("PreToolUse", { session_id: sessionId, tool_name: "webrun", tool_input: {}, tool_use_id: "call_web" }, deny, config);
+  at(2_000);
+  await observeHook("PreToolUse", bash, allow, config);
+  at(7_000);
+  await observeHook("PostToolUse", { ...bash, tool_response: { stdout: "a" } }, null, config);
+  at(8_000);
+  await observeHook("Stop", { session_id: sessionId }, null, config);
+
+  const spans = ingest.exports.flatMap((e) => e.spans);
+  const byCall = (name, callId) =>
+    spans.find((span) => span.name === name && span.attributes["armoriq.tool.call_id"] === callId);
+  const root = spans.find((span) => span.name === "armoriq.agent.run");
+  assert.deepEqual([root.startMs - base, root.endMs - base], [0, 8_000]);
+  assert.equal(byCall("armoriq.policy.evaluate", "call_web").endMs - base, 1_000);
+  assert.equal(byCall("armoriq.policy.evaluate", "call_bash").endMs - base, 2_000);
+  const tool = byCall("armoriq.tool", "call_bash");
+  assert.deepEqual([tool.startMs - base, tool.endMs - base], [2_000, 7_000]);
+});
+
+test("PermissionRequest denial ships as a denied policy call without its free-text reason", async (t) => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "armorcodex-obs-"));
+  const ingest = await startIngestServer();
+  t.after(async () => {
+    await ingest.close();
+    await rm(dataDir, { recursive: true, force: true });
+  });
+  const policyResults = [];
+  const recordPolicy = OtelSession.prototype.recordPolicy;
+  t.mock.method(OtelSession.prototype, "recordPolicy", function (call, result) {
+    policyResults.push(result);
+    return recordPolicy.call(this, call, result);
   });
 
   const sessionId = randomUUID();
@@ -207,17 +320,41 @@ test("PermissionRequest denial ships as a denied policy call with its reason", a
   );
   await observeHook("Stop", { session_id: sessionId }, null, config);
 
-  assert.equal(ingest.requests.length, 1);
-  assert.equal(ingest.requests[0].method, "POST");
-  assert.equal(ingest.requests[0].url, "/observability/spans");
-
-  const [{ spans }] = ingest.requests[0].body.batches;
-  const policyCall = spans.find((span) => span.kind === "policy_call");
+  const spans = ingest.exports.flatMap((e) => e.spans);
+  const policyCall = spans.find((span) => span.name === "armoriq.policy.evaluate");
   assert.ok(policyCall);
-  assert.equal(policyCall.status, "denied");
-  assert.equal(policyCall.attributes.decision, "deny");
-  assert.equal(policyCall.attributes.enforcementAction, "block");
-  assert.equal(policyCall.attributes.reason, "Protected files cannot be removed");
+  assert.equal(policyCall.attributes["armoriq.policy.decision"], "deny");
+  assert.equal(policyCall.attributes["armoriq.intent_plan_item_status"], "blocked");
+  assert.equal(policyCall.attributes["armoriq.tool.name"], "Bash");
+  assert.equal(policyCall.attributes["armoriq.session_id"], sessionId);
+  assert.deepEqual(policyResults, [{ decision: "block" }]);
+  assert.ok(!JSON.stringify(spans).includes("Protected files cannot be removed"));
+});
+
+test("PostToolUse ships a tool span with its outcome under the session", async (t) => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "armorcodex-obs-"));
+  const ingest = await startIngestServer();
+  t.after(async () => {
+    await ingest.close();
+    await rm(dataDir, { recursive: true, force: true });
+  });
+
+  const sessionId = randomUUID();
+  const config = obsConfig(dataDir, ingest.endpoint);
+  const tool = { session_id: sessionId, tool_name: "Bash", tool_input: { command: "ls" } };
+  await observeHook("UserPromptSubmit", { session_id: sessionId, prompt: "List" }, null, config);
+  await observeHook("PostToolUse", { ...tool, tool_response: { stdout: "a" } }, null, config);
+  await observeHook("PostToolUse", { ...tool, error: "exit 1" }, null, config);
+  await observeHook("Stop", { session_id: sessionId }, null, config);
+
+  const tools = ingest.exports.flatMap((e) => e.spans).filter((s) => s.name === "armoriq.tool");
+  assert.deepEqual(
+    tools.map((s) => [s.attributes["armoriq.tool.outcome"], s.attributes["armoriq.session_id"]]),
+    [
+      ["success", sessionId],
+      ["error", sessionId],
+    ],
+  );
 });
 
 test("outbound observability payload redacts prompt and tool-input secrets", async (t) => {
@@ -257,13 +394,13 @@ test("outbound observability payload redacts prompt and tool-input secrets", asy
   );
   await observeHook("Stop", { session_id: sessionId }, null, config);
 
-  assert.equal(ingest.requests.length, 1);
-  const wireJson = JSON.stringify(ingest.requests[0].body);
+  const wireJson = ingest.exports.map((e) => e.raw).join("");
+  assert.ok(wireJson.length > 0);
   assert.doesNotMatch(wireJson, new RegExp(promptSecret));
   assert.doesNotMatch(wireJson, new RegExp(bearerSecret));
   assert.match(wireJson, /Deploy the release with/);
   assert.match(wireJson, /release verification/);
-  assert.match(wireJson, /<redacted>/);
+  assert.match(wireJson, /<redacted>|\[REDACTED:SECRET\]/);
 });
 
 test("outbound observability payload redacts nested secret fields even when values are short and circular", async (t) => {
@@ -325,13 +462,13 @@ test("outbound observability payload redacts nested secret fields even when valu
   );
   await observeHook("Stop", { session_id: deepSessionId }, null, config);
 
-  assert.equal(ingest.requests.length, 2);
-  const wireJson = JSON.stringify(ingest.requests.map((request) => request.body));
+  const wireJson = ingest.exports.map((e) => e.raw).join("");
+  assert.ok(wireJson.length > 0);
   assert.doesNotMatch(wireJson, /p@ssw0rd/);
   assert.doesNotMatch(wireJson, /tiny-key/);
   assert.doesNotMatch(wireJson, /deep-password/);
-  assert.match(wireJson, /<redacted>/);
-  assert.match(wireJson, /<max-depth>/);
+  assert.match(wireJson, /<redacted>|\[REDACTED:SECRET\]/);
+  assert.match(wireJson, /<max-depth>|\[TRUNCATED:MAX_DEPTH\]/);
 });
 
 test("session ids cannot escape the observability data directory", async (t) => {
@@ -358,4 +495,26 @@ test("session ids cannot escape the observability data directory", async (t) => 
   const names = await readdir(dataDir);
   assert.equal(names.length, 1);
   assert.match(names[0], /^obs-turn\.[a-f0-9]{64}\.ndjson$/);
+});
+
+test("the lease and the trace export carry ArmorCodex's X-ArmorIQ-Client header", async (t) => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "armorcodex-obs-client-"));
+  const rolloutPath = path.join(dataDir, "rollout.jsonl");
+  const ingest = await startIngestServer();
+  t.after(async () => {
+    await ingest.close();
+    await rm(dataDir, { recursive: true, force: true });
+  });
+  const sessionId = randomUUID();
+  const config = obsConfig(dataDir, ingest.endpoint);
+  await appendFile(rolloutPath, `${JSON.stringify({ type: "event_msg", payload: { type: "task_started" } })}\n`, "utf8");
+
+  await observeHook("UserPromptSubmit", { session_id: sessionId, prompt: "Hello" }, null, config);
+  await observeHook("Stop", { session_id: sessionId, transcript_path: rolloutPath }, null, config);
+
+  const version = JSON.parse(await readFile(new URL("../plugins/armorcodex/package.json", import.meta.url), "utf8")).version;
+  assert.deepEqual([...new Set(ingest.clients)].sort(), [
+    `/observability/policy/lease armorcodex/${version}`,
+    `/v1/traces armorcodex/${version}`,
+  ]);
 });

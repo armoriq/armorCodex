@@ -1,17 +1,20 @@
 import assert from "node:assert/strict";
 import {
   chmodSync,
+  cpSync,
   existsSync,
   lstatSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import os, { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import test from "node:test";
 
 function stubTools(binDir, codexVersion = "codex-cli 0.162.0") {
@@ -24,10 +27,26 @@ function stubTools(binDir, codexVersion = "codex-cli 0.162.0") {
   }
 }
 
-function saveCodexLogin(home) {
-  const file = join(home, ".armoriq", "credentials.json");
-  mkdirSync(join(home, ".armoriq"), { recursive: true, mode: 0o700 });
-  writeFileSync(file, JSON.stringify({ apiKey: "ak_test_update" }), { mode: 0o600 });
+function saveCodexLogin(home, product = "armorcodex", backend = null) {
+  const requireSdk = createRequire(new URL("../plugins/armorcodex/package.json", import.meta.url));
+  const { saveLoginProfile } = requireSdk("@armoriq/sdk");
+  const build = requireSdk("@armoriq/sdk/dist/_build_env.js");
+  const real = os.homedir;
+  os.homedir = () => home;
+  syncBuiltinESMExports();
+  try {
+    saveLoginProfile({
+      backend: backend ?? build.ENDPOINTS[build.ARMORIQ_ENV].backend,
+      product,
+      apiKey: "ak_test_update",
+      email: "a@example.test",
+      userId: "user-a",
+      orgId: "org-a",
+    });
+  } finally {
+    os.homedir = real;
+    syncBuiltinESMExports();
+  }
 }
 
 function runInstaller(root, home, binDir, flag = "--update", env = {}) {
@@ -86,7 +105,7 @@ test("the installer finale prints the notice and claims it only when the ping is
       stubTools(binDir);
       writeFileSync(join(binDir, "git"), "#!/bin/sh\nexit 0\n");
       chmodSync(join(binDir, "git"), 0o755);
-      saveCodexLogin(home);
+      saveCodexLogin(home, "armorcodex", env.ARMORCODEX_BACKEND_ENDPOINT);
       if (settings !== undefined) {
         const file = join(home, ".armoriq/settings.json");
         writeFileSync(file, settings === "unreadable" ? "{}" : settings);
@@ -104,12 +123,12 @@ test("the installer finale prints the notice and claims it only when the ping is
       if (enabled) assert.equal(lstatSync(marker).mode & 0o777, 0o600);
       const { hooks } = JSON.parse(readFileSync(join(home, ".codex/hooks.json"), "utf8"));
       const commands = Object.values(hooks).flatMap((groups) => groups.flatMap((group) => group.hooks.map((hook) => hook.command)));
-      assert.deepEqual(commands, Array(6).fill(`node ${new URL("../plugins/armorcodex/scripts/bootstrap.mjs", import.meta.url).pathname} router`));
+      assert.deepEqual(commands, Array(7).fill(`node ${new URL("../plugins/armorcodex/scripts/bootstrap.mjs", import.meta.url).pathname} router`));
     });
   }
 });
 
-test("a normal update adds the Stop hook to an existing ArmorCodex hooks file", (t) => {
+test("a normal update adds the Stop and SessionEnd hooks to an existing ArmorCodex hooks file and leaves its other hooks unchanged", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "armorcodex-installer-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
 
@@ -145,26 +164,10 @@ test("a normal update adds the Stop hook to an existing ArmorCodex hooks file", 
   };
   writeFileSync(hooksPath, `${JSON.stringify(existingHooks, null, 2)}\n`);
 
-  for (const [name, body] of [
-    ["codex", "#!/bin/sh\necho 'codex-cli 0.142.0'\n"],
-    ["npm", "#!/bin/sh\nexit 0\n"],
-  ]) {
-    const path = join(binDir, name);
-    writeFileSync(path, body);
-    chmodSync(path, 0o755);
-  }
+  stubTools(binDir);
+  saveCodexLogin(home);
 
-  const installer = new URL("../install_armorcodex.sh", import.meta.url);
-  const result = spawnSync("bash", [installer.pathname, "--update"], {
-    cwd: root,
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      HOME: home,
-      PATH: `${binDir}${delimiter}${process.env.PATH}`,
-      NO_COLOR: "1",
-    },
-  });
+  const result = await runInstaller(root, home, binDir);
 
   assert.equal(result.status, 0, result.stderr || result.stdout);
   const updatedHooks = JSON.parse(readFileSync(hooksPath, "utf8"));
@@ -174,4 +177,590 @@ test("a normal update adds the Stop hook to an existing ArmorCodex hooks file", 
     updatedHooks.hooks.Stop[0].hooks[0].command,
     /armorcodex\/scripts\/bootstrap\.mjs router/i,
   );
+  assert.deepEqual(updatedHooks.hooks.SessionStart, existingHooks.hooks.SessionStart);
+  assert.match(
+    updatedHooks.hooks.SessionEnd[0].hooks[0].command,
+    /armorcodex\/scripts\/bootstrap\.mjs router/i,
+  );
+  assert.match(
+    result.stdout,
+    /added missing ArmorCodex UserPromptSubmit, PreToolUse, PermissionRequest, PostToolUse, Stop, SessionEnd hook\(s\)/,
+  );
+});
+
+test("an existing hooks.json with only another tool's hooks keeps them and gains all seven ArmorCodex hooks", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "armorcodex-other-hooks-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const binDir = join(root, "bin");
+  const hooksPath = join(home, ".codex", "hooks.json");
+  mkdirSync(join(home, ".codex"), { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  const other = [{ hooks: [{ type: "command", command: "/opt/other-tool/bridge --source codex" }] }];
+  writeFileSync(hooksPath, `${JSON.stringify({ hooks: { SessionStart: other, PostToolUse: other } }, null, 2)}\n`);
+  stubTools(binDir);
+  saveCodexLogin(home);
+
+  const result = await runInstaller(root, home, binDir);
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const { hooks } = JSON.parse(readFileSync(hooksPath, "utf8"));
+  const ours = (event) => (hooks[event] ?? []).filter((group) =>
+    group.hooks.some((hook) => /armorcodex\/scripts\/bootstrap\.mjs router$/i.test(hook.command)));
+  for (const event of ["SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "Stop", "SessionEnd"]) {
+    assert.equal(ours(event).length, 1, `${event} should have one ArmorCodex hook`);
+  }
+  assert.deepEqual(hooks.SessionStart[0], other[0]);
+  assert.deepEqual(hooks.PostToolUse[0], other[0]);
+  assert.doesNotMatch(result.stdout, /unrelated|--force-hooks/);
+
+  const uninstall = await runInstaller(root, home, binDir, "--uninstall");
+  assert.equal(uninstall.status, 0, uninstall.stderr || uninstall.stdout);
+  assert.deepEqual(JSON.parse(readFileSync(hooksPath, "utf8")), { hooks: { SessionStart: other, PostToolUse: other } });
+});
+
+test("install then uninstall leaves another tool's hooks.json byte-identical, whatever its indentation", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "armorcodex-foreign-bytes-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const binDir = join(root, "bin");
+  const hooksPath = join(home, ".codex", "hooks.json");
+  mkdirSync(join(home, ".codex"), { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  const superset = { type: "command", command: 'SUPERSET_AGENT_ID=codex "/opt/superset/hooks/notify.sh"' };
+  const pstack = { type: "command", command: "$HOME/.agents/hooks/pstack-reminder.sh" };
+  const foreign = JSON.stringify({
+    hooks: {
+      SessionStart: [{ hooks: [superset] }],
+      UserPromptSubmit: [{ hooks: [superset] }, { hooks: [pstack] }],
+      Stop: [{ hooks: [superset] }],
+    },
+  }, null, 4);
+  writeFileSync(hooksPath, foreign);
+  stubTools(binDir);
+  saveCodexLogin(home);
+
+  const install = await runInstaller(root, home, binDir);
+  assert.equal(install.status, 0, install.stderr || install.stdout);
+  const installed = readFileSync(hooksPath, "utf8");
+  assert.equal((installed.match(/bootstrap\.mjs router/g) ?? []).length, 7);
+  assert.match(installed, /^ {4}"hooks"/m);
+
+  const uninstall = await runInstaller(root, home, binDir, "--uninstall");
+  assert.equal(uninstall.status, 0, uninstall.stderr || uninstall.stdout);
+  assert.equal(readFileSync(hooksPath, "utf8"), foreign);
+});
+
+test("an update with an old-format credentials.json keeps using it", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "armorcodex-update-v1-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const binDir = join(root, "bin");
+  mkdirSync(join(home, ".armoriq"), { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  stubTools(binDir);
+  writeFileSync(
+    join(home, ".armoriq", "credentials.json"),
+    JSON.stringify({ apiKey: "ak_test_flat", product: "armorcodex", backend: "https://staging-api.armoriq.ai" }),
+  );
+
+  const result = await runInstaller(root, home, binDir);
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /ArmorIQ login for ArmorCodex found/);
+  assert.match(result.stdout, /ArmorCodex is up to date/);
+});
+
+test("an update with an armorcodex login the plugin loads does not prompt", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "armorcodex-update-v2-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const binDir = join(root, "bin");
+  mkdirSync(home, { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  stubTools(binDir);
+  saveCodexLogin(home);
+
+  const result = await runInstaller(root, home, binDir);
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /ArmorIQ login for ArmorCodex found/);
+  assert.doesNotMatch(result.stdout, /Connect your ArmorIQ account now|to authenticate/);
+  assert.match(result.stdout, /ArmorCodex is up to date/);
+});
+
+test("an environment key cannot skip login or appear in installer instructions", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "armorcodex-login-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const installer = readFileSync(new URL("../install_armorcodex.sh", import.meta.url), "utf8");
+  assert.match(connectStep(), /plugin_has_login\(\) \{[\s\S]*connect_to_armoriq\(\) \{/);
+  const result = spawnSync("bash", ["-c", `
+    section() { :; }
+    err() { printf '%s\\n' "$1"; }
+    ok() { printf '%s\\n' "$1"; }
+    is_promptable() { return 1; }
+    abort_install() { exit 17; }
+    PLUGIN_PATH="${new URL("../plugins/armorcodex", import.meta.url).pathname}"
+    ${connectStep()}
+    connect_to_armoriq
+  `], {
+    encoding: "utf8",
+    env: { PATH: process.env.PATH, HOME: root, ARMORIQ_API_KEY: "ignored-test-key" },
+  });
+  assert.equal(result.status, 17, result.stderr || result.stdout);
+  assert.match(result.stdout, /armoriq login --product armorcodex/);
+  assert.doesNotMatch(result.stdout, /credentials already present|ARMORIQ_API_KEY/);
+  assert.doesNotMatch(installer, /ARMORIQ_API_KEY/);
+});
+
+function connectStep() {
+  const installer = readFileSync(new URL("../install_armorcodex.sh", import.meta.url), "utf8");
+  const pick = (name) => installer.match(new RegExp(`${name}\\(\\) \\{[\\s\\S]*?\\n\\}\\n`))?.[0] ?? "";
+  return [pick("stop_without_login"), pick("plugin_backend"), pick("plugin_has_login"), pick("connect_to_armoriq")].join("\n");
+}
+
+function runConnect(home, { prompts = "is_promptable() { return 1; }", env = {} } = {}) {
+  return spawnSync("bash", ["-c", `
+    section() { :; }
+    err() { printf '%s\\n' "$1"; }
+    ok() { printf '%s\\n' "$1"; }
+    ${prompts}
+    abort_install() { exit 17; }
+    PLUGIN_PATH="${new URL("../plugins/armorcodex", import.meta.url).pathname}"
+    ${connectStep()}
+    connect_to_armoriq
+  `], { encoding: "utf8", env: { PATH: process.env.PATH, HOME: home, ...env } });
+}
+
+test("the installer logs in to the backend the plugin resolves, production unless ARMORIQ_ENV says otherwise", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "armorcodex-login-backend-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const binDir = join(root, "bin");
+  mkdirSync(binDir, { recursive: true });
+  writeFileSync(join(binDir, "armoriq"), "#!/bin/sh\necho \"login-args: $*\"\nexit 1\n");
+  chmodSync(join(binDir, "armoriq"), 0o755);
+  const prompts = "is_promptable() { return 0; }\nprompt_yes_no() { return 0; }";
+  const PATH = `${binDir}${delimiter}${process.env.PATH}`;
+  for (const [env, backend] of [
+    [{}, "https://api.armoriq.ai"],
+    [{ ARMORIQ_BACKEND_URL: "https://staging-api.armoriq.ai" }, "https://api.armoriq.ai"],
+    [{ ARMORIQ_ENV: "staging" }, "https://staging-api.armoriq.ai"],
+    [{ ARMORCODEX_BACKEND_ENDPOINT: "http://127.0.0.1:3000" }, "http://127.0.0.1:3000"],
+  ]) {
+    const result = runConnect(root, { prompts, env: { PATH, ...env } });
+    assert.equal(result.status, 17, result.stdout + result.stderr);
+    assert.match(result.stdout, new RegExp(`login-args: login --product armorcodex --backend ${backend}\\n`), JSON.stringify(env));
+  }
+});
+
+test("only an armorcodex login the plugin loads skips the installer's login", (t) => {
+  const requireSdk = createRequire(new URL("../plugins/armorcodex/package.json", import.meta.url));
+  const { saveLoginProfile } = requireSdk("@armoriq/sdk");
+  const build = requireSdk("@armoriq/sdk/dist/_build_env.js");
+  const backend = build.ENDPOINTS[build.ARMORIQ_ENV].backend;
+  const homes = {};
+  for (const name of ["claudeOnly", "v1", "codex"]) {
+    homes[name] = mkdtempSync(join(tmpdir(), `armorcodex-connect-${name}-`));
+    t.after(() => rmSync(homes[name], { recursive: true, force: true }));
+  }
+  const save = (home, product) => {
+    const real = os.homedir;
+    os.homedir = () => home;
+    syncBuiltinESMExports();
+    try {
+      saveLoginProfile({ backend, product, apiKey: "ak_test_connect", email: "a@example.test", userId: "user-a", orgId: "org-a" });
+    } finally {
+      os.homedir = real;
+      syncBuiltinESMExports();
+    }
+  };
+  save(homes.claudeOnly, "armorclaude");
+  mkdirSync(join(homes.v1, ".armoriq"), { recursive: true });
+  writeFileSync(join(homes.v1, ".armoriq", "credentials.json"), JSON.stringify({ apiKey: "ak_test_v1" }));
+  save(homes.codex, "armorcodex");
+
+  const claudeOnly = runConnect(homes.claudeOnly);
+  assert.equal(claudeOnly.status, 17, claudeOnly.stdout + claudeOnly.stderr);
+  assert.match(claudeOnly.stdout, /armoriq login --product armorcodex/);
+  assert.doesNotMatch(claudeOnly.stdout, /already present|login for ArmorCodex found|connected/);
+  for (const name of ["v1", "codex"]) {
+    const result = runConnect(homes[name]);
+    assert.equal(result.status, 0, `${name}: ${result.stdout}${result.stderr}`);
+    assert.match(result.stdout, /login for ArmorCodex found/, name);
+  }
+});
+
+for (const [version, message] of [
+  ["codex-cli 0.161.0", /Codex 0\.162 or newer is required \(found codex-cli 0\.161\.0\)/],
+  ["codex-cli dev-build", /could not read the Codex version \(got: codex-cli dev-build\)/],
+]) {
+  test(`the installer stops before changing anything when codex --version prints ${version}`, async (t) => {
+    const root = mkdtempSync(join(tmpdir(), "armorcodex-codex-min-"));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const home = join(root, "home");
+    const binDir = join(root, "bin");
+    mkdirSync(home, { recursive: true });
+    mkdirSync(binDir, { recursive: true });
+    stubTools(binDir, version);
+
+    const result = await runInstaller(root, home, binDir);
+
+    assert.notEqual(result.status, 0, result.stdout);
+    assert.match(result.stderr, message);
+    assert.doesNotMatch(result.stdout, /prerequisites OK/);
+    assert.deepEqual(readdirSync(home), []);
+  });
+}
+
+test("the installer accepts a Codex major version above 0", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "armorcodex-codex-min-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const binDir = join(root, "bin");
+  mkdirSync(home, { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  stubTools(binDir, "codex-cli 1.0.0");
+
+  const result = await runInstaller(root, home, binDir);
+
+  assert.match(result.stdout, /prerequisites OK \(codex-cli 1\.0\.0/);
+});
+
+test("re-running the installer upgrades an SDK left behind in node_modules", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "armorcodex-stale-sdk-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const binDir = join(root, "bin");
+  const checkout = join(root, "checkout");
+  const plugin = join(checkout, "plugins", "armorcodex");
+  mkdirSync(home, { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  mkdirSync(plugin, { recursive: true });
+  const source = new URL("../plugins/armorcodex/", import.meta.url).pathname;
+  cpSync(join(source, "scripts"), join(plugin, "scripts"), { recursive: true });
+  for (const name of ["package.json", "package-lock.json"]) cpSync(join(source, name), join(plugin, name));
+  cpSync(new URL("../install_armorcodex.sh", import.meta.url).pathname, join(checkout, "install_armorcodex.sh"));
+  writeFileSync(join(binDir, "codex"), "#!/bin/sh\necho 'codex-cli 0.162.0'\n");
+  chmodSync(join(binDir, "codex"), 0o755);
+
+  const env = {
+    ...process.env,
+    HOME: home,
+    PATH: `${binDir}${delimiter}${process.env.PATH}`,
+    NO_COLOR: "1",
+    npm_config_cache: process.env.npm_config_cache || join(os.homedir(), ".npm"),
+    npm_config_prefix: join(root, "npm-global"),
+  };
+  const sdkVersion = () =>
+    JSON.parse(readFileSync(join(plugin, "node_modules", "@armoriq", "sdk", "package.json"), "utf8")).version;
+  const locked = JSON.parse(readFileSync(join(plugin, "package-lock.json"), "utf8"))
+    .packages["node_modules/@armoriq/sdk"].version;
+  const stale = "0.8.23";
+  assert.notEqual(locked, stale);
+
+  const seed = spawnSync("npm", ["install", "--omit=dev", "--no-save", "--no-audit", "--no-fund", `@armoriq/sdk@${stale}`], {
+    cwd: plugin,
+    encoding: "utf8",
+    env,
+  });
+  assert.equal(seed.status, 0, seed.stderr);
+  assert.equal(sdkVersion(), stale);
+  saveCodexLogin(home);
+
+  const result = spawnSync("bash", [join(checkout, "install_armorcodex.sh"), "--force-install"], {
+    cwd: root,
+    encoding: "utf8",
+    env,
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /installing LOCAL checkout/);
+  assert.match(result.stdout, /npm dependencies installed/);
+  assert.equal(sdkVersion(), locked);
+});
+
+test("a curl re-run over an install left at an old commit moves it to the requested ref and its SDK", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "armorcodex-curl-rerun-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const binDir = join(root, "bin");
+  const upstream = join(root, "upstream");
+  const upstreamPlugin = join(upstream, "plugins", "armorcodex");
+  const installHome = join(home, ".armoriq", "armorCodex");
+  mkdirSync(home, { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  mkdirSync(upstreamPlugin, { recursive: true });
+  const source = new URL("../plugins/armorcodex/", import.meta.url).pathname;
+  const installer = new URL("../install_armorcodex.sh", import.meta.url).pathname;
+  cpSync(join(source, "scripts"), join(upstreamPlugin, "scripts"), { recursive: true });
+  cpSync(installer, join(upstream, "install_armorcodex.sh"));
+  writeFileSync(join(binDir, "codex"), "#!/bin/sh\necho 'codex-cli 0.162.0'\n");
+  chmodSync(join(binDir, "codex"), 0o755);
+
+  const env = {
+    ...process.env,
+    HOME: home,
+    PATH: `${binDir}${delimiter}${process.env.PATH}`,
+    NO_COLOR: "1",
+    npm_config_cache: process.env.npm_config_cache || join(os.homedir(), ".npm"),
+    npm_config_prefix: join(root, "npm-global"),
+    ARMORCODEX_GIT_URL: upstream,
+    ARMORCODEX_GIT_REF: "main",
+  };
+  const run = (cmd, args, cwd) => {
+    const result = spawnSync(cmd, args, { cwd, encoding: "utf8", env });
+    assert.equal(result.status, 0, `${cmd} ${args.join(" ")}: ${result.stderr}`);
+    return result.stdout.trim();
+  };
+  const git = (args, cwd = upstream) =>
+    run("git", ["-c", "user.name=t", "-c", "user.email=t@example.test", "-c", "commit.gpgsign=false", ...args], cwd);
+  const stale = "0.8.23";
+
+  git(["init", "--quiet", "-b", "main"]);
+  const oldPackage = JSON.parse(readFileSync(join(source, "package.json"), "utf8"));
+  oldPackage.dependencies["@armoriq/sdk"] = stale;
+  writeFileSync(join(upstreamPlugin, "package.json"), JSON.stringify(oldPackage, null, 2));
+  run("npm", ["install", "--package-lock-only", "--no-audit", "--no-fund"], upstreamPlugin);
+  git(["add", "-A"]);
+  git(["commit", "--quiet", "-m", "old"]);
+  const oldCommit = git(["rev-parse", "HEAD"]);
+
+  for (const name of ["package.json", "package-lock.json"]) cpSync(join(source, name), join(upstreamPlugin, name));
+  git(["commit", "--quiet", "-am", "new"]);
+  const newCommit = git(["rev-parse", "HEAD"]);
+
+  mkdirSync(join(home, ".armoriq"), { recursive: true });
+  git(["clone", "--quiet", upstream, installHome], root);
+  git(["reset", "--hard", "--quiet", oldCommit], installHome);
+  saveCodexLogin(home);
+
+  const result = spawnSync("bash", ["-s", "--", "--force-install"], {
+    cwd: root,
+    encoding: "utf8",
+    env,
+    input: readFileSync(installer, "utf8"),
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.doesNotMatch(result.stdout, /installing LOCAL checkout/);
+  assert.equal(git(["rev-parse", "HEAD"], installHome), newCommit);
+  const sdk = JSON.parse(
+    readFileSync(join(installHome, "plugins", "armorcodex", "node_modules", "@armoriq", "sdk", "package.json"), "utf8"),
+  );
+  const locked = JSON.parse(readFileSync(join(source, "package-lock.json"), "utf8"))
+    .packages["node_modules/@armoriq/sdk"].version;
+  assert.notEqual(locked, stale);
+  assert.equal(sdk.version, locked);
+});
+
+function git(cwd, ...args) {
+  const result = spawnSync("git", args, { cwd, encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout.trim();
+}
+
+function pluginRepo(root) {
+  const work = join(root, "origin-work");
+  mkdirSync(join(work, "plugins", "armorcodex", "scripts", "lib"), { recursive: true });
+  git(root, "init", "--quiet", "--initial-branch=dev", work);
+  git(work, "config", "user.email", "test@example.test");
+  git(work, "config", "user.name", "test");
+  git(work, "config", "commit.gpgsign", "false");
+  writeFileSync(join(work, "plugins", "armorcodex", "scripts", "bootstrap.mjs"), "");
+  writeFileSync(
+    join(work, "plugins", "armorcodex", "scripts", "lib", "config.mjs"),
+    'export const loadConfig = () => (process.env.TEST_NO_LOGIN ? {} : { apiKey: "ak_test_update" });\n'
+  );
+  const commit = (version) => {
+    writeFileSync(join(work, "plugins", "armorcodex", "package.json"), JSON.stringify({ name: "armorcodex", version }));
+    git(work, "add", "-A");
+    git(work, "commit", "--quiet", "-m", version);
+    return git(work, "rev-parse", "HEAD");
+  };
+  return { work, commit };
+}
+
+function runPipedInstaller(root, home, binDir, env) {
+  const script = readFileSync(new URL("../install_armorcodex.sh", import.meta.url));
+  return spawnSync("bash", ["-s", "--", "--update"], {
+    cwd: root,
+    input: script,
+    encoding: "utf8",
+    env: { ...process.env, HOME: home, PATH: `${binDir}${delimiter}${process.env.PATH}`, NO_COLOR: "1", ...env },
+  });
+}
+
+
+test("the dev command's downloaded installer moves an existing dev install to the branch's latest commit", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "armorcodex-wrapper-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const binDir = join(root, "bin");
+  mkdirSync(join(home, ".codex"), { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  stubTools(binDir);
+  saveCodexLogin(home);
+  const origin = pluginRepo(root);
+  origin.commit("0.3.4");
+  const installHome = join(home, ".armoriq", "armorCodex");
+  git(root, "clone", "--quiet", "--depth", "1", "--branch", "dev", `file://${origin.work}`, installHome);
+  const latest = origin.commit("0.3.5");
+  const download = mkdtempSync(join(root, "download-"));
+  const installer = join(download, "install_armorcodex.sh");
+  writeFileSync(installer, readFileSync(new URL("../install_armorcodex.sh", import.meta.url)));
+
+  const result = spawnSync("bash", [installer], {
+    cwd: root,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      HOME: home,
+      PATH: `${binDir}${delimiter}${process.env.PATH}`,
+      ARMORCODEX_GIT_URL: origin.work,
+      ARMORCODEX_GIT_REF: "dev",
+      ARMORCODEX_INSTALL_HOME: installHome,
+    },
+  });
+
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(git(installHome, "rev-parse", "HEAD"), latest);
+  assert.doesNotMatch(result.stdout, /installing LOCAL checkout/);
+});
+
+for (const [installed, requested, command] of [
+  ["main", "dev", "install_armorcodex.sh"],
+  ["dev", "main", "install_armorcodex_dev.sh"],
+]) {
+  test(`the ${requested === "main" ? "stable" : requested} update command refuses an install on ${installed} and changes nothing`, (t) => {
+    const root = mkdtempSync(join(tmpdir(), "armorcodex-channel-"));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const home = join(root, "home");
+    const binDir = join(root, "bin");
+    mkdirSync(join(home, ".codex"), { recursive: true });
+    mkdirSync(binDir, { recursive: true });
+    stubTools(binDir);
+    saveCodexLogin(home);
+    const origin = pluginRepo(root);
+    origin.commit("0.3.4");
+    git(origin.work, "branch", "main");
+    const installHome = join(home, ".armoriq", "armorCodex");
+    git(root, "clone", "--quiet", "--depth", "1", "--branch", installed, `file://${origin.work}`, installHome);
+    const before = git(installHome, "rev-parse", "HEAD");
+    origin.commit("0.3.5");
+    git(origin.work, "branch", "-f", "main");
+
+    const result = runPipedInstaller(root, home, binDir, {
+      ARMORCODEX_GIT_URL: origin.work,
+      ARMORCODEX_GIT_REF: requested,
+      ARMORCODEX_INSTALL_HOME: installHome,
+    });
+
+    const out = (result.stdout + result.stderr).replace(/\x1b\[[0-9;]*m/g, "");
+    assert.equal(result.status, 1, out);
+    assert.match(out, new RegExp(`is on ${installed}, not ${requested}`));
+    assert.match(out, new RegExp(command.replace(".", "\\.")));
+    assert.equal(git(installHome, "rev-parse", "HEAD"), before);
+    assert.deepEqual(readdirSync(join(home, ".codex")), []);
+  });
+}
+
+function runInstallerWithPrompts(root, home, binDir, prompts, env) {
+  const script = readFileSync(new URL("../install_armorcodex.sh", import.meta.url), "utf8")
+    .replace(/\nmain "\$@"\n$/, `\n${prompts}\nmain "$@"\n`);
+  const path = join(root, "install.sh");
+  writeFileSync(path, script);
+  return spawnSync("bash", [path], {
+    cwd: root,
+    encoding: "utf8",
+    env: { ...process.env, HOME: home, PATH: `${binDir}${delimiter}${process.env.PATH}`, NO_COLOR: "1", ...env },
+  });
+}
+
+function installed(home, installHome) {
+  const codex = join(home, ".codex");
+  return {
+    head: git(installHome, "rev-parse", "HEAD"),
+    config: readFileSync(join(codex, "config.toml"), "utf8"),
+    hooks: readFileSync(join(codex, "hooks.json"), "utf8"),
+  };
+}
+
+for (const [name, prompts, failingLogin] of [
+  ["there is no terminal", "is_promptable() { return 1; }", false],
+  ["the user declines the login", "is_promptable() { return 0; }\nprompt_yes_no() { return 1; }", false],
+  ["the login fails", "is_promptable() { return 0; }\nprompt_yes_no() { return 0; }", true],
+]) {
+  test(`an update without a usable login keeps the existing install when ${name}`, (t) => {
+    const root = mkdtempSync(join(tmpdir(), "armorcodex-keep-"));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const home = join(root, "home");
+    const binDir = join(root, "bin");
+    mkdirSync(join(home, ".codex"), { recursive: true });
+    mkdirSync(binDir, { recursive: true });
+    stubTools(binDir);
+    writeFileSync(join(binDir, "armoriq"), `#!/bin/sh\necho login-called\nexit ${failingLogin ? 1 : 0}\n`);
+    chmodSync(join(binDir, "armoriq"), 0o755);
+    const origin = pluginRepo(root);
+    origin.commit("0.3.4");
+    const installHome = join(home, ".armoriq", "armorCodex");
+    const env = { ARMORCODEX_GIT_URL: origin.work, ARMORCODEX_GIT_REF: "dev", ARMORCODEX_INSTALL_HOME: installHome };
+
+    const first = runInstallerWithPrompts(root, home, binDir, "", env);
+    assert.equal(first.status, 0, first.stdout + first.stderr);
+    const latest = origin.commit("0.3.5");
+
+    const result = runInstallerWithPrompts(root, home, binDir, prompts, { ...env, TEST_NO_LOGIN: "1" });
+
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.doesNotMatch(result.stdout, /rolling back|removed plugin source|removed managed block/);
+    assert.match(result.stdout.replace(/\x1b\[[0-9;]*m/g, ""), /Run armoriq login --product armorcodex --backend https:\/\/api\.armoriq\.ai, then start a new Codex session/);
+    assert.equal(result.stdout.includes("login-called"), failingLogin);
+    const after = installed(home, installHome);
+    assert.equal(after.head, latest);
+    assert.match(after.config, /ArmorCodex managed block/);
+    assert.equal(after.hooks.split(`${installHome}/plugins/armorcodex/scripts/bootstrap.mjs`).length - 1, 7);
+  });
+}
+
+test("a fresh install without a usable login still rolls back", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "armorcodex-fresh-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const binDir = join(root, "bin");
+  mkdirSync(join(home, ".codex"), { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  stubTools(binDir);
+  const origin = pluginRepo(root);
+  origin.commit("0.3.5");
+  const installHome = join(home, ".armoriq", "armorCodex");
+
+  const result = runInstallerWithPrompts(root, home, binDir, "is_promptable() { return 1; }", {
+    ARMORCODEX_GIT_URL: origin.work,
+    ARMORCODEX_GIT_REF: "dev",
+    ARMORCODEX_INSTALL_HOME: installHome,
+    TEST_NO_LOGIN: "1",
+  });
+
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stdout, /removed plugin source/);
+  assert.equal(existsSync(installHome), false);
+  assert.doesNotMatch(readFileSync(join(home, ".codex", "config.toml"), "utf8"), /ArmorCodex managed block/);
+});
+
+test("a local checkout run without a login leaves ARMORCODEX_INSTALL_HOME alone", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "armorcodex-local-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const binDir = join(root, "bin");
+  const installHome = join(home, ".armoriq", "armorCodex");
+  mkdirSync(installHome, { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  stubTools(binDir);
+  writeFileSync(join(installHome, "keep.txt"), "not used by a local checkout run");
+
+  const result = await runInstaller(root, home, binDir, "--force-install");
+
+  assert.notEqual(result.status, 0, result.stdout);
+  assert.match(result.stdout, /rolling back/);
+  assert.equal(readFileSync(join(installHome, "keep.txt"), "utf8"), "not used by a local checkout run");
 });

@@ -8,10 +8,6 @@ import {
 } from "../plugins/armorcodex/scripts/lib/common.mjs";
 import { evaluatePolicy, parsePolicyTextCommand } from "../plugins/armorcodex/scripts/lib/policy.mjs";
 
-// ---------------------------------------------------------------------------
-// matchesScalar — operator coverage
-// ---------------------------------------------------------------------------
-
 test("matchesScalar plain literal exact", () => {
   assert.equal(matchesScalar("ls /etc", "ls /etc"), true);
   assert.equal(matchesScalar("ls /etc", "ls /tmp"), false);
@@ -35,17 +31,14 @@ test("matchesScalar $matches regex", () => {
 });
 
 test("matchesScalar $pathContains canonicalizes ~/ and $HOME", () => {
-  // Rule mentions ~/.ssh, actual path is /Users/foo/.ssh
   assert.equal(
     matchesScalar({ $pathContains: "~/.ssh" }, "/Users/alice/.ssh/id_rsa"),
     true
   );
-  // /home/<user> form too
   assert.equal(
     matchesScalar({ $pathContains: "~/.ssh" }, "/home/bob/.ssh/known_hosts"),
     true
   );
-  // Doesn't match unrelated path
   assert.equal(
     matchesScalar({ $pathContains: "~/.ssh" }, "/etc/hosts"),
     false
@@ -67,10 +60,6 @@ test("isMatcherSpec recognizes operator objects", () => {
   assert.equal(isMatcherSpec({}), false);
 });
 
-// ---------------------------------------------------------------------------
-// matchParams — recursive, surfaces missingKeys
-// ---------------------------------------------------------------------------
-
 test("matchParams plain literal exact (back-compat)", () => {
   const result = matchParams({ command: "ls" }, { command: "ls" });
   assert.equal(result.matched, true);
@@ -87,7 +76,7 @@ test("matchParams operator on nested key", () => {
 test("matchParams reports missing keys (rule key not in tool input)", () => {
   const result = matchParams(
     { pathContains: "/.ssh" },
-    { command: "ls" } // no pathContains key
+    { command: "ls" }
   );
   assert.equal(result.matched, false);
   assert.deepEqual(result.missingKeys, ["pathContains"]);
@@ -101,10 +90,6 @@ test("matchParams missing keys for operator-spec values too", () => {
   assert.equal(result.matched, false);
   assert.deepEqual(result.missingKeys, ["file_path"]);
 });
-
-// ---------------------------------------------------------------------------
-// matchesAnyStringField — wildcard scan over input
-// ---------------------------------------------------------------------------
 
 test("matchesAnyStringField finds .ssh inside any value", () => {
   assert.equal(
@@ -130,10 +115,6 @@ test("matchesAnyStringField with $pathContains canonicalizes", () => {
     true
   );
 });
-
-// ---------------------------------------------------------------------------
-// evaluatePolicy — end-to-end with operator-based rules
-// ---------------------------------------------------------------------------
 
 test("evaluatePolicy denies via $contains on Bash command", () => {
   const decision = evaluatePolicy({
@@ -206,7 +187,7 @@ test("evaluatePolicy surfaces missingKeys warning when rule references absent ke
     toolName: "Bash",
     toolParams: { command: "ls ~/.ssh" }
   });
-  assert.equal(decision.allowed, true); // rule didn't fire — Bash has no pathContains key
+  assert.equal(decision.allowed, true);
   assert.ok(Array.isArray(decision.warnings));
   assert.ok(
     decision.warnings.some((w) => w.ruleId === "wrong-shape" && w.missingKeys.includes("pathContains")),
@@ -225,10 +206,6 @@ test("evaluatePolicy still passes back-compat exact-match rules", () => {
   assert.equal(decision.allowed, false);
   assert.match(decision.reason, /exact/);
 });
-
-// ---------------------------------------------------------------------------
-// parsePolicyTextCommand — auto-attach anyParam matcher for path intents
-// ---------------------------------------------------------------------------
 
 test("parsePolicyTextCommand attaches anyParam for ~/.ssh intent", () => {
   const cmd = parsePolicyTextCommand("Policy new: deny access to ~/.ssh", {
@@ -270,10 +247,6 @@ test("parsePolicyTextCommand still works for plain tool deny (no anyParam)", () 
   assert.equal(rule.anyParam, undefined);
 });
 
-// ---------------------------------------------------------------------------
-// End-to-end: text command → rule → blocks the actual tool call
-// ---------------------------------------------------------------------------
-
 test("E2E: 'block ~/.ssh' rule actually blocks Bash AND Glob AND Read", () => {
   const cmd = parsePolicyTextCommand("Policy new: block ~/.ssh", {
     version: 0,
@@ -281,7 +254,6 @@ test("E2E: 'block ~/.ssh' rule actually blocks Bash AND Glob AND Read", () => {
   });
   const rules = cmd.update.rules;
 
-  // Bash with command that touches ~/.ssh
   const bashDecision = evaluatePolicy({
     policy: { rules },
     toolName: "Bash",
@@ -289,7 +261,6 @@ test("E2E: 'block ~/.ssh' rule actually blocks Bash AND Glob AND Read", () => {
   });
   assert.equal(bashDecision.allowed, false, "Bash should be blocked");
 
-  // Glob targeting the .ssh directory
   const globDecision = evaluatePolicy({
     policy: { rules },
     toolName: "Glob",
@@ -297,7 +268,6 @@ test("E2E: 'block ~/.ssh' rule actually blocks Bash AND Glob AND Read", () => {
   });
   assert.equal(globDecision.allowed, false, "Glob should be blocked");
 
-  // Read on a file inside .ssh
   const readDecision = evaluatePolicy({
     policy: { rules },
     toolName: "Read",
@@ -305,7 +275,6 @@ test("E2E: 'block ~/.ssh' rule actually blocks Bash AND Glob AND Read", () => {
   });
   assert.equal(readDecision.allowed, false, "Read should be blocked");
 
-  // Unrelated tool call should NOT be blocked
   const okDecision = evaluatePolicy({
     policy: { rules },
     toolName: "Read",

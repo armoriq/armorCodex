@@ -1,13 +1,5 @@
-/**
- * Shared intent plan schema — single source of truth used by:
- *  - register_intent_plan MCP tool (validates Codex's input)
- *  - register_intent_plan inputSchema (model sees this when invoking the tool)
- *
- * Codex has no ExitPlanMode-equivalent event, so unlike ArmorClaude there is
- * no plan-file extraction path on Codex.
- */
-
 import { z } from "zod";
+import { codexHookName } from "./common.mjs";
 
 const PLAN_STEP_TARGET = z.object({
   action: z.string().min(1).describe("Tool name (e.g. Read, Edit, Bash, mcp__server__tool)"),
@@ -22,13 +14,6 @@ const PLAN_STEP_TARGET = z.object({
     .optional()
 });
 
-// Tolerate the near-miss shapes models commonly emit so a slightly-off plan
-// doesn't get rejected at the MCP boundary and force a re-registration
-// round-trip (observed: gpt-5.x sending `{tool, rationale}` instead of
-// `{action, description}`). We normalize before validation:
-//   `tool`                     -> action   (mirrors the tool-call field name)
-//   `rationale` / `reason` / `why` -> description
-//   top-level `inputs`         -> metadata.inputs
 export const PLAN_STEP_SCHEMA = z.preprocess((val) => {
   if (!val || typeof val !== "object" || Array.isArray(val)) {
     return val;
@@ -56,10 +41,6 @@ export const INTENT_PLAN_ZOD = z.object({
     .describe("Ordered list of tool calls the agent intends to make")
 });
 
-/**
- * Human-readable format string injected into Codex's context so it knows
- * exactly what shape to produce.
- */
 export const INTENT_PLAN_FORMAT = `{
   "goal": "<one-line summary of the task>",
   "steps": [
@@ -71,23 +52,18 @@ export const INTENT_PLAN_FORMAT = `{
   ]
 }`;
 
-/**
- * Normalize a validated plan into the internal format used by requestIntent()
- * and the plan enforcement pipeline.
- */
 export function normalizeIntentPlan(parsed) {
   return {
-    steps: parsed.steps.map((s) => ({
-      // Both `action` and `tool` are populated to match the backend's
-      // CSRG/policy enforcer expectations: the SDK's invoke() does the
-      // same (sets tool: action). The backend hashes `step.tool` for
-      // policy paths like /steps/[i]/tool.
-      action: s.action,
-      tool: s.action,
-      mcp: "codex",
-      description: s.description || "",
-      metadata: s.metadata || {}
-    })),
+    steps: parsed.steps.map((s) => {
+      const hookName = codexHookName(s.action);
+      return {
+        action: hookName,
+        tool: hookName,
+        mcp: "codex",
+        description: s.description || "",
+        metadata: hookName === s.action ? s.metadata || {} : { ...s.metadata, declaredAction: s.action }
+      };
+    }),
     metadata: {
       goal: parsed.goal,
       source: "codex-registered"
