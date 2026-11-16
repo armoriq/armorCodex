@@ -11,6 +11,10 @@ import {
   handlePostToolUseFailure
 } from "../plugins/armorcodex/scripts/lib/engine.mjs";
 
+// These cover session bookkeeping, not updates. Without the opt-out every
+// SessionStart below makes a live api.github.com request.
+process.env.ARMORCODEX_NO_AUTO_UPDATE = "1";
+
 function buildConfig(tmpDir, overrides = {}) {
   return {
     mode: "enforce",
