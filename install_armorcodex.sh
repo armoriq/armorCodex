@@ -585,9 +585,6 @@ install_npm_deps() {
   popd >/dev/null
 }
 
-# Pinned, not @latest: the CLI writes ~/.armoriq/credentials.json, and a float
-# onto a line that writes a format this plugin release cannot read is what took
-# credentials down for ten days.
 install_armoriq_cli() {
   info "installing ArmorIQ CLI ${B}(@armoriq/sdk-dev)${N}"
   if npm install -g @armoriq/sdk-dev@latest --silent --no-audit --no-fund >/dev/null 2>&1; then
