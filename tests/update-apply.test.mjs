@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,6 +15,7 @@ import { delimiter, join } from "node:path";
 import test from "node:test";
 import { handleSessionStart } from "../plugins/armorcodex/scripts/lib/engine.mjs";
 import {
+  acquireSwapLock,
   autoUpdate,
   inspectStagedTree,
   readSdkCliSpec,
@@ -454,7 +456,7 @@ test("SessionStart returns normally when the install path is gone entirely", asy
   );
 
   assert.equal(output.hookSpecificOutput.additionalContext, "ArmorCodex active (ENFORCING, intent=required)");
-  assert.match(output.systemMessage, /ArmorCodex v0\.4\.0 is available/);
+  assert.equal(output.systemMessage, undefined, "a tree that is not a release checkout gets no notice");
 });
 
 test("autoUpdate never stages or swaps a developer checkout run in place", async (t) => {
@@ -468,11 +470,10 @@ test("autoUpdate never stages or swaps a developer checkout run in place", async
 
   await stageUpdate({ installHome, tag: "v0.4.0", gitUrl: `file://${repo}`, env: withPath(binDir) });
 
-  const result = await autoUpdate(config, {
-    installHome,
-    liveRoot: join(root, "somewhere", "else"),
-    env: withPath(binDir)
-  });
+  const checkout = join(root, "somewhere", "else");
+  execFileSync("git", ["clone", "--quiet", `file://${repo}`, checkout], { env: { ...process.env, ...GIT_ENV } });
+
+  const result = await autoUpdate(config, { installHome, liveRoot: checkout, env: withPath(binDir) });
 
   assert.equal(result.swapped, false);
   assert.equal(result.reason, "not-managed");
@@ -481,11 +482,15 @@ test("autoUpdate never stages or swaps a developer checkout run in place", async
   assert.match(result.notice, /ArmorCodex v0\.4\.0 is available/);
 });
 
-test("a dev-channel install is neither told about nor moved onto a stable release", async (t) => {
+for (const branch of ["dev", "my-feature"]) {
+test(`an install on ${branch} is neither told about nor moved onto a release`, async (t) => {
   const root = scratch(t, "dev-channel");
   const repo = originRepo(root, [{ version: "0.3.3" }, { version: "0.4.0" }]);
   const installHome = liveInstall(root, repo, "0.3.3");
-  git(installHome, "checkout", "--quiet", "-b", "dev");
+  git(installHome, "checkout", "--quiet", "-b", branch);
+  writeFileSync(join(installHome, "MINE.md"), "unpushed work\n");
+  git(installHome, "add", "MINE.md");
+  git(installHome, "commit", "--quiet", "-m", "unpushed");
   const binDir = stubBin(root);
   const paths = stagePaths(installHome);
   const config = configFor(t, "0.3.3");
@@ -495,11 +500,70 @@ test("a dev-channel install is neither told about nor moved onto a stable releas
 
   const result = await autoUpdate(config, { installHome, liveRoot: installHome, env: withPath(binDir) });
 
-  assert.equal(result.reason, "dev-channel");
+  assert.equal(result.reason, "not-release-channel");
   assert.equal(result.notice, "");
   assert.equal(treeVersion(installHome), "0.3.3");
-  assert.equal(git(installHome, "rev-parse", "--abbrev-ref", "HEAD"), "dev");
+  assert.equal(git(installHome, "rev-parse", "--abbrev-ref", "HEAD"), branch);
+  assert.ok(existsSync(join(installHome, "MINE.md")), "the owner's commit stays in place");
   assert.equal(treeVersion(paths.staged), "0.4.0", "the staged tree is not swapped in");
+});
+}
+
+test("a second session swapping at the same time keeps the first one's .previous", async (t) => {
+  const root = scratch(t, "concurrent");
+  const repo = originRepo(root, [{ version: "0.3.3" }, { version: "0.4.0" }]);
+  const installHome = liveInstall(root, repo, "0.3.3");
+  const binDir = stubBin(root);
+  const paths = stagePaths(installHome);
+  await stageUpdate({ installHome, tag: "v0.4.0", gitUrl: `file://${repo}`, env: withPath(binDir) });
+
+  const release = acquireSwapLock(paths.lock);
+  assert.ok(release);
+  assert.equal(swapStagedUpdate({ installHome, running: "0.3.3", env: withPath(binDir) }).reason, "in-progress");
+  release();
+
+  const first = swapStagedUpdate({ installHome, running: "0.3.3", env: withPath(binDir) });
+  const second = swapStagedUpdate({ installHome, running: "0.3.3", env: withPath(binDir) });
+  assert.equal(first.swapped, true);
+  assert.equal(second.swapped, false);
+  assert.equal(treeVersion(installHome), "0.4.0");
+  assert.equal(treeVersion(paths.previous), "0.3.3", "the rollback copy survives");
+  assert.equal(existsSync(paths.lock), false);
+});
+
+test("a staged tree carries the marker bootstrap needs to skip a reinstall", async (t) => {
+  const root = scratch(t, "installed-marker");
+  const repo = originRepo(root, [{ version: "0.3.3" }, { version: "0.4.0" }]);
+  const installHome = liveInstall(root, repo, "0.3.3");
+  const binDir = stubBin(root);
+  const paths = stagePaths(installHome);
+  await stageUpdate({ installHome, tag: "v0.4.0", gitUrl: `file://${repo}`, env: withPath(binDir) });
+
+  assert.equal(
+    readFileSync(join(paths.staged, "plugins", "armorcodex", "node_modules", ".armorcodex-installed"), "utf8"),
+    "0.4.0"
+  );
+});
+
+test("an install reached through a symlinked path still swaps", async (t) => {
+  const root = scratch(t, "symlink");
+  const repo = originRepo(root, [{ version: "0.3.3" }, { version: "0.4.0" }]);
+  const installHome = liveInstall(root, repo, "0.3.3");
+  const binDir = stubBin(root);
+  const link = join(root, "linked");
+  symlinkSync(join(root, "install"), link);
+  const config = configFor(t, "0.3.3");
+  freshCheck(config, "v0.4.0");
+  await stageUpdate({ installHome, tag: "v0.4.0", gitUrl: `file://${repo}`, env: withPath(binDir) });
+
+  const result = await autoUpdate(config, {
+    installHome,
+    liveRoot: join(link, "armorCodex"),
+    env: withPath(binDir)
+  });
+
+  assert.equal(result.swapped, true, result.reason);
+  assert.equal(treeVersion(installHome), "0.4.0");
 });
 
 test("a staged tree missing any dependency its package.json declares is not eligible", async (t) => {

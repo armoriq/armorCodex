@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -48,7 +48,8 @@ export function stagePaths(installHome) {
     live: installHome,
     staged: `${installHome}.staged`,
     staging: `${installHome}.staging`,
-    previous: `${installHome}.previous`
+    previous: `${installHome}.previous`,
+    lock: `${installHome}.swap-lock`
   };
 }
 
@@ -92,12 +93,60 @@ export function inspectStagedTree(staged) {
   return required.every((file) => existsSync(file)) ? marker : null;
 }
 
-export function isDevChannel(root) {
+/**
+ * Releases are cut from main, so only a checkout of a release tag (detached)
+ * or of main follows them. dev and any other branch, which may carry the
+ * owner's own commits, are never told about or moved onto a release.
+ */
+export function followsReleases(root) {
   try {
-    return readFileSync(path.join(root, ".git", "HEAD"), "utf8").trim() === "ref: refs/heads/dev";
+    const head = readFileSync(path.join(root, ".git", "HEAD"), "utf8").trim();
+    return !head.startsWith("ref: ") || head === "ref: refs/heads/main";
   } catch {
     return false;
   }
+}
+
+const STALE_LOCK_MS = 10 * 60 * 1000;
+
+/**
+ * One swap or staged-tree replacement at a time across sessions. Without it a
+ * second session can swap the tree the first just swapped in and delete the
+ * first one's `.previous`. Returns a release function, or null when held.
+ */
+export function acquireSwapLock(lockPath, now = Date.now()) {
+  try {
+    mkdirSync(lockPath);
+  } catch (error) {
+    if (error?.code !== "EEXIST") return null;
+    try {
+      if (now - statSync(lockPath).mtimeMs <= STALE_LOCK_MS) return null;
+      rmSync(lockPath, { recursive: true, force: true });
+      mkdirSync(lockPath);
+    } catch {
+      return null;
+    }
+  }
+  return () => rmSync(lockPath, { recursive: true, force: true });
+}
+
+function liveVersion(root) {
+  try {
+    return JSON.parse(readFileSync(path.join(root, PLUGIN_SUBDIR, "package.json"), "utf8")).version ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function samePath(a, b) {
+  const real = (p) => {
+    try {
+      return realpathSync(p);
+    } catch {
+      return path.resolve(p);
+    }
+  };
+  return real(a) === real(b);
 }
 
 function isStaleStaging(staging, now = Date.now()) {
@@ -132,12 +181,19 @@ export function swapStagedUpdate(options = {}) {
   if (autoUpdateDisabled(env)) return { swapped: false, reason: "disabled" };
 
   const paths = stagePaths(installHome);
+  let release = null;
   try {
+    if (!existsSync(paths.staged)) return { swapped: false, reason: "nothing-staged" };
+    release = acquireSwapLock(paths.lock);
+    if (!release) return { swapped: false, reason: "in-progress" };
     if (!existsSync(paths.staged)) return { swapped: false, reason: "nothing-staged" };
 
     const marker = inspectStagedTree(paths.staged);
     if (!marker) return { swapped: false, reason: "incomplete" };
     if (!isNewerVersion(marker.version, running)) return { swapped: false, reason: "not-newer" };
+    // Another session may have swapped in a newer tree since this one started.
+    const live = liveVersion(paths.live);
+    if (live && !isNewerVersion(marker.version, live)) return { swapped: false, reason: "not-newer" };
     if (!isCleanCheckout(paths.live, env)) return { swapped: false, reason: "dirty" };
 
     rmSync(paths.previous, { recursive: true, force: true });
@@ -161,6 +217,10 @@ export function swapStagedUpdate(options = {}) {
     };
   } catch {
     return { swapped: false, reason: "swap-failed" };
+  } finally {
+    try {
+      release?.();
+    } catch {}
   }
 }
 
@@ -236,6 +296,9 @@ export async function stageUpdate(options = {}) {
 
     const version = JSON.parse(readFileSync(path.join(pluginDir, "package.json"), "utf8")).version;
     if (typeof version !== "string" || !version) throw new Error("staged plugin package.json has no version");
+    // bootstrap.mjs reinstalls dependencies inside the first hook unless this
+    // marker names the running version.
+    writeFileSync(path.join(pluginDir, "node_modules", ".armorcodex-installed"), version, "utf8");
 
     await writeFile(
       stageMarkerPath(paths.staging),
@@ -243,8 +306,14 @@ export async function stageUpdate(options = {}) {
       "utf8"
     );
 
-    await rm(paths.staged, { recursive: true, force: true });
-    await rename(paths.staging, paths.staged);
+    const release = acquireSwapLock(paths.lock);
+    if (!release) throw new Error("a swap is in progress");
+    try {
+      await rm(paths.staged, { recursive: true, force: true });
+      await rename(paths.staging, paths.staged);
+    } finally {
+      release();
+    }
     return { staged: true, version, tag };
   } catch (error) {
     await rm(paths.staging, { recursive: true, force: true }).catch(() => {});
@@ -301,16 +370,14 @@ export async function autoUpdate(config, options = {}) {
     const installHome = options.installHome ?? defaultInstallHome(env);
     const liveRoot = options.liveRoot ?? runningInstallRoot();
 
-    // Releases are cut from main. A dev-channel install tracks the dev branch
-    // and must be neither told about nor moved onto a stable release.
-    if (isDevChannel(liveRoot)) return { notice: "", swapped: false, reason: "dev-channel" };
+    if (!followsReleases(liveRoot)) return { notice: "", swapped: false, reason: "not-release-channel" };
 
     const running = runningVersion(config);
     const check = options.check ?? (await checkForUpdate(config, { env }));
 
     // A developer checkout run in place is not the managed install, and must
     // never be renamed out from under its owner.
-    if (path.resolve(liveRoot) !== path.resolve(installHome)) {
+    if (!samePath(liveRoot, installHome)) {
       return { notice: updateNotice(check), swapped: false, reason: "not-managed" };
     }
 

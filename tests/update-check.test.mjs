@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -302,9 +302,16 @@ test("SessionStart surfaces a pending update from state without any network call
     JSON.stringify({ lastCheckedAt: Math.floor(Date.now() / 1000), latestVersion: "v9.9.9" })
   );
 
+  // A release checkout, whatever branch the tree running this test is on.
+  const liveRoot = mkdtempSync(join(tmpdir(), "armorcodex-release-checkout-"));
+  t.after(() => rmSync(liveRoot, { recursive: true, force: true }));
+  mkdirSync(join(liveRoot, ".git"));
+  writeFileSync(join(liveRoot, ".git", "HEAD"), "0123456789abcdef0123456789abcdef01234567\n");
+
   const output = await handleSessionStart(
     { hook_event_name: "SessionStart", session_id: "sess-update", source: "startup" },
-    config
+    config,
+    { liveRoot }
   );
 
   assert.equal(sessionContext(output), "ArmorCodex active (ENFORCING, intent=required)");
