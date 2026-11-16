@@ -4,7 +4,14 @@ All notable changes to ArmorCodex are recorded here. Format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [0.3.7] - 2026-11-16
+
+### Added
+- Auto-update. At most once a day SessionStart checks the repo's latest release. A newer release is cloned at its tag beside the install, its dependencies installed with `npm ci`, and it is swapped in by rename at the next session start; the replaced copy is kept at `~/.armoriq/armorCodex.previous`. The person sees a notice; the model does not. Installs on the dev branch are left alone. `ARMORCODEX_NO_AUTO_UPDATE=1` turns it off.
+- The installer checks out the latest release tag instead of the tip of `main`. `ARMORCODEX_GIT_REF` still picks any branch or tag.
+
 ### Fixed
+- A fresh install now enforces. Codex skips untrusted hooks, and the installer never trusted ArmorCodex's, so a new install ran no hook. The installer now records trust for its own hooks through `codex app-server`, the way `/hooks` does, and if that fails it says to run `/hooks` in Codex and trust them.
 - The installer runs `armoriq-dev login --backend <the plugin's backend>`, so the saved login is the one the plugin looks up. Before, an `ARMORIQ_ENV` or `ARMORCODEX_BACKEND_ENDPOINT` override made the installer save a login under the CLI's staging default that the plugin never loaded.
 
 ## [0.3.6] - 2026-10-12
