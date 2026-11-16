@@ -1,15 +1,25 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { unlink } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
-import { loadConfig } from "./lib/config.mjs";
+import { loadSettings, withLogin } from "./lib/config.mjs";
 import { ensurePrivateDir, writeJson } from "./lib/fs-store.mjs";
 import { extractAllowedActions, requestIntent } from "./lib/intent.mjs";
 import { INTENT_PLAN_ZOD, PLAN_STEP_SCHEMA, normalizeIntentPlan } from "./lib/intent-schema.mjs";
 import { applyPolicyCommand, computePolicyHash, loadPolicyState, parsePolicyTextCommand } from "./lib/policy.mjs";
 import { handleArmorPolicyCommand } from "./lib/armor-policy-commands.mjs";
+import { createAuditFlusher } from "./lib/audit-flusher.mjs";
 import { createAuditWal } from "./lib/audit-wal.mjs";
 import { createIapService } from "./lib/iap-service.mjs";
+import {
+  BACKEND_UNREACHABLE,
+  STATUS_COMMAND,
+  backendPosture,
+  cachedPosture,
+  classifyStatus,
+  recordBackendOutcome
+} from "./lib/backend-posture.mjs";
 
 const MATCHER_OPERATORS = z
   .object({
@@ -28,8 +38,6 @@ const POLICY_RULE_SCHEMA = z.object({
   tool: z.string().min(1),
   dataClass: z.enum(["PCI", "PAYMENT", "PHI", "PII"]).optional(),
   params: z.record(z.string(), z.unknown()).optional(),
-  // anyParam: matches a substring or operator spec across any string field
-  // in the tool input. Plain string is sugar for { $contains: <string> }.
   anyParam: z.union([z.string().min(1), MATCHER_OPERATORS]).optional()
 });
 
@@ -49,20 +57,11 @@ function toTextResult(text, extra = {}) {
   };
 }
 
-/**
- * Some MCP clients (and Codex itself) sometimes pass complex tool arguments
- * as JSON-encoded strings instead of structured objects. Accept either form.
- *
- *   { goal: "...", steps: "[{...}]" }   → parse steps as JSON
- *   { plan:  "{\"goal\":...}" }         → parse plan envelope as JSON
- *   { goal: "...", steps: [{...}] }     → pass through
- */
+/** Codex and some MCP clients send nested tool arguments as JSON strings, so accept either form. */
 function coercePlanArgs(args) {
   if (!args || typeof args !== "object") {
     return args;
   }
-  // If caller wrapped the entire plan in a `plan` field (string or object),
-  // unwrap it.
   if (args.plan !== undefined) {
     let unwrapped = args.plan;
     if (typeof unwrapped === "string") {
@@ -73,21 +72,112 @@ function coercePlanArgs(args) {
       delete args.plan;
     }
   }
-  // Coerce stringified arrays/objects on known fields.
   if (typeof args.steps === "string") {
     try { args = { ...args, steps: JSON.parse(args.steps) }; } catch { /* leave as-is */ }
+  }
+  if (!(typeof args.goal === "string" && args.goal.trim()) && Array.isArray(args.steps)) {
+    const goal = deriveGoal(args.steps);
+    if (goal) args = { ...args, goal };
   }
   return args;
 }
 
-async function loadStateAndConfig() {
-  const config = loadConfig();
-  const state = await loadPolicyState(config.policyFile);
-  return { config, state };
+function deriveGoal(steps) {
+  const parts = steps
+    .map((step) => {
+      if (!step || typeof step !== "object") return "";
+      return ["description", "rationale", "reason", "why", "action", "tool"]
+        .map((key) => (typeof step[key] === "string" ? step[key].trim() : ""))
+        .find(Boolean) ?? "";
+    })
+    .filter(Boolean);
+  return parts.join("; ").slice(0, 500);
+}
+
+function codexSessionId(extra) {
+  const id = extra?._meta?.sessionId;
+  return typeof id === "string" && /^[A-Za-z0-9_-]+$/.test(id) ? id : "";
+}
+
+const INTENT_DEADLINE_MS = 30_000;
+const registrations = new Map();
+
+function serializeRegistration(sessionId, task) {
+  const run = (registrations.get(sessionId) ?? Promise.resolve()).catch(() => {}).then(task);
+  registrations.set(sessionId, run);
+  return run;
+}
+
+function withDeadline(promise, ms) {
+  let timer;
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`no token within ${ms / 1000} s`)), ms);
+  });
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+}
+
+function storeLocalPlan(pendingPath, plan) {
+  return writeJson(pendingPath, {
+    plan,
+    tokenRaw: "",
+    allowedActions: Array.from(extractAllowedActions(plan)),
+    registeredAt: Date.now()
+  });
+}
+
+async function issueAndStore(config, pendingPath, request) {
+  const startedAt = Date.now();
+  await writeJson(pendingPath, { status: "issuing", startedAt, deadlineAt: startedAt + INTENT_DEADLINE_MS });
+  try {
+    const result = await withDeadline(requestIntent(config, request), INTENT_DEADLINE_MS);
+    if (!result?.tokenRaw) {
+      throw new Error("the backend returned no token");
+    }
+    const plan = result.plan || request.plan;
+    await writeJson(pendingPath, {
+      plan,
+      tokenRaw: result.tokenRaw,
+      allowedActions: Array.from(extractAllowedActions(plan)),
+      expiresAt: result.expiresAt,
+      planCheck: result.planCheck ?? null,
+      registeredAt: Date.now()
+    });
+  } catch (err) {
+    await unlink(pendingPath).catch(() => {});
+    throw err;
+  }
+}
+
+async function shipQueuedAudit(config) {
+  if (!config.apiKey) return;
+  const posture = await cachedPosture(config);
+  if (posture && posture.state !== "ok") return;
+  const wal = createAuditWal({ dataDir: config.dataDir });
+  const iapService = createIapService(config);
+  for (;;) {
+    const { rows, endOffset } = await wal.readBatch(100);
+    if (rows.length === 0) return;
+    const started = Date.now();
+    try {
+      await iapService.shipAuditBatch(rows);
+    } catch (error) {
+      await recordBackendOutcome(config, typeof error?.status === "number" ? classifyStatus(error.status) : "unreachable", started);
+      throw error;
+    }
+    await recordBackendOutcome(config, "ok", started);
+    await wal.advanceOffset(endOffset);
+    process.stderr.write(`[armorcodex-policy] flushed ${rows.length} audit rows -> offset=${endOffset}\n`);
+  }
 }
 
 async function run() {
-  await ensurePrivateDir(loadConfig().dataDir);
+  const settings = loadSettings();
+  const currentConfig = () => withLogin(settings);
+  const loadStateAndConfig = async () => {
+    const config = currentConfig();
+    return { config, state: await loadPolicyState(config.policyFile) };
+  };
+  await ensurePrivateDir(settings.dataDir);
   const server = new McpServer({
     name: "armorcodex-policy",
     version: "0.1.0"
@@ -127,7 +217,6 @@ async function run() {
       }
 
       if (args.update) {
-        // Tolerate JSON-string update payloads (some clients stringify objects).
         let updateInput = args.update;
         if (typeof updateInput === "string") {
           try { updateInput = JSON.parse(updateInput); } catch { /* let validator complain */ }
@@ -169,7 +258,7 @@ async function run() {
       }
     },
     async (args) => {
-      const config = loadConfig();
+      const config = currentConfig();
       if (!config.policyUpdateEnabled) {
         return toTextResult("ArmorCodex policy updates are disabled.");
       }
@@ -214,9 +303,6 @@ async function run() {
     }
   );
 
-  // -----------------------------------------------------------------
-  // register_intent_plan — Codex calls this to declare its plan
-  // -----------------------------------------------------------------
   server.registerTool(
     "register_intent_plan",
     {
@@ -225,10 +311,6 @@ async function run() {
         "Declare the tools you intend to use for this task. " +
         "Required by ArmorCodex before any other tool call. " +
         "Without a registered plan, all tool calls will be blocked.",
-      // Accept the canonical {goal, steps} shape AND the string-serialized
-      // variants Codex sometimes emits (steps as a JSON string, or the
-      // whole plan wrapped in a `plan` field). The handler below coerces
-      // them to the canonical shape before validating with INTENT_PLAN_ZOD.
       inputSchema: {
         goal: z.string().min(1).optional()
           .describe("One-line summary of what the plan accomplishes"),
@@ -247,140 +329,86 @@ async function run() {
         openWorldHint: false
       }
     },
-    async (args) => {
-      // Codex sometimes serializes complex tool arguments as JSON strings
-      // (e.g. steps: "[{...}]" instead of steps: [{...}]). Tolerate both.
+    async (args, extra) => {
       const coerced = coercePlanArgs(args);
       const parsed = INTENT_PLAN_ZOD.safeParse(coerced);
       if (!parsed.success) {
         return toTextResult(`Plan rejected: ${parsed.error.message}`);
       }
-
-      const config = loadConfig();
-      const plan = normalizeIntentPlan(parsed.data);
-
-      // Write the local plan to pending-plan.json IMMEDIATELY so PreToolUse
-      // has something to enforce against. The SDK call (if any) runs entirely
-      // in the background and updates pending-plan.json with the signed
-      // token when it resolves.
-      //
-      // Why fire-and-forget: Codex's MCP transport closes its stdio pipe
-      // around the ~1s mark. Any await we do here (loadPolicyState, the
-      // SDK round-trip, even cold-start latency) eats into that budget.
-      // Awaiting nothing on the network path keeps the MCP response under
-      // ~100ms regardless of backend conditions.
-      const pendingPath = path.join(config.dataDir, "pending-plan.json");
-      await writeJson(pendingPath, {
-        plan,
-        tokenRaw: "",
-        allowedActions: Array.from(extractAllowedActions(plan)),
-        expiresAt: undefined,
-        registeredAt: Date.now()
-      });
-
-      let backendWillIssue = false;
-      if (config.intentEndpoint || (config.useSdkIntent && config.apiKey)) {
-        backendWillIssue = true;
-        // Kick off the SDK call. When it resolves with a signed token, update
-        // pending-plan.json so PreToolUse picks up the token on subsequent
-        // calls. Errors are logged to stderr and otherwise swallowed.
-        (async () => {
-          try {
-            const policyState = await loadPolicyState(config.policyFile);
-            const result = await requestIntent(config, {
-              prompt: parsed.data.goal,
-              plan,
-              session_id: "mcp",
-              policy_hash: computePolicyHash(policyState.policy),
-              policy: policyState.policy,
-              validitySeconds: config.validitySeconds,
-              metadata: { source: "codex", planning: "codex-registered" }
-            });
-            if (result?.tokenRaw) {
-              await writeJson(pendingPath, {
-                plan: result.plan || plan,
-                tokenRaw: result.tokenRaw,
-                allowedActions: Array.from(extractAllowedActions(result.plan || plan)),
-                expiresAt: result.expiresAt,
-                registeredAt: Date.now()
-              });
-              process.stderr.write(
-                `[armorcodex] backend token issued, tokenLen=${result.tokenRaw.length}\n`
-              );
-            }
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            process.stderr.write(`[armorcodex] intent capture failed: ${msg}\n`);
-          }
-        })();
+      const sessionId = codexSessionId(extra);
+      if (!sessionId) {
+        return toTextResult(
+          "Plan rejected: this Codex version sends no session id with MCP calls. Update Codex to 0.162 or later."
+        );
       }
 
-      const tokenInfo = backendWillIssue
-        ? `Plan registered; ArmorIQ token issuing in background.`
-        : "Plan stored locally (no ArmorIQ backend configured).";
+      const config = currentConfig();
+      const plan = normalizeIntentPlan(parsed.data);
+      const pendingPath = path.join(config.dataDir, `pending-plan.${sessionId}.json`);
+      const summary = { steps: plan.steps.length, goal: parsed.data.goal };
 
-      return toTextResult(
-        `Intent registered: ${plan.steps.length} steps. ${tokenInfo}`,
-        { steps: plan.steps.length, goal: parsed.data.goal }
-      );
+      if (!config.intentEndpoint && !(config.useSdkIntent && config.apiKey)) {
+        await storeLocalPlan(pendingPath, plan);
+        return toTextResult(
+          `Intent registered: ${plan.steps.length} steps. Plan stored locally (no ArmorIQ backend configured).`,
+          summary
+        );
+      }
+
+      const posture = await backendPosture(config);
+      if (posture === "unreachable") {
+        return toTextResult(
+          `Plan rejected (${BACKEND_UNREACHABLE}): the ArmorIQ backend did not answer, so no token was issued. ` +
+            `Run ${STATUS_COMMAND} for details.`
+        );
+      }
+      if (posture === "signed_out") {
+        await storeLocalPlan(pendingPath, plan);
+        return toTextResult(
+          `Intent registered: ${plan.steps.length} steps. Plan stored locally (the ArmorIQ backend rejected the stored key, local only mode).`,
+          summary
+        );
+      }
+
+      try {
+        await serializeRegistration(sessionId, async () => {
+          const policyState = await loadPolicyState(config.policyFile);
+          await issueAndStore(config, pendingPath, {
+            prompt: parsed.data.goal,
+            plan,
+            session_id: sessionId,
+            policy_hash: computePolicyHash(policyState.policy),
+            policy: policyState.policy,
+            validitySeconds: config.validitySeconds,
+            metadata: { source: "codex", planning: "codex-registered" }
+          });
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return toTextResult(
+          `Plan rejected: the ArmorIQ token request failed (${msg}). Nothing was stored; register the plan again.`
+        );
+      }
+      return toTextResult(`Intent registered: ${plan.steps.length} steps. ArmorIQ token issued.`, summary);
     }
   );
 
-  // Background WAL flusher — drains queued audit rows in batches and ships
-  // to /iap/audit. Embedded here because the MCP server is already a
-  // long-lived stdio process; no need for a separate daemon binary the way
-  // armorClaude needs one (Claude Code spawns a fresh node per hook).
-  //
-  // Tuning mirrors armorClaude#44 daemon for cross-product parity:
-  //   - 5s interval  (AUDIT_FLUSH_INTERVAL_MS)
-  //   - 100-row batch (AUDIT_FLUSH_THRESHOLD)
-  // Errors are logged + retried on the next tick (offset isn't advanced
-  // on failure).
-  const flusher = setInterval(async () => {
-    try {
-      const config = loadConfig();
-      if (!config.apiKey) return; // no backend configured; WAL just accumulates locally
-      const wal = createAuditWal({ dataDir: config.dataDir });
-      const { rows, endOffset } = await wal.readBatch(100);
-      if (rows.length === 0) return;
-      const iapService = createIapService(config);
-      await iapService.shipAuditBatch(rows);
-      await wal.advanceOffset(endOffset);
-      process.stderr.write(
-        `[armorcodex-policy] flushed ${rows.length} audit rows -> offset=${endOffset}\n`
-      );
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      process.stderr.write(`[armorcodex-policy] flusher: ${msg}\n`);
-    }
-  }, 5000);
-  flusher.unref?.();
+  const flusher = createAuditFlusher({
+    ship: () => shipQueuedAudit(currentConfig()),
+    onError: (err) => {
+      process.stderr.write(`[armorcodex-policy] flusher: ${err instanceof Error ? err.message : err}\n`);
+    },
+    intervalMs: 5000
+  });
 
-  async function flushAndExit(signal) {
-    clearInterval(flusher);
-    try {
-      const config = loadConfig();
-      if (config.apiKey) {
-        const wal = createAuditWal({ dataDir: config.dataDir });
-        const { rows, endOffset } = await wal.readBatch(500);
-        if (rows.length > 0) {
-          const iapService = createIapService(config);
-          await iapService.shipAuditBatch(rows);
-          await wal.advanceOffset(endOffset);
-          process.stderr.write(
-            `[armorcodex-policy] ${signal}: flushed ${rows.length} remaining audit rows\n`
-          );
-        }
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      process.stderr.write(`[armorcodex-policy] ${signal} flush error: ${msg}\n`);
-    }
-    process.exit(0);
-  }
-
-  process.on("SIGTERM", () => flushAndExit("SIGTERM"));
-  process.on("SIGINT", () => flushAndExit("SIGINT"));
+  let stopping;
+  const shutdown = () => {
+    stopping ??= flusher.stop().then(() => process.exit(0));
+  };
+  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", shutdown);
+  process.stdin.on("end", shutdown);
+  process.stdin.on("close", shutdown);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

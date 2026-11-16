@@ -1,3 +1,5 @@
+import { emitJson } from "./lib/hook-stdout.mjs";
+import { cachedPosture, localOnly } from "./lib/backend-posture.mjs";
 import { loadConfig } from "./lib/config.mjs";
 import { denyPermissionRequest, denyPreTool } from "./lib/hook-output.mjs";
 import {
@@ -13,6 +15,7 @@ import {
 import { ensurePrivateDir } from "./lib/fs-store.mjs";
 import { observeHook } from "./lib/observability.mjs";
 import { withReach } from "./lib/reach.mjs";
+import { launchLiveUsage, trackUsageSession } from "./lib/usage-sync-launch.mjs";
 
 let currentEvent = "";
 
@@ -24,10 +27,6 @@ async function readStdin() {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-function emitJson(value) {
-  process.stdout.write(`${JSON.stringify(value)}\n`);
-}
-
 function debugLog(config, message) {
   if (!config.debug) {
     return;
@@ -36,7 +35,7 @@ function debugLog(config, message) {
 }
 
 async function main() {
-  const config = loadConfig();
+  let config = loadConfig();
   await ensurePrivateDir(config.dataDir);
   const rawInput = await readStdin();
   if (!rawInput.trim()) {
@@ -46,9 +45,7 @@ async function main() {
   try {
     input = JSON.parse(rawInput);
   } catch {
-    // Fail-closed: a malformed hook payload on a PreToolUse looks like
-    // enforcement missed, so deny in enforce mode instead of silent allow.
-    // Other events just exit — they can't allow anything on their own.
+    // Fail closed: in enforce mode a malformed PreToolUse payload is denied, not silently allowed.
     if (config.mode === "enforce") {
       emitJson(denyPreTool("ArmorCodex hook payload invalid JSON"));
     }
@@ -57,6 +54,8 @@ async function main() {
   const event = typeof input.hook_event_name === "string" ? input.hook_event_name : "";
   currentEvent = event;
   debugLog(config, `hook=${event}`);
+  if ((await cachedPosture(config))?.state === "signed_out") config = localOnly(config);
+  await trackUsageSession(event, input, config);
 
   let output;
 
@@ -94,11 +93,8 @@ async function main() {
   if (output) {
     emitJson(output);
   }
+  if (event === "Stop") launchLiveUsage(config, input);
 
-  // armorCodex has no daemon — this IS the only obs path (unlike armorClaude,
-  // which has a daemon-resident bridge plus this same in-process fallback).
-  // Fail-open: observeHook never throws, and is awaited to completion before
-  // this short-lived process exits (no background timer will ever fire).
   await observeHook(event, input, output, config);
 }
 

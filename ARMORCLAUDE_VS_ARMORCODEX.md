@@ -40,7 +40,6 @@ Improvements added during the Codex port that haven't been backported to ArmorCl
 | Feature | Where | Reason |
 | --- | --- | --- |
 | **`PermissionRequest` handler** | `scripts/lib/engine.mjs` (`handlePermissionRequest`) | Codex-specific event; gates approval prompts using the same policy engine. Claude has no equivalent event. |
-| **Auto-refresh of expiring intent tokens** | `scripts/lib/engine.mjs` (refresh near expiry) | Reissues the token silently when it has < 30s of life left, so multi-step turns don't hit an expiry boundary mid-execution. |
 | **Secret redaction in audit logs** | `scripts/lib/common.mjs` (`redactSecrets`) | Strips Bearer tokens, AWS keys, GitHub PATs, JWT-shaped values, private key blocks before payloads leave the host. |
 | **Atomic JSON file writes** | `scripts/lib/fs-store.mjs` | `write to .tmp -> rename` prevents torn JSON when two hooks race or the process is killed mid-write. |
 | **Corrupt-JSON recovery** | `scripts/lib/fs-store.mjs` | A `SyntaxError` on read falls back to the default value instead of crashing the session. |
@@ -48,7 +47,7 @@ Improvements added during the Codex port that haven't been backported to ArmorCl
 | **Robust JSON-block extraction** | `scripts/lib/planner.mjs` (`extractPlanJsonBlock`) | Returns the last block with a `steps` array, so example/illustration blocks earlier in the file aren't accidentally parsed as the plan. |
 | **Fail-closed on malformed payloads** | `scripts/hook-router.mjs` | Invalid JSON or missing `tool_name` on a `PreToolUse` payload denies in enforce mode instead of silently allowing. |
 | **Version-aware install marker** | `scripts/bootstrap.mjs` | `node_modules/.armorcodex-installed` records the package version; mismatched versions trigger reinstall. Prevents partial-install crashes. |
-| **`--uninstall` and `--force-hooks` installer flags** | `install_armorcodex.sh` | Clean removal and explicit overwrite paths. |
+| **`--uninstall` installer flag** | `install_armorcodex.sh` | Clean removal path. |
 | **Idempotent managed-block markers** | `install_armorcodex.sh` | `# >>> ArmorCodex managed block` markers in `~/.codex/config.toml` mean re-running the installer replaces in place — no duplicate growth. |
 | **Auto-clone fallback in installer** | `install_armorcodex.sh` | Runs cleanly via `curl ... \| bash` (clones to `~/.armoriq/armorCodex`) without requiring the user to clone first. |
 
@@ -71,6 +70,6 @@ These pieces are functionally equivalent on both sides — the same code with `a
 
 ## Action Items Worth Tracking
 
-- Backport ArmorCodex's hardening (atomic writes, secret redaction, auto-refresh, corrupt-JSON recovery, stricter sanitization) to ArmorClaude.
+- Backport ArmorCodex's hardening (atomic writes, secret redaction, corrupt-JSON recovery, stricter sanitization) to ArmorClaude.
 - Watch Codex release notes for: non-Bash hook coverage, `PostToolUseFailure`/`SessionEnd` events, native `plugin install` subcommand, `.mcp.json` auto-load, `ExitPlanMode`-equivalent event.
 - Build compensating layers for non-Bash coverage on Codex (MCP-gateway proxy, fswatch daemon, transcript-replay audit) — see roadmap discussion.

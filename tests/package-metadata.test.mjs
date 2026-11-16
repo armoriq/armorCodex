@@ -6,7 +6,7 @@ function readJson(relativePath) {
   return JSON.parse(readFileSync(new URL(relativePath, import.meta.url), "utf8"));
 }
 
-test("release metadata uses the registry SDK and one ArmorCodex version", () => {
+test("release metadata uses the registry production SDK 0.8.24 and one ArmorCodex version", () => {
   const pkg = readJson("../plugins/armorcodex/package.json");
   const lock = readJson("../plugins/armorcodex/package-lock.json");
   const plugin = readJson("../plugins/armorcodex/.codex-plugin/plugin.json");
@@ -14,10 +14,14 @@ test("release metadata uses the registry SDK and one ArmorCodex version", () => 
   const agentsMarketplace = readJson("../.agents/plugins/marketplace.json");
   const lockedSdk = lock.packages["node_modules/@armoriq/sdk"];
 
-  assert.equal(pkg.dependencies["@armoriq/sdk"], "^0.6.3");
-  assert.equal(lock.packages[""].dependencies["@armoriq/sdk"], "^0.6.3");
-  assert.equal(lockedSdk.version, "0.6.3");
+  assert.equal(pkg.dependencies["@armoriq/sdk-dev"], undefined);
+  assert.equal(lock.packages["node_modules/@armoriq/sdk-dev"], undefined);
+  assert.equal(pkg.dependencies["@armoriq/sdk"], "^0.8.24");
+  assert.equal(lock.packages[""].dependencies["@armoriq/sdk"], "^0.8.24");
+  assert.match(lockedSdk.version, /^0\.8\.\d+$/);
+  assert.ok(Number(lockedSdk.version.split(".")[2]) >= 24, lockedSdk.version);
   assert.match(lockedSdk.resolved, /^https:\/\/registry\.npmjs\.org\//);
+  assert.match(lockedSdk.integrity, /^sha512-/);
   assert.equal(lockedSdk.link, undefined);
   assert.equal(
     Object.keys(lock.packages).some((key) => key.includes("armoriq-sdk-customer-ts")),
@@ -34,21 +38,24 @@ test("release metadata uses the registry SDK and one ArmorCodex version", () => 
     agentsMarketplace.metadata.version,
     agentsMarketplace.plugins[0].version,
   ]) {
-    assert.equal(version, "0.3.3");
+    assert.equal(version, "0.3.7");
   }
 });
 
-test("release installer uses only the production SDK CLI", () => {
+test("release installer uses the production SDK CLI and its product-scoped login", () => {
   const installer = readFileSync(
     new URL("../install_armorcodex.sh", import.meta.url),
     "utf8",
   );
 
-  assert.match(installer, /https:\/\/tools\.armoriq\.ai/);
+  assert.match(installer, /DASHBOARD_URL="\$\{ARMORCODEX_DASHBOARD_URL:-https:\/\/platform\.armoriq\.ai\}"/);
+  assert.doesNotMatch(installer, /tools\.armoriq\.ai/);
   assert.match(installer, /npm install -g @armoriq\/sdk@latest/);
-  assert.match(installer, /npx @armoriq\/sdk login/);
-  assert.doesNotMatch(installer, /armoriq-dev/);
-  assert.doesNotMatch(installer, /@armoriq\/sdk-dev/);
+  assert.match(installer, /npx @armoriq\/sdk login --product armorcodex/);
+  assert.match(installer, /armoriq login --product armorcodex/);
+  assert.doesNotMatch(installer, /ARMORIQ_API_KEY/);
+  assert.doesNotMatch(installer, /ARMORIQ_PRODUCT/);
+  assert.doesNotMatch(installer, /sdk-dev|armoriq-dev/);
 });
 
 test("every locked @armoriq package has the integrity the registry serves", async () => {

@@ -307,11 +307,14 @@ test("racing hooks show each message once", async (t) => {
 });
 
 test("login commands select an executable at print time and run from another directory with a bare quoted origin", async (t) => {
+  const { dependencies } = JSON.parse(readFileSync(new URL("../plugins/armorcodex/package.json", import.meta.url), "utf8"));
+  const sdk = dependencies["@armoriq/sdk-dev"] ? "@armoriq/sdk-dev" : "@armoriq/sdk";
+  const cli = sdk === "@armoriq/sdk-dev" ? "armoriq-dev" : "armoriq";
   const home = tempHome(t);
   const bin = path.join(home, "bin");
   mkdirSync(bin);
   const log = path.join(home, "argv.json");
-  for (const name of ["armoriq", "npx"]) {
+  for (const name of [cli, "npx"]) {
     writeFileSync(
       path.join(bin, name),
       `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2)));\n`
@@ -324,16 +327,16 @@ test("login commands select an executable at print time and run from another dir
   });
   process.env.PATH = bin;
   for (const [available, backend, prefix, originArgument] of [
-    [true, "https://staging-api.armoriq.ai", "armoriq", "https://staging-api.armoriq.ai"],
-    [false, origin, "npx -y @armoriq/sdk", origin],
+    [true, "https://staging-api.armoriq.ai", cli, "https://staging-api.armoriq.ai"],
+    [false, origin, `npx -y ${sdk}`, origin],
     [
       false,
       "https://user:private@custom.example.test:8443/path?token=private#hash",
-      "npx -y @armoriq/sdk",
+      `npx -y ${sdk}`,
       "'https://custom.example.test:8443'",
     ],
   ]) {
-    chmodSync(path.join(bin, "armoriq"), available ? 0o755 : 0o644);
+    chmodSync(path.join(bin, cli), available ? 0o755 : 0o644);
     const command = reach.loginCommand(backend);
     assert.equal(command, `${prefix} login --product armorcodex --backend ${originArgument}`);
     const child = spawn("/bin/sh", ["-c", command], {
@@ -344,7 +347,7 @@ test("login commands select an executable at print time and run from another dir
     const [code] = await once(child, "close");
     assert.equal(code, 0);
     assert.deepEqual(JSON.parse(readFileSync(log, "utf8")), [
-      ...(available ? [] : ["-y", "@armoriq/sdk"]),
+      ...(available ? [] : ["-y", sdk]),
       "login", "--product", "armorcodex", "--backend",
       originArgument.replaceAll("'", ""),
     ]);

@@ -1,0 +1,17 @@
+name: Comment check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  comment-check:
+    name: Comment check
+    uses: armoriq/.github/.github/workflows/reusable-comment-check.yml@main
