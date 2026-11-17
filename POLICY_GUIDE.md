@@ -164,3 +164,14 @@ Codex adds three condition fields so the older rule matchers keep working: `tool
 ### Upgrading from the rule list
 
 Before this release the file held `{ "rules": [...] }`, decided by the first matching rule. The first time ArmorCodex reads such a file it rewrites it as `armor.policy.v1` in place, keeps the original as `policy.json.legacy.bak`, and adds a history entry. A trailing catch-all rule (`tool: "*"` with no matchers) becomes the default decision. Every call the old file blocked stays blocked. A call that an earlier `allow` used to let through ahead of a later `deny` is now blocked, because a deny always wins.
+
+## Organization policies (policy v2)
+
+When you are signed in, ArmorCodex also enforces the v2 policies your organization publishes in the ArmorIQ console for Codex (`armorcodex`), including workspace-wide ones. It fetches `GET /policy/bundles/current?agent=armorcodex`, keeps the bundle on disk, revalidates it with its ETag at most every 60 seconds, and decides each call locally with the same evaluator the backend uses. An edit in the console therefore reaches Codex within about a minute.
+
+- Both the organization policy and the local file apply; the stricter decision wins. With no v2 policy for Codex, only the local file decides.
+- A block names the policy: `ArmorIQ policy "<name>" blocked <tool> (...)`.
+- A shadow policy is evaluated on every call and logged to `policy-shadow.jsonl`, and is never enforced.
+- A hold blocks when Codex runs without approvals (`codex exec`, or approval policy `never`). With approvals on, a held shell command is refused once with instructions to re-run it with escalated permissions; Codex then shows its approval prompt and you decide. Codex cannot route other held tools to a prompt, so they are blocked.
+- Each audit row records what decided it in `input.armoriq_policy`: `source` (`v2`, `local`, `default` or `builtin`), the policy id and name, and any shadow verdicts.
+- Set `ARMORCODEX_POLICY_V2=false` to turn organization policy enforcement off.
