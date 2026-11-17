@@ -136,15 +136,31 @@ Then ask Codex to run something the policy blocks (for example a denied Bash com
 
 ## Policy schema
 
-ArmorCodex stores policy as a rule list:
+ArmorCodex stores policy in `~/.codex/armorcodex/policy.json` as an `armor.policy.v1` document, the same schema ArmorClaude and the ArmorIQ console use:
 
 ```json
 {
-  "rules": [
-    { "id": "policy1", "action": "deny", "tool": "bash" },
-    { "id": "policy2", "action": "deny", "tool": "*" }
+  "schemaVersion": "armor.policy.v1",
+  "kind": "PolicyProfile",
+  "metadata": { "name": "current", "description": "" },
+  "defaults": { "decision": "deny", "conflictResolution": "deny_overrides" },
+  "statements": [
+    {
+      "id": "policy1",
+      "effect": "permit",
+      "principal": { "type": "agent", "id": "armorcodex" },
+      "action": { "type": "tool", "eq": "bash" },
+      "resource": { "type": "workspace", "scope": "current" },
+      "conditions": []
+    }
   ]
 }
 ```
 
-Rules match by tool name (with optional trailing `*` glob, e.g. `mcp__github__*`), and support `dataClass` (PCI/PHI/PII) and `anyParam` matchers for finer control. Rules are evaluated in order; the first match wins.
+A statement matches by tool name (a trailing `*` glob such as `mcp__github__*` works), and its conditions narrow it further. `deny_overrides` means a matching `forbid` wins over `require_approval`, which wins over `permit`; rule order does not decide. When nothing matches, `defaults.decision` applies (`allow`, `deny` or `hold`). The `armor policy` commands still show and edit rules, and `armor policy default deny|hold` sets the default.
+
+Codex adds three condition fields so the older rule matchers keep working: `tool.params` and `tool.anyParam` (op `match`, value the matcher) and `data.class` (op `eq`, value `PCI`, `PAYMENT`, `PHI` or `PII`).
+
+### Upgrading from the rule list
+
+Before this release the file held `{ "rules": [...] }`, decided by the first matching rule. The first time ArmorCodex reads such a file it rewrites it as `armor.policy.v1` in place, keeps the original as `policy.json.legacy.bak`, and adds a history entry. A trailing catch-all rule (`tool: "*"` with no matchers) becomes the default decision. Every call the old file blocked stays blocked. A call that an earlier `allow` used to let through ahead of a later `deny` is now blocked, because a deny always wins.
