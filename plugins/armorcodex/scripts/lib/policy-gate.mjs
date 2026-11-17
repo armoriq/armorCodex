@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
 import { readFile, unlink } from "node:fs/promises";
 import path from "node:path";
-import { isPlainObject, normalizeToolName } from "./common.mjs";
+import { buildAuthHeaders, isPlainObject, normalizeToolName, postJson } from "./common.mjs";
 import { readJson, writeJson, writePrivateFile } from "./fs-store.mjs";
-import { VERDICT_RANK } from "./v2-decision.mjs";
+import { VERDICT_RANK, mcpCall } from "./v2-decision.mjs";
 
-const HOLD_RELEASE_MS = 10 * 60 * 1000;
+const HOLD_MEMORY_MS = 60 * 60 * 1000;
 
 /**
  * The stricter of the org's v2 verdict and the local armor.policy.v1 decision.
@@ -20,7 +20,7 @@ export function combinePolicyDecisions(v2, local) {
       reason: v2.reason,
       localBlocks: localVerdict === "block",
       record: {
-        source: "v2",
+        source: v2.verdict === "allow" && !v2.policyId ? "default" : "v2",
         policy_id: v2.policyId,
         policy_name: v2.policyName,
         policy_hash: v2.policyHash,
@@ -65,74 +65,148 @@ async function readHolds(config, sessionId) {
   const holds = await readJson(holdsPath(config, sessionId), {});
   const now = Date.now();
   return Object.fromEntries(
-    Object.entries(isPlainObject(holds) ? holds : {}).filter(([, h]) => now - (h?.at ?? 0) < HOLD_RELEASE_MS)
+    Object.entries(isPlainObject(holds) ? holds : {}).filter(([, h]) => now - (h?.at ?? 0) < HOLD_MEMORY_MS)
   );
 }
 
+function signedToken(intentTokenRaw) {
+  try {
+    const token = JSON.parse(intentTokenRaw);
+    const jwt = typeof token.jwtToken === "string" ? token.jwtToken : "";
+    let claims = {};
+    try {
+      claims = JSON.parse(Buffer.from(jwt.split(".")[1] ?? "", "base64url").toString("utf8"));
+    } catch {
+      claims = {};
+    }
+    const planId = token.planId ?? token.rawToken?.plan_id ?? claims.plan_id;
+    return jwt && typeof planId === "string" ? { jwt_token: jwt, plan_id: planId, agentId: claims.agent_id } : null;
+  } catch {
+    return null;
+  }
+}
+
+async function fileDelegation(config, { holds, key, planId, tool, domain, args, reason }) {
+  if (holds[key]?.delegationId) return { delegationId: holds[key].delegationId };
+  if (!config.userEmail) return { error: "the signed-in ArmorIQ profile has no email" };
+  const headers = { ...buildAuthHeaders(config), "X-User-Email": config.userEmail };
+  const timeout = config.timeoutMs || 8000;
+  const role = await getJson(`${config.backendEndpoint}/delegation/my-role`, headers, timeout).catch(() => null);
+  const res = await postJson(
+    `${config.backendEndpoint}/delegation/request`,
+    {
+      tool,
+      action: "execute",
+      arguments: args,
+      requesterEmail: config.userEmail,
+      requesterRole: role?.role || "agent_user",
+      requesterLimit: Number(role?.limit) || 0,
+      domain,
+      planId,
+      reason
+    },
+    headers,
+    timeout
+  );
+  const body = unwrap(res.data);
+  if (!res.ok || typeof body?.delegationId !== "string") {
+    return { error: `HTTP ${res.status}${body?.message ? `: ${body.message}` : ""}` };
+  }
+  holds[key] = { state: "requested", delegationId: body.delegationId, at: Date.now() };
+  return { delegationId: body.delegationId };
+}
+
+async function getJson(url, headers, timeoutMs) {
+  const res = await fetch(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
+  return res.ok ? unwrap(await res.json()) : null;
+}
+
+const unwrap = (data) => (isPlainObject(data?.data) && !("allowed" in data) && !("delegationId" in data) ? data.data : data);
+
 /**
- * PreToolUse cannot ask, nor see whether a call asked for escalation, so a held
- * call is refused with instructions to re-run it escalated. The identical retry
- * in the same turn is let through once, to Codex's approval prompt.
+ * A held call is decided by the workspace: the backend's enforce either spends an
+ * approval another member granted for this exact call (plan, tool, arguments), or
+ * the call is stopped and an approval request is filed for it. Any failure stops it.
  */
-export async function resolveHold(config, input, decision) {
+export async function resolveHold(config, input, decision, intentTokenRaw) {
   const toolName = input.tool_name;
   const name = decision.record.policy_name ? `"${decision.record.policy_name}" ` : "";
   const head = `ArmorIQ policy ${name}holds ${toolName} for approval (${decision.reason})`;
-  if (input.permission_mode !== "default") {
-    return { action: "block", reason: `${head}. Approvals are off in this Codex session, so it is blocked` };
-  }
-  if (normalizeToolName(toolName) !== "bash") {
+  const token = intentTokenRaw ? signedToken(intentTokenRaw) : null;
+  if (!token) {
     return {
       action: "block",
-      reason: `${head}. Codex can only route shell commands to an approval prompt, so it is blocked`
+      reason: `${head}. This session has no signed intent plan to attach an approval request to: call register_intent_plan, then retry`
     };
   }
+  const { tool, mcpServer } = mcpCall(toolName);
+  const domain = mcpServer ?? config.mcpName;
+  const args = isPlainObject(input.tool_input) ? input.tool_input : {};
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
-  const shape = callShape(toolName, input.tool_input);
   const holds = await readHolds(config, sessionId);
-  const turn = typeof input.turn_id === "string" ? input.turn_id : "";
-  if (holds[shape]?.state === "held" && holds[shape].turn === turn) {
-    holds[shape] = { state: "released", at: Date.now(), turn };
+  try {
+    const res = await postJson(
+      `${config.backendEndpoint}/iap/sdk/enforce`,
+      {
+        tool,
+        mcp: domain,
+        arguments: args,
+        intent_token: { jwt_token: token.jwt_token, plan_id: token.plan_id },
+        agent_id: token.agentId || config.agentId,
+        user_email: config.userEmail || undefined
+      },
+      buildAuthHeaders(config),
+      config.timeoutMs || 8000
+    );
+    const verdict = unwrap(res.data) ?? {};
+    if (!res.ok) return { action: "block", reason: `${head}. The approval check failed (HTTP ${res.status}), so it is blocked` };
+    if (verdict.allowed === true) {
+      const delegationId = verdict.metadata?.delegationId;
+      holds[callShape(toolName, input.tool_input)] = { state: "approved", delegationId, at: Date.now() };
+      await writeJson(holdsPath(config, sessionId), holds);
+      return { action: "allow", delegationId };
+    }
+    if (verdict.enforcementAction !== "hold") {
+      return { action: "block", reason: `${head}. ${verdict.message || verdict.reason || "The approval check blocked it"}` };
+    }
+    const key = createHash("sha256").update(JSON.stringify([token.plan_id, domain, tool, args])).digest("hex").slice(0, 32);
+    const filed = await fileDelegation(config, { holds, key, planId: token.plan_id, tool, domain, args, reason: verdict.reason });
     await writeJson(holdsPath(config, sessionId), holds);
-    return { action: "release" };
+    if (!filed.delegationId) {
+      return { action: "block", reason: `${head}. The approval request could not be filed (${filed.error}), so it is blocked` };
+    }
+    return {
+      action: "block",
+      delegationId: filed.delegationId,
+      reason:
+        `${head}. Approval request ${filed.delegationId} is waiting for another member of the workspace; ` +
+        "retry the same call unchanged after it is approved"
+    };
+  } catch (error) {
+    return {
+      action: "block",
+      reason: `${head}. The approval check failed (${error instanceof Error ? error.message : error}), so it is blocked`
+    };
   }
-  holds[shape] = { state: "held", at: Date.now(), turn };
-  await writeJson(holdsPath(config, sessionId), holds);
-  return {
-    action: "block",
-    reason:
-      `${head}. Re-run the same command with escalated permissions (sandbox_permissions: require_escalated) ` +
-      "and a justification, so the user can approve or decline it in Codex"
-  };
 }
 
-/** True, and noted, when this approval prompt is for a call PreToolUse released under a hold. */
-export async function markHoldPrompted(config, input) {
+/** The workspace approval PreToolUse spent for this call, if any. */
+export async function approvedHold(config, input) {
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
-  const shape = callShape(input.tool_name, input.tool_input);
   const holds = await readHolds(config, sessionId);
-  if (holds[shape]?.state !== "released") return false;
-  holds[shape] = { ...holds[shape], state: "prompted" };
-  await writeJson(holdsPath(config, sessionId), holds);
-  return true;
+  const hold = holds[callShape(input.tool_name, input.tool_input)];
+  return hold?.state === "approved" ? hold : undefined;
 }
 
-/** How a released hold ended once its call ran: through Codex's prompt, or without one. */
+/** "approved" once a call that ran on a spent workspace approval finishes. */
 export async function settleHold(config, input) {
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   if (typeof input.tool_name !== "string") return undefined;
   const shape = callShape(input.tool_name, input.tool_input);
   const holds = await readHolds(config, sessionId);
-  const state = holds[shape]?.state;
-  if (state !== "released" && state !== "prompted") return undefined;
+  if (holds[shape]?.state !== "approved") return undefined;
   delete holds[shape];
   await writeJson(holdsPath(config, sessionId), holds);
-  if (state === "released") {
-    process.stderr.write(
-      `[armorcodex] held ${input.tool_name} call ran without a Codex approval prompt (it was not re-run with escalated permissions)\n`
-    );
-    return "ran_without_prompt";
-  }
   return "approved";
 }
 
