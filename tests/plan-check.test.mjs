@@ -146,3 +146,27 @@ test("requestIntent returns the token's plan check", async (t) => {
   );
   assert.deepEqual(result.planCheck, planCheck);
 });
+
+test("requestIntent signs an allow list CSRG accepts, not the local rule list", async (t) => {
+  const sent = [];
+  t.mock.method(ArmorIQClient.prototype, "getIntentToken", async (_capture, policy) => {
+    sent.push(policy);
+    return { planId: randomUUID(), expiresAt: Math.floor(Date.now() / 1000) + 600, plan: PLAN };
+  });
+  await requestIntent(
+    {
+      apiKey: "ak_test_plancheck00000000000000000000",
+      useSdkIntent: true,
+      intentEndpoint: "",
+      userId: "user-login",
+      agentId: "codex",
+      contextId: "default",
+      llmId: "openai-codex",
+      iapEndpoint: "http://127.0.0.1:9",
+      proxyEndpoint: "http://127.0.0.1:9",
+      backendEndpoint: "http://127.0.0.1:9"
+    },
+    { plan: PLAN, session_id: SESSION, validitySeconds: 600, policy: { rules: [] }, policy_hash: "abc" }
+  );
+  assert.deepEqual(sent, [{ allow: ["*"], deny: [], metadata: { source: "codex", policyHash: "abc" } }]);
+});
