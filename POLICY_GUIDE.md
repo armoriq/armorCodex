@@ -172,6 +172,6 @@ When you are signed in, ArmorCodex also enforces the v2 policies your organizati
 - Both the organization policy and the local file apply; the stricter decision wins. With no v2 policy for Codex, only the local file decides.
 - A block names the policy: `ArmorIQ policy "<name>" blocked <tool> (...)`.
 - A shadow policy is evaluated on every call and logged to `policy-shadow.jsonl`, and is never enforced.
-- A hold blocks when Codex runs without approvals (`codex exec`, or approval policy `never`). With approvals on, a held shell command is refused once with instructions to re-run it with escalated permissions; Codex then shows its approval prompt and you decide. Codex cannot route other held tools to a prompt, so they are blocked.
+- A hold blocks when Codex runs without approvals (`codex exec`, or approval policy `never`). With approvals on, a held shell command is refused once with instructions to re-run it with escalated permissions; Codex then shows its approval prompt and you decide. Codex does not tell the hook whether the retry really asked for escalation, so if the agent re-runs it without escalation it runs without a prompt; the audit row then records `hold: "ran_without_prompt"` (otherwise `"approved"`). Codex cannot route other held tools to a prompt, so they are blocked.
 - Each audit row records what decided it in `input.armoriq_policy`: `source` (`v2`, `local`, `default` or `builtin`), the policy id and name, and any shadow verdicts.
 - Set `ARMORCODEX_POLICY_V2=false` to turn organization policy enforcement off.
