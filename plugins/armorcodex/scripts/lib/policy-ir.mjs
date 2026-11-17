@@ -67,10 +67,12 @@ function normalizeSelector(selector) {
 }
 
 function normalizeCondition(condition) {
-  if (!isPlainObject(condition)) return null;
+  if (!isPlainObject(condition)) return { value: condition, unsupported: true };
   const field = typeof condition.field === "string" ? condition.field.trim() : "";
   const op = typeof condition.op === "string" ? condition.op.trim() : "";
-  if (!CONDITION_FIELDS.has(field) || !CONDITION_OPS.has(op)) return null;
+  // Kept rather than dropped: a condition this evaluator cannot read must not
+  // widen a permit or switch off a forbid. conditionMatches fails it closed.
+  if (!CONDITION_FIELDS.has(field) || !CONDITION_OPS.has(op)) return { ...condition, unsupported: true };
   return { field, op, value: condition.value };
 }
 
@@ -113,7 +115,9 @@ function isCatchAll(rule) {
 }
 
 export function ruleToStatement(rule) {
-  const conditions = [...(Array.isArray(rule.conditions) ? rule.conditions : [])];
+  const conditions = (Array.isArray(rule.conditions) ? rule.conditions : []).map(
+    ({ unsupported: _unsupported, ...condition }) => condition
+  );
   if (rule.dataClass) conditions.push({ field: "data.class", op: "eq", value: rule.dataClass });
   if (rule.params) conditions.push({ field: "tool.params", op: "match", value: rule.params });
   if (rule.anyParam) conditions.push({ field: "tool.anyParam", op: "match", value: rule.anyParam });
@@ -136,8 +140,11 @@ export function statementToRule(statement) {
   };
   if (statement.action.type !== "tool" || !statement.action.eq) rule.selector = statement.action;
   const extra = [];
+  const count = (field) => statement.conditions.filter((c) => c.field === field).length;
   for (const condition of statement.conditions) {
-    if (condition.field === "data.class" && condition.op === "eq" && DATA_CLASSES.has(condition.value)) {
+    if (count(condition.field) > 1) {
+      extra.push(condition);
+    } else if (condition.field === "data.class" && condition.op === "eq" && DATA_CLASSES.has(condition.value)) {
       rule.dataClass = condition.value;
     } else if (condition.field === "tool.params" && condition.op === "match" && isPlainObject(condition.value)) {
       rule.params = condition.value;
@@ -162,9 +169,16 @@ export function documentToRules(doc) {
   const normalized = normalizePolicyDocument(doc);
   const rules = normalized.statements.map(statementToRule);
   if (normalized.defaults.decision !== "allow") {
-    rules.push({ id: DEFAULT_RULE_ID, action: ACTION_OF_DEFAULT[normalized.defaults.decision], tool: "*" });
+    rules.push({ id: defaultRuleId(rules), action: ACTION_OF_DEFAULT[normalized.defaults.decision], tool: "*" });
   }
   return rules;
+}
+
+function defaultRuleId(rules) {
+  const taken = new Set(rules.map((rule) => rule.id));
+  let id = DEFAULT_RULE_ID;
+  for (let n = 2; taken.has(id); n += 1) id = `${DEFAULT_RULE_ID}-${n}`;
+  return id;
 }
 
 export function rulesToDocument(rules, base = {}) {
@@ -220,7 +234,8 @@ function commandText(params) {
 export function parseBashCommand(command) {
   const raw = command.trim();
   const withoutEnv = raw.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+\s+)*/, "");
-  const program = (withoutEnv.split(/\s+/)[0] || "").replace(/^["'`]+|["'`]+$/g, "");
+  const word = (withoutEnv.split(/\s+/)[0] || "").replace(/^["'`]+|["'`]+$/g, "");
+  const program = word.split("/").pop() || word;
   return {
     raw,
     program,
@@ -284,7 +299,8 @@ function regexTest(pattern, value) {
 }
 
 function conditionMatches(condition, ctx) {
-  const { toolName, params, dataClasses, warnings, statementId } = ctx;
+  const { toolName, params, dataClasses, warnings, statementId, effect } = ctx;
+  if (condition.unsupported) return effect !== "permit";
   if (condition.field === "tool.params") {
     const result = matchParams(condition.value, params);
     if (!result.matched && result.missingKeys.length > 0) {
@@ -297,7 +313,12 @@ function conditionMatches(condition, ctx) {
     return result.matched;
   }
   if (condition.field === "tool.anyParam") return matchesAnyStringField(condition.value, params);
-  if (condition.field === "data.class") return dataClasses.has(condition.value);
+  if (condition.field === "data.class") {
+    const wanted = condition.op === "in" && Array.isArray(condition.value) ? condition.value : [condition.value];
+    return condition.op === "not_in"
+      ? Array.isArray(condition.value) && !condition.value.some((c) => dataClasses.has(c))
+      : wanted.some((c) => dataClasses.has(c));
+  }
   const actual = conditionValue(condition.field, toolName, params);
   const expected = condition.value;
   switch (condition.op) {
@@ -327,7 +348,7 @@ export function evaluatePolicyDocument({ policy, toolName, toolParams, dataClass
   const warnings = [];
   const matches = doc.statements.filter((statement) => {
     if (!selectorMatches(statement.action, toolName, params)) return false;
-    const ctx = { toolName, params, dataClasses, warnings, statementId: statement.id };
+    const ctx = { toolName, params, dataClasses, warnings, statementId: statement.id, effect: statement.effect };
     return statement.conditions.every((condition) => conditionMatches(condition, ctx));
   });
   const forbid = matches.find((s) => s.effect === "forbid");

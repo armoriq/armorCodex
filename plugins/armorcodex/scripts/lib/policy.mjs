@@ -84,13 +84,17 @@ function isLegacyStoredPolicy(raw) {
 
 async function backupLegacyFile(policyFilePath) {
   const text = await readFile(policyFilePath, "utf8");
-  const target = `${policyFilePath}.legacy.bak`;
-  try {
-    await writeFile(target, text, { encoding: "utf8", mode: PRIVATE_FILE_MODE, flag: "wx" });
-  } catch (error) {
-    if (error?.code !== "EEXIST") throw error;
+  const first = `${policyFilePath}.legacy.bak`;
+  for (const target of [first, `${policyFilePath}.legacy.${Date.now()}.${process.pid}.bak`]) {
+    try {
+      await writeFile(target, text, { encoding: "utf8", mode: PRIVATE_FILE_MODE, flag: "wx" });
+      return target;
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      if ((await readFile(target, "utf8")) === text) return target;
+    }
   }
-  return target;
+  throw new Error(`could not back up ${policyFilePath} before migrating it`);
 }
 
 /**
@@ -572,7 +576,7 @@ export async function applyPolicyCommand({ policyFilePath, state, command, actor
     );
     return {
       state: nextState,
-      message: `Policy ${command.id} moved to position ${clamped}. Order only changes the listing: a deny always wins over an allow.`
+      message: `Policy ${command.id} moved to position ${clamped}. Order only changes the listing, except that a final rule for every tool (\`*\`) is the default for unmatched tools: a deny always wins over an allow.`
     };
   }
   if (command.kind === "update") {

@@ -170,3 +170,98 @@ test("default hold blocks unmatched tools and lists as a catch-all rule", async 
   assert.equal(decision.allowed, false);
   assert.equal(evaluatePolicy({ policy: state.document, toolName: "Bash", toolParams: {} }).allowed, true);
 });
+
+function v1(statements, decision = "allow") {
+  return {
+    schemaVersion: "armor.policy.v1",
+    kind: "PolicyProfile",
+    metadata: { name: "console", description: "" },
+    defaults: { decision, conflictResolution: "deny_overrides" },
+    statements: statements.map((s) => ({
+      principal: { type: "agent", id: "armorcodex" },
+      resource: { type: "workspace", scope: "current" },
+      conditions: [],
+      ...s
+    }))
+  };
+}
+
+test("an edit keeps every condition of a statement, not only the last of each field", async () => {
+  const config = await tempConfig();
+  const document = v1(
+    [
+      {
+        id: "src-only",
+        effect: "permit",
+        action: { type: "tool", eq: "Write" },
+        conditions: [
+          { field: "tool.params", op: "match", value: { file_path: { $startsWith: "src/" } } },
+          { field: "tool.params", op: "match", value: { content: { $contains: "x" } } }
+        ]
+      }
+    ],
+    "deny"
+  );
+  await writeFile(config.policyFile, JSON.stringify({ version: 1, policy: document, history: [] }));
+  await handleArmorPolicyCommand("/armor policy add allow apply_patch", config, "tester");
+  await handleArmorPolicyCommand("/armor yes", config, "tester");
+  const state = await loadPolicyState(config.policyFile);
+  assert.deepEqual(state.document.statements[0].conditions, document.statements[0].conditions);
+  assert.equal(
+    evaluatePolicy({ policy: state.document, toolName: "Write", toolParams: { file_path: "/etc/passwd", content: "x" } }).allowed,
+    false
+  );
+});
+
+test("a user rule named default does not collide with the default decision", async () => {
+  const config = await tempConfig();
+  await writeFile(
+    config.policyFile,
+    JSON.stringify({
+      version: 1,
+      policy: { rules: [{ id: "default", action: "deny", tool: "bash" }, { id: "rest", action: "deny", tool: "*" }] }
+    })
+  );
+  const state = await loadPolicyState(config.policyFile);
+  assert.deepEqual(
+    state.policy.rules.map((r) => r.id),
+    ["default", "default-2"]
+  );
+  await handleArmorPolicyCommand("/armor policy remove default", config, "tester");
+  await handleArmorPolicyCommand("/armor yes", config, "tester");
+  const after = await loadPolicyState(config.policyFile);
+  assert.equal(after.document.defaults.decision, "deny");
+  assert.equal(after.document.statements.length, 0);
+});
+
+test("a condition the evaluator cannot read fails closed", () => {
+  const document = v1([
+    { id: "src", effect: "permit", action: { type: "tool", eq: "Write" }, conditions: [{ field: "file.path", op: "glob", value: "src/**" }] },
+    { id: "pii", effect: "forbid", action: { type: "tool", eq: "*" }, conditions: [{ field: "tool.name", op: "regex", value: "x" }] }
+  ], "deny");
+  assert.equal(evaluatePolicy({ policy: document, toolName: "Write", toolParams: { file_path: "src/a" } }).allowed, false);
+  assert.equal(evaluatePolicy({ policy: document, toolName: "Bash", toolParams: { command: "ls" } }).allowed, false);
+});
+
+test("data.class in and a path-qualified bash program match", () => {
+  const document = v1([
+    { id: "pci", effect: "forbid", action: { type: "tool", eq: "*" }, conditions: [{ field: "data.class", op: "in", value: ["PHI", "PCI"] }] },
+    { id: "no-rm", effect: "forbid", action: { type: "bash_program", eq: "rm" } }
+  ]);
+  const allowed = (tool, params) => evaluatePolicy({ policy: document, toolName: tool, toolParams: params }).allowed;
+  assert.equal(allowed("Bash", { command: "echo 4111 1111 1111 1111" }), false);
+  assert.equal(allowed("Bash", { command: "/bin/rm -rf build" }), false);
+  assert.equal(allowed("Bash", { command: "ls" }), true);
+});
+
+test("a second legacy file is still backed up when an older backup exists", async () => {
+  const config = await tempConfig();
+  await writeFile(`${config.policyFile}.legacy.bak`, "older");
+  const original = JSON.stringify({ version: 1, policy: { rules: [{ id: "p1", action: "deny", tool: "bash" }] } });
+  await writeFile(config.policyFile, original);
+  await loadPolicyState(config.policyFile);
+  const stored = JSON.parse(await readFile(config.policyFile, "utf8"));
+  const backup = stored.history.at(-1).reason.match(/(policy\.json\.legacy\.[\w.]+\.bak)/)[1];
+  assert.equal(await readFile(path.join(config.dataDir, backup), "utf8"), original);
+  assert.equal(await readFile(`${config.policyFile}.legacy.bak`, "utf8"), "older");
+});
