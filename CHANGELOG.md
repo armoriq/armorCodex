@@ -4,6 +4,11 @@ All notable changes to ArmorCodex are recorded here. Format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [0.3.8] - 2026-11-17
+
+### Changed
+- No functional change. This patch release proves that installs on 0.3.7 move to a new release on their own: the session after it is published prepares 0.3.8 beside the install, and the next session switches to it.
+
 ## [0.3.7] - 2026-11-16
 
 ### Added
