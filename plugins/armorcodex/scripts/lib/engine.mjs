@@ -133,8 +133,8 @@ function readIntentTokenRaw(input, session) {
   return "";
 }
 
-async function denyAndAudit(input, config, reason, errorMessage = reason) {
-  await auditToolCall(input, config, { status: "blocked", output: null, error_message: errorMessage }, null);
+async function denyAndAudit(input, config, reason, errorMessage = reason, status = "blocked") {
+  await auditToolCall(input, config, { status, output: null, error_message: errorMessage }, null);
   return denyPreTool(reason);
 }
 
@@ -466,7 +466,8 @@ export async function handlePreToolUse(input, config) {
       if (held.delegationId) {
         await savePolicyRecord(config, input.tool_use_id, { ...decision.record, delegation_id: held.delegationId });
       }
-      if (held.action === "block") return denyAndAudit(input, config, held.reason);
+      // A blocked row fails the plan on the backend; a held one keeps it open for the approved retry.
+      if (held.action === "block") return denyAndAudit(input, config, held.reason, held.reason, held.delegationId ? "held" : "blocked");
     }
   }
 

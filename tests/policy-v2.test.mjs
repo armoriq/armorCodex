@@ -187,8 +187,8 @@ function holdBackend(answers) {
 
 const jwtFor = (claims) => `h.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.s`;
 
-async function withPlan(cfg, sessionId) {
-  const token = { jwtToken: jwtFor({ type: "iap_token", plan_id: "plan-1", agent_id: "codex-minted" }), planId: "plan-1" };
+async function withPlan(cfg, sessionId, planId = "plan-1") {
+  const token = { jwtToken: jwtFor({ type: "iap_token", plan_id: planId, agent_id: "codex-minted" }), planId };
   await writeFile(cfg.runtimeFile, JSON.stringify({ sessions: { [sessionId]: { intentTokenRaw: JSON.stringify(token) } } }));
 }
 
@@ -221,12 +221,14 @@ test("a held call files one approval request, and its retry runs once the worksp
   });
   const server = await backend(handler);
   t.after(server.close);
-  const cfg = await config(server.url, { userEmail: "dev@acme.test", agentId: "codex", mcpName: "codex" });
+  const cfg = await config(server.url, { userEmail: "dev@acme.test", agentId: "codex", mcpName: "codex", auditEnabled: true });
   await withPlan(cfg, "s-hold");
 
   const first = await handlePreToolUse(heldBash("s-hold"), cfg);
   assert.equal(first.hookSpecificOutput.permissionDecision, "deny");
   assert.match(first.hookSpecificOutput.permissionDecisionReason, /"codex-floor" holds Bash for approval.*Approval request d-1 is waiting/);
+  const wal = (await readFile(path.join(cfg.dataDir, "audit", "current.jsonl"), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
+  assert.deepEqual(wal.map((r) => r.status), ["held"], "a held row keeps the plan open on the backend");
   const enforce = calls.find((c) => c.route === "/iap/sdk/enforce").body;
   assert.equal(enforce.agent_id, "codex-minted", "the agent the token was minted for, not the configured one");
   assert.deepEqual(enforce.intent_token, { jwt_token: jwtFor({ type: "iap_token", plan_id: "plan-1", agent_id: "codex-minted" }), plan_id: "plan-1" });
@@ -248,6 +250,36 @@ test("a held call files one approval request, and its retry runs once the worksp
   assert.match(prompt.systemMessage, /approved this Bash call \(request d-1\)/);
   assert.equal(await settleHold(cfg, { ...heldBash("s-hold"), hook_event_name: "PostToolUse" }), "approved");
   assert.equal(await settleHold(cfg, { ...heldBash("s-hold"), hook_event_name: "PostToolUse" }), undefined);
+});
+
+test("a retry under the next turn's plan spends the approval filed under the earlier plan", async (t) => {
+  let status = "pending";
+  const { handler, calls } = holdBackend({
+    "/iap/sdk/enforce": (all) =>
+      all.at(-1).body.intent_token.plan_id === "plan-1" && status === "approved"
+        ? [200, { allowed: true, enforcementAction: "allow", reason: "approved_delegation", metadata: { delegationId: "d-1" } }]
+        : [200, { allowed: false, enforcementAction: "hold", reason: "hold:Bash#0" }],
+    "/delegation/my-role": () => [200, { role: "member", limit: 5 }],
+    "/delegation/request": () => [201, { delegationId: "d-1", status: "pending" }],
+    "/delegation/d-1/status": () => [200, { status, delegationId: "d-1" }]
+  });
+  const server = await backend(handler);
+  t.after(server.close);
+  const cfg = await config(server.url, { userEmail: "dev@acme.test", agentId: "codex", mcpName: "codex" });
+  await withPlan(cfg, "s-turns");
+  await handlePreToolUse(heldBash("s-turns"), cfg);
+
+  await withPlan(cfg, "s-turns", "plan-2");
+  const pending = await handlePreToolUse(heldBash("s-turns"), cfg);
+  assert.match(pending.hookSpecificOutput.permissionDecisionReason, /Approval request d-1 is waiting/);
+  assert.equal(calls.filter((c) => c.route === "/delegation/request").length, 1, "no second request for the same call");
+
+  status = "approved";
+  await withPlan(cfg, "s-turns", "plan-3");
+  assert.equal(await handlePreToolUse(heldBash("s-turns"), cfg), null);
+  const plans = calls.filter((c) => c.route === "/iap/sdk/enforce").map((c) => c.body.intent_token.plan_id);
+  assert.deepEqual(plans, ["plan-1", "plan-2", "plan-3", "plan-1"]);
+  assert.equal(await settleHold(cfg, { ...heldBash("s-turns"), hook_event_name: "PostToolUse" }), "approved");
 });
 
 test("a held call is stopped when the approval check fails or the backend blocks it", async (t) => {

@@ -86,7 +86,7 @@ function signedToken(intentTokenRaw) {
   }
 }
 
-async function fileDelegation(config, { holds, key, planId, tool, domain, args, reason }) {
+async function fileDelegation(config, { holds, key, callId, token, tool, domain, args, reason }) {
   if (holds[key]?.delegationId) return { delegationId: holds[key].delegationId };
   if (!config.userEmail) return { error: "the signed-in ArmorIQ profile has no email" };
   const headers = { ...buildAuthHeaders(config), "X-User-Email": config.userEmail };
@@ -102,7 +102,7 @@ async function fileDelegation(config, { holds, key, planId, tool, domain, args, 
       requesterRole: role?.role || "agent_user",
       requesterLimit: Number(role?.limit) || 0,
       domain,
-      planId,
+      planId: token.plan_id,
       reason
     },
     headers,
@@ -112,8 +112,47 @@ async function fileDelegation(config, { holds, key, planId, tool, domain, args, 
   if (!res.ok || typeof body?.delegationId !== "string") {
     return { error: `HTTP ${res.status}${body?.message ? `: ${body.message}` : ""}` };
   }
-  holds[key] = { state: "requested", delegationId: body.delegationId, at: Date.now() };
+  holds[key] = { state: "requested", delegationId: body.delegationId, callId, token, at: Date.now() };
   return { delegationId: body.delegationId };
+}
+
+async function enforceUnder(config, token, { tool, domain, args }) {
+  const res = await postJson(
+    `${config.backendEndpoint}/iap/sdk/enforce`,
+    {
+      tool,
+      mcp: domain,
+      arguments: args,
+      intent_token: { jwt_token: token.jwt_token, plan_id: token.plan_id },
+      agent_id: token.agentId || config.agentId,
+      user_email: config.userEmail || undefined
+    },
+    buildAuthHeaders(config),
+    config.timeoutMs || 8000
+  );
+  return { ok: res.ok, status: res.status, verdict: unwrap(res.data) ?? {} };
+}
+
+/**
+ * The request this session filed for the same call under an earlier plan. Codex
+ * registers a new plan every turn, while the backend spends an approval only under
+ * the plan it was filed for, so an approved one is spent with that plan's token.
+ */
+async function earlierRequest(config, holds, callId, call, planId) {
+  const [key, entry] = Object.entries(holds)
+    .filter(([, h]) => h?.callId === callId && h.delegationId && h.token && h.token.plan_id !== planId)
+    .sort(([, a], [, b]) => b.at - a.at)[0] ?? [];
+  if (!entry) return null;
+  delete holds[key];
+  const url = `${config.backendEndpoint}/delegation/${encodeURIComponent(entry.delegationId)}/status`;
+  const status = (await getJson(url, buildAuthHeaders(config), config.timeoutMs || 8000).catch(() => null))?.status;
+  if (status === "pending") {
+    holds[key] = entry;
+    return { delegationId: entry.delegationId };
+  }
+  if (status !== "approved") return null;
+  const res = await enforceUnder(config, entry.token, call);
+  return res.ok && res.verdict.allowed === true ? { verdict: res.verdict } : null;
 }
 
 async function getJson(url, headers, timeoutMs) {
@@ -144,44 +183,42 @@ export async function resolveHold(config, input, decision, intentTokenRaw) {
   const args = isPlainObject(input.tool_input) ? input.tool_input : {};
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   const holds = await readHolds(config, sessionId);
+  const call = { tool, domain, args };
+  const callId = createHash("sha256").update(JSON.stringify([domain, tool, args])).digest("hex").slice(0, 32);
+  const key = createHash("sha256").update(JSON.stringify([token.plan_id, domain, tool, args])).digest("hex").slice(0, 32);
+  const approve = async (verdict) => {
+    const delegationId = verdict.metadata?.delegationId;
+    delete holds[key];
+    holds[callShape(toolName, input.tool_input)] = { state: "approved", delegationId, at: Date.now() };
+    await writeJson(holdsPath(config, sessionId), holds);
+    return { action: "allow", delegationId };
+  };
+  const waiting = (delegationId) => ({
+    action: "block",
+    delegationId,
+    reason:
+      `${head}. Approval request ${delegationId} is waiting for another member of the workspace; ` +
+      "retry the same call unchanged after it is approved"
+  });
   try {
-    const res = await postJson(
-      `${config.backendEndpoint}/iap/sdk/enforce`,
-      {
-        tool,
-        mcp: domain,
-        arguments: args,
-        intent_token: { jwt_token: token.jwt_token, plan_id: token.plan_id },
-        agent_id: token.agentId || config.agentId,
-        user_email: config.userEmail || undefined
-      },
-      buildAuthHeaders(config),
-      config.timeoutMs || 8000
-    );
-    const verdict = unwrap(res.data) ?? {};
-    if (!res.ok) return { action: "block", reason: `${head}. The approval check failed (HTTP ${res.status}), so it is blocked` };
-    if (verdict.allowed === true) {
-      const delegationId = verdict.metadata?.delegationId;
-      holds[callShape(toolName, input.tool_input)] = { state: "approved", delegationId, at: Date.now() };
-      await writeJson(holdsPath(config, sessionId), holds);
-      return { action: "allow", delegationId };
-    }
+    const { ok, status, verdict } = await enforceUnder(config, token, call);
+    if (!ok) return { action: "block", reason: `${head}. The approval check failed (HTTP ${status}), so it is blocked` };
+    if (verdict.allowed === true) return await approve(verdict);
     if (verdict.enforcementAction !== "hold") {
       return { action: "block", reason: `${head}. ${verdict.message || verdict.reason || "The approval check blocked it"}` };
     }
-    const key = createHash("sha256").update(JSON.stringify([token.plan_id, domain, tool, args])).digest("hex").slice(0, 32);
-    const filed = await fileDelegation(config, { holds, key, planId: token.plan_id, tool, domain, args, reason: verdict.reason });
+    const earlier = await earlierRequest(config, holds, callId, call, token.plan_id);
+    if (earlier?.verdict) return await approve(earlier.verdict);
+    if (earlier?.delegationId) {
+      await writeJson(holdsPath(config, sessionId), holds);
+      return waiting(earlier.delegationId);
+    }
+    const filed = await fileDelegation(config, { holds, key, callId, token, tool, domain, args, reason: verdict.reason });
     await writeJson(holdsPath(config, sessionId), holds);
     if (!filed.delegationId) {
       return { action: "block", reason: `${head}. The approval request could not be filed (${filed.error}), so it is blocked` };
     }
-    return {
-      action: "block",
-      delegationId: filed.delegationId,
-      reason:
-        `${head}. Approval request ${filed.delegationId} is waiting for another member of the workspace; ` +
-        "retry the same call unchanged after it is approved"
-    };
+    return waiting(filed.delegationId);
   } catch (error) {
     return {
       action: "block",
