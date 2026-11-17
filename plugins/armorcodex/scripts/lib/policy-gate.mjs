@@ -70,12 +70,9 @@ async function readHolds(config, sessionId) {
 }
 
 /**
- * Codex PreToolUse cannot ask the user, and it does not show whether a call
- * requested escalation, so a held call is first refused with instructions to
- * re-run it with escalated permissions. Codex only runs an escalated command
- * after its approval prompt, where the PermissionRequest hook leaves the
- * decision to the person. The identical retry in the same turn is let through
- * once; whether it then reached a prompt is recorded on its audit row.
+ * PreToolUse cannot ask, nor see whether a call asked for escalation, so a held
+ * call is refused with instructions to re-run it escalated. The identical retry
+ * in the same turn is let through once, to Codex's approval prompt.
  */
 export async function resolveHold(config, input, decision) {
   const toolName = input.tool_name;
