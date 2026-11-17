@@ -60,7 +60,9 @@ async function currentBundle(config) {
   const saved = await readJson(bundleFile(config), null);
   const matches =
     saved?.backend === identity.backend && saved.key === identity.key && saved.agentId === agentId;
-  if (matches && isPlainObject(saved.entry)) cache.cached = saved.entry;
+  // A confirmation time in the future (clock moved back, or a hand-written
+  // file) would never revalidate, so such an entry is refetched.
+  if (matches && isPlainObject(saved.entry) && !(saved.entry.confirmedAt > Date.now())) cache.cached = saved.entry;
   const before = matches ? saved.entry?.confirmedAt : undefined;
   await cache.refresh(BUNDLE_REVALIDATE_MS);
   if (cache.cached && cache.cached.confirmedAt !== before) {
@@ -162,10 +164,15 @@ export async function decideV2(config, toolName, toolArgs) {
   const call = { ...mcpCall(toolName), args: isPlainObject(toolArgs) ? toolArgs : {}, userEmail: config.userEmail };
   const inputs = callInputs(agent, call);
 
-  const shadow = shadows.map((entry) => {
+  const shadow = shadows.flatMap((entry) => {
     const layers = { ...active, [entry.targetType === "org" ? "floor" : "agent"]: entry };
-    const evaluation = evaluateLayers(evaluate, inputs, boundOf(layers));
-    return { policy_id: entry.policyId, policy_name: entry.name, verdict: evaluation.verdict, rule: ruleOf(evaluation) };
+    try {
+      const evaluation = evaluateLayers(evaluate, inputs, boundOf(layers));
+      return [{ policy_id: entry.policyId, policy_name: entry.name, verdict: evaluation.verdict, rule: ruleOf(evaluation) }];
+    } catch (error) {
+      process.stderr.write(`[armorcodex] shadow policy "${entry.name}" not evaluated: ${error?.message ?? error}\n`);
+      return [];
+    }
   });
 
   if (!active.floor && !active.agent) {

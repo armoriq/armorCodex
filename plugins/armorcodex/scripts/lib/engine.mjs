@@ -36,9 +36,10 @@ import { autoUpdate } from "./update-apply.mjs";
 import { decideV2, logShadow } from "./v2-decision.mjs";
 import {
   combinePolicyDecisions,
-  isReleasedHold,
+  markHoldPrompted,
   resolveHold,
   savePolicyRecord,
+  settleHold,
   takePolicyRecord,
   v2BlockReason,
   withPolicyRecord
@@ -448,7 +449,8 @@ export async function handlePreToolUse(input, config) {
       return denyAndAudit(input, config, decision.reason || "ArmorCodex policy denied");
     }
     const reason = v2BlockReason(toolName, decision);
-    if (shouldDeny(config)) return denyAndAudit(input, config, reason);
+    // The local file has always blocked in monitor mode too; v2 sharing the verdict does not change that.
+    if (shouldDeny(config) || decision.localBlocks) return denyAndAudit(input, config, reason);
     process.stderr.write(`[armorcodex] monitor mode: ${reason}; allowing it\n`);
   }
   if (decision.verdict === "hold") {
@@ -619,7 +621,7 @@ export async function handlePermissionRequest(input, config) {
   }
 
   const { decision } = await decidePolicy(input, config, toolName, toolInput, { logShadows: false });
-  if (decision.verdict === "hold" && (await isReleasedHold(config, input))) {
+  if (decision.verdict === "hold" && (await markHoldPrompted(config, input))) {
     return withSystemMessage(
       {},
       `${v2BlockReason(toolName, decision, "holds")} for your approval. Approve it only if you intended it.`
@@ -676,7 +678,7 @@ async function takeToolDuration(config, toolUseId) {
   return started > 0 ? Date.now() - started : undefined;
 }
 
-async function buildAuditRow(input, config, outcome, unknownStep) {
+async function buildAuditRow(input, config, outcome, unknownStep, hold) {
   const toolName = input.tool_name;
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   const session = getSession(await loadRuntimeState(config.runtimeFile), sessionId) || {};
@@ -687,27 +689,31 @@ async function buildAuditRow(input, config, outcome, unknownStep) {
     action: toolName,
     tool: toolName,
     capability: toolCapability(toolName),
-    input: withPolicyRecord(redactSecrets(inputs), await takePolicyRecord(config, input.tool_use_id)),
+    input: withPolicyRecord(redactSecrets(inputs), await takePolicyRecord(config, input.tool_use_id), hold),
     executed_at: new Date().toISOString(),
     duration_ms: await takeToolDuration(config, input.tool_use_id),
     ...outcome
   });
 }
 
-async function auditToolCall(input, config, outcome, unknownStep = 0) {
+async function auditToolCall(input, config, outcome, unknownStep = 0, hold = undefined) {
   if (!config.auditEnabled || !config.apiKey || typeof input.tool_name !== "string" || !input.tool_name) return;
   try {
-    await createIapService(config).enqueueAudit(await buildAuditRow(input, config, outcome, unknownStep));
+    await createIapService(config).enqueueAudit(await buildAuditRow(input, config, outcome, unknownStep, hold));
   } catch (error) {
     process.stderr.write(`[armorcodex] audit row rejected: ${error instanceof Error ? error.message : error}\n`);
   }
 }
 
 export async function handlePostToolUse(input, config) {
-  await auditToolCall(input, config, {
-    status: "success",
-    output: redactSecrets(sanitizeParams(input.tool_response, config.sanitize))
-  });
+  const hold = await settleHold(config, input);
+  await auditToolCall(
+    input,
+    config,
+    { status: "success", output: redactSecrets(sanitizeParams(input.tool_response, config.sanitize)) },
+    0,
+    hold
+  );
   return null;
 }
 
@@ -716,11 +722,18 @@ export async function handlePostToolUse(input, config) {
 // ---------------------------------------------------------------------------
 
 export async function handlePostToolUseFailure(input, config) {
-  await auditToolCall(input, config, {
-    status: "failed",
-    output: null,
-    error_message: typeof input.error === "string" ? redactSecrets(input.error) : "Unknown error"
-  });
+  const hold = await settleHold(config, input);
+  await auditToolCall(
+    input,
+    config,
+    {
+      status: "failed",
+      output: null,
+      error_message: typeof input.error === "string" ? redactSecrets(input.error) : "Unknown error"
+    },
+    0,
+    hold
+  );
   return null;
 }
 

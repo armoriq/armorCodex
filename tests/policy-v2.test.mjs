@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { handlePermissionRequest, handlePreToolUse } from "../plugins/armorcodex/scripts/lib/engine.mjs";
 import { decideV2 } from "../plugins/armorcodex/scripts/lib/v2-decision.mjs";
+import { settleHold } from "../plugins/armorcodex/scripts/lib/policy-gate.mjs";
 
 // Captured from conmap-auto's GET /policy/bundles/current?agent=armorcodex: an
 // active org-wide policy blocking apply_patch and an agent shadow blocking Bash.
@@ -170,9 +171,10 @@ test("a held Bash call: blocked with approvals off; with approvals on, released 
   const server = await backend(serveBundle(withPolicies([FLOOR_HOLD])));
   t.after(server.close);
   const cfg = await config(server.url);
-  const call = (mode) => ({
+  const call = (mode, turn = "t1") => ({
     hook_event_name: "PreToolUse",
     session_id: "s-hold",
+    turn_id: turn,
     permission_mode: mode,
     tool_name: "Bash",
     tool_input: { command: "date -u" }
@@ -192,8 +194,63 @@ test("a held Bash call: blocked with approvals off; with approvals on, released 
   assert.equal(prompt.hookSpecificOutput, undefined, "the person decides");
   assert.match(prompt.systemMessage, /codex-floor/);
 
+  assert.equal(await settleHold(cfg, { ...call("default"), hook_event_name: "PostToolUse" }), "approved");
+
   const other = await handlePreToolUse({ ...call("default"), tool_input: { command: "date" } }, cfg);
   assert.equal(other.hookSpecificOutput.permissionDecision, "deny", "a release covers only that exact command");
+  const later = await handlePreToolUse(call("default", "t2"), cfg);
+  assert.equal(later.hookSpecificOutput.permissionDecision, "deny", "a release covers only the turn it was refused in");
+});
+
+test("a released hold that never reached a prompt is recorded as such", async (t) => {
+  const server = await backend(serveBundle(withPolicies([FLOOR_HOLD])));
+  t.after(server.close);
+  const cfg = await config(server.url);
+  const call = { hook_event_name: "PreToolUse", session_id: "s-np", turn_id: "t1", permission_mode: "default", tool_name: "Bash", tool_input: { command: "make" } };
+  await handlePreToolUse(call, cfg);
+  assert.equal(await handlePreToolUse(call, cfg), null);
+  assert.equal(await settleHold(cfg, { ...call, hook_event_name: "PostToolUse" }), "ran_without_prompt");
+  assert.equal(await settleHold(cfg, { ...call, hook_event_name: "PostToolUse" }), undefined);
+});
+
+test("monitor mode still enforces a local block that v2 also makes", async (t) => {
+  const server = await backend(serveBundle(LIVE));
+  t.after(server.close);
+  const cfg = await config(server.url, { mode: "monitor" });
+  await writeFile(cfg.policyFile, JSON.stringify({ version: 1, policy: { rules: [{ id: "p1", action: "deny", tool: "apply_patch" }] } }));
+  const out = await handlePreToolUse(
+    { hook_event_name: "PreToolUse", session_id: "s1", tool_name: "apply_patch", tool_input: { input: "x" } },
+    cfg
+  );
+  assert.equal(out.hookSpecificOutput.permissionDecision, "deny");
+});
+
+test("a cached bundle confirmed in the future is refetched", async (t) => {
+  const server = await backend(serveBundle(LIVE));
+  t.after(server.close);
+  const cfg = await config(server.url);
+  await writeFile(
+    path.join(cfg.dataDir, "policy-bundle.json"),
+    JSON.stringify({
+      backend: server.url,
+      key: (await import("node:crypto")).createHash("sha256").update(cfg.apiKey).digest("hex").slice(0, 16),
+      agentId: "armorcodex",
+      entry: { agentId: "armorcodex", etag: ETAG, agent: { ...LIVE.agents[0], policies: [] }, confirmedAt: Date.now() + 365 * 864e5 }
+    })
+  );
+  const decision = await decideV2(cfg, "apply_patch", {});
+  assert.equal(server.requests.length, 1);
+  assert.equal(server.requests[0].ifNoneMatch, undefined);
+  assert.equal(decision.verdict, "block");
+});
+
+test("a shadow document that fails to evaluate is skipped, not enforced", async (t) => {
+  const broken = { ...FLOOR, policyId: "broken", name: "broken-shadow", targetType: "org", status: "shadow", document: { defaults: null, statements: [] } };
+  const server = await backend(serveBundle(withPolicies([FLOOR, broken])));
+  t.after(server.close);
+  const decision = await decideV2(await config(server.url), "Bash", { command: "ls" });
+  assert.equal(decision.verdict, "allow");
+  assert.deepEqual(decision.shadow, []);
 });
 
 test("ARMORCODEX_POLICY_V2=false turns organization policy off without a request", async (t) => {

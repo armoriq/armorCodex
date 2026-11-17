@@ -18,6 +18,7 @@ export function combinePolicyDecisions(v2, local) {
     return {
       verdict: v2.verdict,
       reason: v2.reason,
+      localBlocks: localVerdict === "block",
       record: { source: "v2", policy_id: v2.policyId, policy_name: v2.policyName, shadow }
     };
   }
@@ -66,7 +67,8 @@ async function readHolds(config, sessionId) {
  * requested escalation, so a held call is first refused with instructions to
  * re-run it with escalated permissions. Codex only runs an escalated command
  * after its approval prompt, where the PermissionRequest hook leaves the
- * decision to the person. The identical retry is let through once.
+ * decision to the person. The identical retry in the same turn is let through
+ * once; whether it then reached a prompt is recorded on its audit row.
  */
 export async function resolveHold(config, input, decision) {
   const toolName = input.tool_name;
@@ -84,12 +86,13 @@ export async function resolveHold(config, input, decision) {
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   const shape = callShape(toolName, input.tool_input);
   const holds = await readHolds(config, sessionId);
-  if (holds[shape]?.state === "held") {
-    holds[shape] = { state: "released", at: Date.now() };
+  const turn = typeof input.turn_id === "string" ? input.turn_id : "";
+  if (holds[shape]?.state === "held" && holds[shape].turn === turn) {
+    holds[shape] = { state: "released", at: Date.now(), turn };
     await writeJson(holdsPath(config, sessionId), holds);
     return { action: "release" };
   }
-  holds[shape] = { state: "held", at: Date.now() };
+  holds[shape] = { state: "held", at: Date.now(), turn };
   await writeJson(holdsPath(config, sessionId), holds);
   return {
     action: "block",
@@ -99,11 +102,34 @@ export async function resolveHold(config, input, decision) {
   };
 }
 
-/** True when this approval prompt is for a call PreToolUse released under a hold. */
-export async function isReleasedHold(config, input) {
+/** True, and noted, when this approval prompt is for a call PreToolUse released under a hold. */
+export async function markHoldPrompted(config, input) {
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
+  const shape = callShape(input.tool_name, input.tool_input);
   const holds = await readHolds(config, sessionId);
-  return holds[callShape(input.tool_name, input.tool_input)]?.state === "released";
+  if (holds[shape]?.state !== "released") return false;
+  holds[shape] = { ...holds[shape], state: "prompted" };
+  await writeJson(holdsPath(config, sessionId), holds);
+  return true;
+}
+
+/** How a released hold ended once its call ran: through Codex's prompt, or without one. */
+export async function settleHold(config, input) {
+  const sessionId = typeof input.session_id === "string" ? input.session_id : "";
+  if (typeof input.tool_name !== "string") return undefined;
+  const shape = callShape(input.tool_name, input.tool_input);
+  const holds = await readHolds(config, sessionId);
+  const state = holds[shape]?.state;
+  if (state !== "released" && state !== "prompted") return undefined;
+  delete holds[shape];
+  await writeJson(holdsPath(config, sessionId), holds);
+  if (state === "released") {
+    process.stderr.write(
+      `[armorcodex] held ${input.tool_name} call ran without a Codex approval prompt (it was not re-run with escalated permissions)\n`
+    );
+    return "ran_without_prompt";
+  }
+  return "approved";
 }
 
 const decisionPath = (config, toolUseId) =>
@@ -130,8 +156,8 @@ export async function takePolicyRecord(config, toolUseId) {
   }
 }
 
-export function withPolicyRecord(input, record) {
-  if (!record) return input;
-  const clean = Object.fromEntries(Object.entries(record).filter(([, v]) => v !== undefined));
+export function withPolicyRecord(input, record, hold) {
+  if (!record && !hold) return input;
+  const clean = Object.fromEntries(Object.entries({ ...record, hold }).filter(([, v]) => v !== undefined));
   return isPlainObject(input) ? { ...input, armoriq_policy: clean } : { value: input, armoriq_policy: clean };
 }
