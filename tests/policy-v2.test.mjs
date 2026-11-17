@@ -75,12 +75,14 @@ test("the org floor blocks with the policy name; the shadow is reported, not enf
   assert.equal(patch.verdict, "block");
   assert.equal(patch.policyName, "codex-floor");
   assert.equal(patch.targetType, "org");
+  assert.equal(patch.ruleId, "apply_patch#0");
+  assert.equal(patch.policyHash, FLOOR.policyHash);
 
   const bash = await decideV2(cfg, "Bash", { command: "ls" });
   assert.equal(bash.verdict, "allow");
   assert.deepEqual(
-    bash.shadow.map((s) => [s.policy_name, s.verdict]),
-    [["codex-shadow-bash", "block"]]
+    bash.shadow.map((s) => [s.policy_name, s.verdict, s.rule_id]),
+    [["codex-shadow-bash", "block", "Bash#0"]]
   );
   assert.equal(server.requests[0].url, "/policy/bundles/current?agent=armorcodex");
   assert.equal(server.requests[0].apiKey, cfg.apiKey);

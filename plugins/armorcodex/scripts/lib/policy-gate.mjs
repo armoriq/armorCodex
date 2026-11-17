@@ -19,7 +19,14 @@ export function combinePolicyDecisions(v2, local) {
       verdict: v2.verdict,
       reason: v2.reason,
       localBlocks: localVerdict === "block",
-      record: { source: "v2", policy_id: v2.policyId, policy_name: v2.policyName, shadow }
+      record: {
+        source: "v2",
+        policy_id: v2.policyId,
+        policy_name: v2.policyName,
+        policy_hash: v2.policyHash,
+        rule_id: v2.ruleId,
+        shadow
+      }
     };
   }
   const matched = local.matchedRule?.id;
@@ -28,7 +35,7 @@ export function combinePolicyDecisions(v2, local) {
     reason: local.reason,
     record: {
       source: matched || local.effect !== "default" ? "local" : "default",
-      ...(matched ? { policy_name: matched } : {}),
+      ...(matched ? { policy_name: matched, rule_id: matched } : {}),
       shadow
     }
   };

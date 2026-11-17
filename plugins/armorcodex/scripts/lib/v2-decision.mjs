@@ -168,7 +168,7 @@ export async function decideV2(config, toolName, toolArgs) {
     const layers = { ...active, [entry.targetType === "org" ? "floor" : "agent"]: entry };
     try {
       const evaluation = evaluateLayers(evaluate, inputs, boundOf(layers));
-      return [{ policy_id: entry.policyId, policy_name: entry.name, verdict: evaluation.verdict, rule: ruleOf(evaluation) }];
+      return [{ policy_id: entry.policyId, policy_name: entry.name, verdict: evaluation.verdict, rule_id: ruleOf(evaluation) }];
     } catch (error) {
       process.stderr.write(`[armorcodex] shadow policy "${entry.name}" not evaluated: ${error?.message ?? error}\n`);
       return [];
@@ -185,6 +185,8 @@ export async function decideV2(config, toolName, toolArgs) {
     reason: `${evaluation.verdict}:${ruleOf(evaluation)}`,
     policyId: entry?.policyId,
     policyName: entry?.name,
+    policyHash: entry?.policyHash ?? undefined,
+    ruleId: ruleOf(evaluation),
     targetType: entry?.targetType,
     shadow
   };
@@ -193,7 +195,7 @@ export async function decideV2(config, toolName, toolArgs) {
 export async function logShadow(config, toolName, sessionId, shadow, activeVerdict) {
   for (const s of shadow.filter((entry) => entry.verdict !== activeVerdict)) {
     process.stderr.write(
-      `[armorcodex] shadow policy "${s.policy_name}" would ${s.verdict} ${toolName} (${s.rule}); not enforced\n`
+      `[armorcodex] shadow policy "${s.policy_name}" would ${s.verdict} ${toolName} (${s.rule_id}); not enforced\n`
     );
   }
   await appendNdjsonLine(path.join(config.dataDir, "policy-shadow.jsonl"), {
