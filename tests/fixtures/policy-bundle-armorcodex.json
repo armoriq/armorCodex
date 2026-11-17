@@ -1,0 +1,131 @@
+{
+ "orgId": "bc81503c-0d33-40e1-86f9-adac405e07de",
+ "agents": [
+  {
+   "agentId": "38f783a9-2c9e-4e11-bd58-6d1c7e3e9cd0",
+   "name": "armorcodex",
+   "registeredName": "codex",
+   "registered": true,
+   "inactive": false,
+   "policy": null,
+   "policies": [
+    {
+     "policyId": "0f5ac518-9f1c-44b4-92ac-995660c41b4e",
+     "name": "codex-floor",
+     "policyHash": "sha256:246d9a416d59f38eeffd95e876f51a537c2a0f5da78b101d12a135169bf62b68",
+     "document": {
+      "layer": "floor",
+      "target": {
+       "org": "*"
+      },
+      "capture": {
+       "redact": [
+        "*token*",
+        "*secret*",
+        "authorization"
+       ],
+       "sample": 1,
+       "arguments": false,
+       "maxBytesPerCall": 16384
+      },
+      "defaults": {
+       "files": "allow",
+       "tools": "allow",
+       "skills": "allow",
+       "network": "block",
+       "approval": {
+        "anyMember": true,
+        "approvers": 1
+       }
+      },
+      "policyId": "0f5ac518-9f1c-44b4-92ac-995660c41b4e",
+      "expiresAt": "never",
+      "policyHash": "sha256:246d9a416d59f38eeffd95e876f51a537c2a0f5da78b101d12a135169bf62b68",
+      "statements": [
+       {
+        "id": "st-apply-patch-0",
+        "match": {
+         "tool": "apply_patch",
+         "order": 0,
+         "keyTier": "exact"
+        },
+        "effect": "block",
+        "subject": null,
+        "expiresAt": "never",
+        "conditions": [],
+        "provenance": {
+         "layer": "floor",
+         "source": "yaml",
+         "ruleKey": "apply_patch",
+         "variant": 0
+        }
+       }
+      ],
+      "schemaVersion": "armor.policy.v2"
+     },
+     "targetType": "org",
+     "status": "active"
+    },
+    {
+     "policyId": "8a3fa036-a640-4b18-963d-3e1c00e0db32",
+     "name": "codex-shadow-bash",
+     "policyHash": "sha256:512187f7d93f2e1d118e03a9a61d214686ad5842b148962860ed5bb4bfdd9cfa",
+     "document": {
+      "layer": "agent",
+      "target": {
+       "agent": "codex"
+      },
+      "capture": {
+       "redact": [
+        "*token*",
+        "*secret*",
+        "authorization"
+       ],
+       "sample": 1,
+       "arguments": false,
+       "maxBytesPerCall": 16384
+      },
+      "defaults": {
+       "files": "allow",
+       "tools": "allow",
+       "skills": "allow",
+       "network": "block",
+       "approval": {
+        "anyMember": true,
+        "approvers": 1
+       }
+      },
+      "policyId": "8a3fa036-a640-4b18-963d-3e1c00e0db32",
+      "expiresAt": "never",
+      "policyHash": "sha256:512187f7d93f2e1d118e03a9a61d214686ad5842b148962860ed5bb4bfdd9cfa",
+      "statements": [
+       {
+        "id": "st-bash-0",
+        "match": {
+         "tool": "Bash",
+         "order": 0,
+         "keyTier": "exact"
+        },
+        "effect": "block",
+        "subject": null,
+        "expiresAt": "never",
+        "conditions": [],
+        "provenance": {
+         "layer": "agent",
+         "source": "yaml",
+         "ruleKey": "Bash",
+         "variant": 0
+        }
+       }
+      ],
+      "schemaVersion": "armor.policy.v2"
+     },
+     "targetType": "agent",
+     "status": "shadow"
+    }
+   ],
+   "tools": [],
+   "members": []
+  }
+ ]
+}
