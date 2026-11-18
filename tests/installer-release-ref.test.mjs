@@ -227,3 +227,58 @@ test("an unreachable release API falls back to main instead of failing the insta
   assert.match(plain(result.stdout), /couldn't resolve the latest release/);
   assert.equal(git(installHome, "rev-parse", "HEAD"), mainSha);
 });
+
+test("a failed release lookup leaves an install that sits on a release tag where it is", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "armorcodex-release-ref-keep-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+
+  const { repo, releaseSha } = originRepo(root);
+  const tags = { current: "v9.9.9" };
+  const { baseUrl } = await releaseApi(t, tags);
+  const { staged, binDir } = stagedInstaller(root);
+  const home = join(root, "home");
+  const installHome = join(root, "install", "armorCodex");
+  mkdirSync(home, { recursive: true });
+  const run = (releaseApiUrl) =>
+    runInstaller({ staged, binDir, home, installHome, gitUrl: `file://${repo}`, releaseApiUrl });
+
+  const first = await run(baseUrl);
+  assert.equal(first.status, 0, first.stderr || first.stdout);
+  assert.equal(git(installHome, "rev-parse", "HEAD"), releaseSha);
+
+  tags.current = "rate limited";
+  const second = await run(baseUrl);
+
+  assert.equal(second.status, 0, second.stderr || second.stdout);
+  assert.match(plain(second.stdout), /leaving the installed version as it is/);
+  assert.equal(git(installHome, "rev-parse", "HEAD"), releaseSha);
+  assert.equal(existsSync(join(installHome, "UNRELEASED.md")), false);
+});
+
+test("an install newer than the latest release is not moved back to it", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "armorcodex-release-ref-newer-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+
+  const { repo, mainSha } = originRepo(root);
+  writeFileSync(join(repo, "plugins", "armorcodex", "package.json"), '{"name":"armorcodex","version":"10.0.0"}\n');
+  git(repo, "add", "-A");
+  git(repo, "commit", "--quiet", "-m", "bump to 10.0.0");
+  const bumpedSha = git(repo, "rev-parse", "HEAD");
+  assert.notEqual(bumpedSha, mainSha);
+  const { baseUrl } = await releaseApi(t, { current: "v9.9.9" });
+  const { staged, binDir } = stagedInstaller(root);
+  const home = join(root, "home");
+  const installHome = join(root, "install", "armorCodex");
+  mkdirSync(home, { recursive: true });
+  const base = { staged, binDir, home, installHome, gitUrl: `file://${repo}`, releaseApiUrl: baseUrl };
+
+  const pinned = await runInstaller({ ...base, extraEnv: { ARMORCODEX_GIT_REF: "main" } });
+  assert.equal(pinned.status, 0, pinned.stderr || pinned.stdout);
+  assert.equal(git(installHome, "rev-parse", "HEAD"), bumpedSha);
+
+  const update = await runInstaller(base);
+
+  assert.equal(update.status, 0, update.stderr || update.stdout);
+  assert.match(plain(update.stdout), /installed ArmorCodex 10\.0\.0 is newer than the latest release v9\.9\.9/);
+  assert.equal(git(installHome, "rev-parse", "HEAD"), bumpedSha);
+});
