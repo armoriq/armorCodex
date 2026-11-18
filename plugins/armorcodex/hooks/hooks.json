@@ -75,7 +75,7 @@
           {
             "type": "command",
             "command": "node ./scripts/bootstrap.mjs router",
-            "timeout": 30
+            "timeout": 3
           }
         ]
       }
