@@ -822,3 +822,42 @@ test("a [features] header with a trailing comment still gets the hooks flag", as
   assert.equal(config.match(/^\[features\]/gm)?.length, 1, config);
   assert.match(config, /^\[features\] # mine\nhooks = true\njs_repl = true$/m);
 });
+
+const OLD_MANAGED_BLOCK = '\n# >>> ArmorCodex managed block (do not edit manually) >>>\n[features]\ncodex_hooks = true\n\n[mcp_servers.armorcodex-policy]\ncommand = "node"\nargs = ["/old/bootstrap.mjs", "mcp"]\n# <<< ArmorCodex managed block <<<\n';
+
+for (const { name, before, runs = 1, uninstall = false, features } of [
+  { name: "an existing [features] table gets the hooks flag merged in", before: "[features]\njs_repl = true\n", features: ["hooks = true", "js_repl = true"] },
+  { name: "a config with no [features] table gets one", before: 'model = "o3"\n', features: ["hooks = true"] },
+  { name: "a config an old installer left with two [features] tables heals", before: `[features]\njs_repl = true\n${OLD_MANAGED_BLOCK}`, features: ["hooks = true", "js_repl = true"] },
+  { name: "a hooks value the user set is kept", before: "[features]\nhooks = false\n", features: ["hooks = false"] },
+  { name: "re-running does not add a second table or flag", before: "[features]\njs_repl = true\n", runs: 3, features: ["hooks = true", "js_repl = true"] },
+  { name: "uninstall leaves a single [features] table", before: "[features]\njs_repl = true\n", uninstall: true, features: ["hooks = true", "js_repl = true"] },
+]) {
+  test(`config.toml: ${name}`, async (t) => {
+    const root = mkdtempSync(join(tmpdir(), "armorcodex-features-"));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const home = join(root, "home");
+    const binDir = join(root, "bin");
+    const configPath = join(home, ".codex", "config.toml");
+    mkdirSync(join(home, ".codex"), { recursive: true });
+    mkdirSync(binDir, { recursive: true });
+    writeFileSync(configPath, before);
+    stubTools(binDir);
+    saveCodexLogin(home);
+
+    for (let run = 0; run < runs; run++) {
+      const result = await runInstaller(root, home, binDir);
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+    }
+    if (uninstall) {
+      const result = await runInstaller(root, home, binDir, "--uninstall");
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+    }
+
+    const config = readFileSync(configPath, "utf8");
+    assert.equal(config.match(/^\s*\[features\]/gm)?.length, 1, config);
+    const table = config.split(/^\s*\[features\][^\n]*\n/m)[1].split(/^\s*\[/m)[0];
+    assert.deepEqual(table.split("\n").map((line) => line.trim()).filter((line) => line && !line.startsWith("#")).sort(), features, config);
+    assert.equal(/ArmorCodex managed block/.test(config), !uninstall, config);
+  });
+}
