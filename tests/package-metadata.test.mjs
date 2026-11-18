@@ -38,7 +38,7 @@ test("release metadata uses the registry production SDK 0.8.24 and one ArmorCode
     agentsMarketplace.metadata.version,
     agentsMarketplace.plugins[0].version,
   ]) {
-    assert.equal(version, "0.3.7");
+    assert.equal(version, "0.3.8");
   }
 });
 
