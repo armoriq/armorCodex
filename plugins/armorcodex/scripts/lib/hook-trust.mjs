@@ -48,7 +48,7 @@ export function ourHookStatuses(listResponse, { hooksFile, bootstrapPath }) {
   return statuses;
 }
 
-function appServer({ codexBin, env, timeoutMs }) {
+export function appServer({ codexBin, env, timeoutMs }) {
   const child = spawn(codexBin, ["app-server"], { env, stdio: ["pipe", "pipe", "ignore"] });
   const pending = new Map();
   let nextId = 1;
