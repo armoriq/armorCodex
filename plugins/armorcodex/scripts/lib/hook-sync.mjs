@@ -177,6 +177,7 @@ export function scheduleHookSync({ installHome, dataDir, env = process.env, now 
       stdio: "ignore",
       env: { ...env, ARMORCODEX_SYNC_HOOKS_FILE: hooksFile, ARMORCODEX_SYNC_DATA_DIR: dataDir }
     });
+    child.on?.("error", () => {});
     child.unref?.();
     return { started: true };
   } catch {
