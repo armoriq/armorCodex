@@ -453,7 +453,8 @@ const GROUPS = {
   PermissionRequest: { matcher: "*", hooks: [hook({ statusMessage: "Checking ArmorCodex approval policy" })] },
   PostToolUse: { matcher: "*", hooks: [hook({ statusMessage: "Auditing ArmorCodex command" })] },
   Stop: { hooks: [hook({ timeout: 30 })] },
-  SessionEnd: { hooks: [hook({ timeout: 30 })] },
+  // Codex clamps a SessionEnd timeout to 3s and logs a warning when asked for more.
+  SessionEnd: { hooks: [hook({ timeout: 3 })] },
 };
 
 const ours = (entry) => entry?.type === "command"
@@ -488,6 +489,26 @@ function addMissing(hooks) {
   return added;
 }
 
+// An update brings an existing ArmorCodex entry's settings (timeout, status
+// message) up to the current definition, so a changed timeout reaches it. The
+// command is kept: it may point at a checkout other than this one.
+function refreshOurs(hooks) {
+  const refreshed = [];
+  for (const [event, { hooks: [canonical] }] of Object.entries(GROUPS)) {
+    for (const group of hooks[event] ?? []) {
+      if (!hasOurs(group)) continue;
+      group.hooks = group.hooks.map((entry) => {
+        if (!ours(entry)) return entry;
+        const wanted = { ...canonical, command: entry.command };
+        if (JSON.stringify(entry) === JSON.stringify(wanted)) return entry;
+        if (!refreshed.includes(event)) refreshed.push(event);
+        return wanted;
+      });
+    }
+  }
+  return refreshed;
+}
+
 function stripGroup(group) {
   return hasOurs(group) ? { ...group, hooks: group.hooks.filter((entry) => !ours(entry)) } : group;
 }
@@ -512,10 +533,12 @@ function save(config, existed) {
 function add() {
   const existed = existsSync(hooksPath);
   const config = existed ? readConfig() : { hooks: {} };
+  const refreshed = refreshOurs(config.hooks);
   const added = addMissing(config.hooks);
-  if (added.length === 0) return "present";
+  if (added.length === 0 && refreshed.length === 0) return "present";
   save(config, existed);
-  return existed ? `repaired:${added.join(", ")}` : "created";
+  if (!existed) return "created";
+  return `repaired:${added.join(", ")}|${refreshed.join(", ")}`;
 }
 
 function remove() {
@@ -549,7 +572,13 @@ ensure_global_hooks() {
   fi
   case "${result}" in
     created) ok "installed global ArmorCodex hooks at ${GLOBAL_HOOKS}" ;;
-    repaired:*) ok "added missing ArmorCodex ${result#repaired:} hook(s) to ${GLOBAL_HOOKS}" ;;
+    repaired:*)
+      local added="${result#repaired:}" refreshed
+      refreshed="${added#*|}"
+      added="${added%%|*}"
+      [[ -n "${added}" ]] && ok "added missing ArmorCodex ${added} hook(s) to ${GLOBAL_HOOKS}"
+      [[ -n "${refreshed}" ]] && ok "updated ArmorCodex ${refreshed} hook(s) in ${GLOBAL_HOOKS}"
+      ;;
     *) ok "global hooks already reference ArmorCodex" ;;
   esac
   trust_codex_hooks

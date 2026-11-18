@@ -765,3 +765,40 @@ test("a local checkout run without a login leaves ARMORCODEX_INSTALL_HOME alone"
   assert.match(result.stdout, /rolling back/);
   assert.equal(readFileSync(join(installHome, "keep.txt"), "utf8"), "not used by a local checkout run");
 });
+
+test("an update moves an existing ArmorCodex SessionEnd hook to the 3s timeout Codex honours", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "armorcodex-session-end-timeout-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const binDir = join(root, "bin");
+  const hooksPath = join(home, ".codex", "hooks.json");
+  mkdirSync(join(home, ".codex"), { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  stubTools(binDir);
+  saveCodexLogin(home);
+
+  const fresh = await runInstaller(root, home, binDir);
+  assert.equal(fresh.status, 0, fresh.stderr || fresh.stdout);
+  const installed = JSON.parse(readFileSync(hooksPath, "utf8"));
+  assert.equal(installed.hooks.SessionEnd[0].hooks[0].timeout, 3);
+  assert.equal(installed.hooks.Stop[0].hooks[0].timeout, 30);
+
+  const other = { type: "command", command: "/opt/other-tool/on-end", timeout: 30 };
+  installed.hooks.SessionEnd[0].hooks[0].timeout = 30;
+  installed.hooks.SessionEnd.push({ hooks: [other] });
+  writeFileSync(hooksPath, `${JSON.stringify(installed, null, 2)}\n`);
+  const ourCommand = installed.hooks.SessionEnd[0].hooks[0].command;
+
+  const update = await runInstaller(root, home, binDir);
+
+  assert.equal(update.status, 0, update.stderr || update.stdout);
+  assert.match(update.stdout, /updated ArmorCodex SessionEnd hook\(s\)/);
+  assert.doesNotMatch(update.stdout, /added missing/);
+  const { hooks } = JSON.parse(readFileSync(hooksPath, "utf8"));
+  assert.deepEqual(hooks.SessionEnd[0].hooks, [{ type: "command", command: ourCommand, timeout: 3 }]);
+  assert.deepEqual(hooks.SessionEnd[1].hooks, [other]);
+
+  const again = await runInstaller(root, home, binDir);
+  assert.equal(again.status, 0, again.stderr || again.stdout);
+  assert.match(again.stdout, /global hooks already reference ArmorCodex/);
+});
