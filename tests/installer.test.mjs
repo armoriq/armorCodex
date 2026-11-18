@@ -802,3 +802,23 @@ test("an update moves an existing ArmorCodex SessionEnd hook to the 3s timeout C
   assert.equal(again.status, 0, again.stderr || again.stdout);
   assert.match(again.stdout, /global hooks already reference ArmorCodex/);
 });
+
+test("a [features] header with a trailing comment still gets the hooks flag", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "armorcodex-features-comment-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const binDir = join(root, "bin");
+  mkdirSync(join(home, ".codex"), { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  writeFileSync(join(home, ".codex", "config.toml"), "[features] # mine\njs_repl = true\n");
+  stubTools(binDir);
+  saveCodexLogin(home);
+
+  const result = await runInstaller(root, home, binDir);
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.doesNotMatch(result.stdout + result.stderr, /hooks feature flag not set/);
+  const config = readFileSync(join(home, ".codex", "config.toml"), "utf8");
+  assert.equal(config.match(/^\[features\]/gm)?.length, 1, config);
+  assert.match(config, /^\[features\] # mine\nhooks = true\njs_repl = true$/m);
+});
