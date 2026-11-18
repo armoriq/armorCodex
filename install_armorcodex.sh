@@ -481,7 +481,60 @@ EOF
 }
 
 codex_hooks_json() {
-  node "${PLUGIN_PATH}/scripts/hooks-file.mjs" "$1" "${GLOBAL_HOOKS}" "${BOOTSTRAP_PATH}"
+  local module="${PLUGIN_PATH}/scripts/hooks-file.mjs"
+  if [[ -f "${module}" ]]; then
+    node "${module}" "$1" "${GLOBAL_HOOKS}" "${BOOTSTRAP_PATH}"
+  elif [[ "$1" == "remove" ]]; then
+    strip_hooks_without_plugin
+  else
+    echo "${module} is missing; this checkout predates the shared hooks writer" >&2
+    return 1
+  fi
+}
+
+strip_hooks_without_plugin() {
+  [[ -f "${GLOBAL_HOOKS}" ]] || { printf absent; return 0; }
+  node --input-type=module - "${GLOBAL_HOOKS}" <<'NODE'
+import { chmodSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+const [hooksPath] = process.argv.slice(2);
+const tempPath = `${hooksPath}.armorcodex.tmp-${process.pid}`;
+const ours = (entry) => entry?.type === "command"
+  && typeof entry.command === "string"
+  && entry.command.endsWith("bootstrap.mjs router")
+  && /armorcodex/i.test(`${entry.command} ${entry.statusMessage ?? ""}`);
+const hasOurs = (group) => Array.isArray(group?.hooks) && group.hooks.some(ours);
+try {
+  const text = readFileSync(hooksPath, "utf8");
+  const config = JSON.parse(text);
+  if (!config?.hooks || typeof config.hooks !== "object" || Array.isArray(config.hooks)) throw new Error("top-level hooks must be an object");
+  let removed = 0;
+  for (const [event, groups] of Object.entries(config.hooks)) {
+    if (!Array.isArray(groups)) throw new Error(`hooks.${event} must be an array`);
+    removed += groups.filter(hasOurs).length;
+    const kept = groups
+      .map((group) => (hasOurs(group) ? { ...group, hooks: group.hooks.filter((entry) => !ours(entry)) } : group))
+      .filter((group) => !Array.isArray(group?.hooks) || group.hooks.length > 0);
+    if (kept.length > 0) config.hooks[event] = kept;
+    else delete config.hooks[event];
+  }
+  if (removed === 0) {
+    process.stdout.write("absent");
+  } else if (Object.keys(config.hooks).length === 0 && Object.keys(config).length === 1) {
+    rmSync(hooksPath, { force: true });
+    process.stdout.write("removed");
+  } else {
+    const indent = text.match(/^([ \t]+)\S/m)?.[1] ?? (text.trim().includes("\n") ? 2 : 0);
+    writeFileSync(tempPath, `${JSON.stringify(config, null, indent)}${text.endsWith("\n") ? "\n" : ""}`, { flag: "wx" });
+    chmodSync(tempPath, statSync(hooksPath).mode & 0o7777);
+    renameSync(tempPath, hooksPath);
+    process.stdout.write("stripped");
+  }
+} catch (error) {
+  rmSync(tempPath, { force: true });
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exit(1);
+}
+NODE
 }
 
 ensure_global_hooks() {
