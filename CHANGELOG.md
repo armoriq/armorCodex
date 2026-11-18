@@ -4,6 +4,18 @@ All notable changes to ArmorCodex are recorded here. Format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [0.3.9] - 2026-11-18
+
+### Fixed
+- The SessionEnd hook asks Codex for a 3s timeout instead of 30s. Codex caps SessionEnd at 3s and printed `warning: clamping SessionEnd hook timeout to 3s` on every session when asked for more. The installer, `hooks/hooks.json` and `.codex/hooks.json` all use 3, and an update brings existing ArmorCodex hook entries up to the current timeout and status message, keeping each entry's command. SessionEnd's removal from the live sessions list now waits at most 1s for its lock, so it fits inside that cap.
+- A failed release lookup (offline, GitHub rate limit) no longer moves an install that sits on a release tag onto unreleased `main`; it keeps the installed version.
+- The installer no longer moves an install that is newer than the latest release back to that release.
+- A `[features]` header with a trailing comment in `config.toml` now gets `hooks = true`. Before, hooks stayed off.
+- A failed first-time install deletes the plugin directory only when that run created it.
+
+### Changed
+- `install_armorcodex.sh` in this repository is the single source of the installer. The hosted https://armoriq.ai/install_armorcodex.sh is moving to a small wrapper that downloads this file from `main`. The release lookup timeout is 10s instead of 5s.
+
 ## [0.3.8] - 2026-11-17
 
 ### Changed
