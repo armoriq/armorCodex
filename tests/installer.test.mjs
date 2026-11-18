@@ -568,6 +568,9 @@ function pluginRepo(root) {
   git(work, "config", "user.name", "test");
   git(work, "config", "commit.gpgsign", "false");
   writeFileSync(join(work, "plugins", "armorcodex", "scripts", "bootstrap.mjs"), "");
+  for (const file of ["scripts/hooks-file.mjs", "scripts/lib/hooks-file.mjs"]) {
+    cpSync(new URL(`../plugins/armorcodex/${file}`, import.meta.url).pathname, join(work, "plugins", "armorcodex", file));
+  }
   writeFileSync(
     join(work, "plugins", "armorcodex", "scripts", "lib", "config.mjs"),
     'export const loadConfig = () => (process.env.TEST_NO_LOGIN ? {} : { apiKey: "ak_test_update" });\n'
