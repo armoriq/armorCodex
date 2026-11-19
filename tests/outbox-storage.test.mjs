@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, fork } from "node:child_process";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { once } from "node:events";
 import { appendFile, mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -59,6 +61,17 @@ for (const body of [{ results: null }, { failures: [{ index: 0, error: "busy" },
     await wal.drain(async () => { sends++; return { status: Object.hasOwn(body, "results") ? 400 : 200, body }; });
     assert.equal(sends, 1);
     assert.deepEqual((await wal.readPending()).map(({ attempts }) => attempts), [0, 0]);
+  });
+}
+
+for (const status of [400, 422]) {
+  // regression: #0012
+  test(`a legacy failures list is not delivery proof on HTTP ${status}`, async (t) => {
+    const { wal } = await setup(t);
+    await wal.appendLine(row());
+    await wal.drain(async () => ({ status, body: { failures: [] } }));
+    assert.deepEqual(await wal.readPending(), []);
+    assert.equal((await wal.readDeadLetters())[0]?.attempts, 1);
   });
 }
 
@@ -188,6 +201,87 @@ test("appends keep the queue inode and retire settled state and dead letters fro
   assert.equal((await reopen().status()).deadLetters, 1);
 });
 
+// regression: #0012
+test("an audit append does not rewrite segment state and run appends do not reparse prior rows", async (t) => {
+  const { dataDir, wal } = await setup(t);
+  await wal.appendLine(row(1));
+  const store = path.join(dataDir, "audit", "outbox-v1");
+  const segment = (await readdir(store)).find((name) => name.startsWith("queue."));
+  const stateFile = path.join(store, segment, "state.json");
+  const before = await stat(stateFile);
+  await wal.appendLine(row(2));
+  assert.equal((await stat(stateFile)).ino, before.ino);
+  await wal.drain(async () => { throw new Error("offline"); });
+  await wal.reportHealth();
+  const runs = createAuditWal({ dataDir, login, stream: "runs" });
+  const report = { run_id: "prompt-1", report_seq: 1, started_at: "2026-11-15T12:00:00Z", session_id: "root", tool_calls: 0, gated_tool_calls: 0, plan_ids: [] };
+  await runs.appendLine(report);
+  const original = fs.readFileSync;
+  const reading = t.mock.method(fs, "readFileSync", (file, ...args) => {
+    assert.ok(!String(file).endsWith("rows.jsonl"), "routine work reparsed a queue journal");
+    return original(file, ...args);
+  });
+  syncBuiltinESMExports();
+  try {
+    await runs.appendLine(report);
+    await runs.appendLine({ ...report, report_seq: 2 });
+    await wal.reportHealth();
+  } finally {
+    reading.mock.restore();
+    syncBuiltinESMExports();
+  }
+  assert.deepEqual((await runs.readPending()).map(({ row }) => row.report_seq), [1, 2]);
+});
+
+// regression: #0012
+test("concurrent health publishers retain staged events through unreported and archive", async (t) => {
+  const { dataDir, wal } = await setup(t);
+  await wal.appendLine(row());
+  await wal.drain(async ({ rows }) => ({ status: 422, body: { results: rows.map(({ client_row_id }) => ({ client_row_id, outcome: "rejected" })) } }));
+  const unreported = path.join(dataDir, "audit", "outbox-v1", "unreported");
+  assert.equal((await readdir(unreported)).length, 1);
+  await Promise.all([wal.reportHealth(), wal.reportHealth()]);
+  assert.deepEqual(await readdir(unreported), []);
+  const health = createAuditWal({ dataDir, login, stream: "health" });
+  assert.equal((await health.readPending()).length, 1);
+  assert.equal((await health.readPending())[0].row.count, 1);
+  assert.equal((await wal.readDeadLetters()).length, 1);
+});
+
+// regression: #0012
+test("released dead letters waiting for health are not imported again", async (t) => {
+  const { wal, dataDir, reopen } = await setup(t, { login: auditLogin(legacyLogin()) });
+  await mkdir(path.join(dataDir, "audit"));
+  const original = JSON.stringify({ ...row(), executed_at: "2026-11-14T12:00:00Z" }) + "\n";
+  await writeFile(path.join(dataDir, "audit", "current.jsonl"), original);
+  await wal.drain(async ({ rows }) => ({ status: 422, body: { results: rows.map(({ client_row_id }) => ({ client_row_id, outcome: "rejected" })) } }));
+  assert.deepEqual(await reopen().readPending(), []);
+  await reopen().drain(accept);
+  await reopen().reportHealth();
+  assert.deepEqual(await readdir(path.join(dataDir, "audit", "outbox-v1", "unreported")), []);
+  assert.equal((await wal.readDeadLetters()).length, 1);
+  assert.equal(await readFile(path.join(dataDir, "audit", "current.jsonl"), "utf8"), original);
+});
+
+// regression: #0012
+test("an audit storage failure does not stop run and health delivery", async (t) => {
+  const { shipQueuedAudit } = await import("../plugins/armorcodex/scripts/lib/audit-delivery.mjs");
+  const { dataDir } = await setup(t);
+  const config = { ...legacyLogin(), dataDir, timeoutMs: 1000, runReportingEnabled: true };
+  await writeFile(path.join(dataDir, "audit"), "unavailable");
+  const runs = createAuditWal({ dataDir, config, stream: "runs" });
+  await runs.appendLine({ run_id: "one", report_seq: 1, started_at: "2026-11-15T12:00:00Z" });
+  const health = createAuditWal({ dataDir, config, stream: "health" });
+  await health.appendLine({ event_id: row().client_row_id, type: "dead_letter", queue: "audit", count: 1, reason_code: "rejected", occurred_at: "2026-11-15T12:00:00Z" });
+  t.mock.method(globalThis, "fetch", async (url, init) => {
+    const body = JSON.parse(init.body);
+    return new Response(JSON.stringify({ results: (body.reports ?? body.events ?? []).map((entry) => ({ ...entry, outcome: "accepted" })) }), { status: 200 });
+  });
+  await shipQueuedAudit(config);
+  assert.deepEqual(await runs.readPending(), []);
+  assert.deepEqual(await health.readPending(), []);
+});
+
 // regression: #0010
 test("the production ship path probes a paused key and a successful authenticated call also resumes it", async (t) => {
   const { shipQueuedAudit } = await import("../plugins/armorcodex/scripts/lib/audit-delivery.mjs");
@@ -235,6 +329,76 @@ test("the production ship path probes a paused key and a successful authenticate
   await requestIntent({ ...config, mode: "enforce", intentEndpoint: config.backendEndpoint + "/iap/intent" }, { plan: { steps: [{ action: "Bash" }] } });
   await shipQueuedAudit(config);
   assert.deepEqual(await wal.readPending(), []);
+});
+
+for (const stream of ["health", "runs"]) {
+  // regression: #0012
+  test(`the production ${stream} stream lifts a 401 pause with an authenticated probe`, async (t) => {
+    const { shipQueuedAudit } = await import("../plugins/armorcodex/scripts/lib/audit-delivery.mjs");
+    t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+    const config = { ...legacyLogin(), timeoutMs: 1000, runReportingEnabled: stream === "runs" };
+    const { dataDir } = await setup(t);
+    config.dataDir = dataDir;
+    const wal = () => createAuditWal({ dataDir, config, stream });
+    const sample = stream === "runs" ? {
+      run_id: "prompt-1", report_seq: 1, session_id: "root", started_at: new Date().toISOString(),
+      tool_calls: 0, gated_tool_calls: 0, plan_ids: []
+    } : { event_id: row().client_row_id, type: "dead_letter", queue: "audit", count: 1, reason_code: "rejected", occurred_at: new Date().toISOString() };
+    await wal().appendLine(sample);
+    const endpoint = stream === "runs" ? "/iap/runs/batch" : "/iap/client-events";
+    const sent = [];
+    let refuse = true;
+    t.mock.method(globalThis, "fetch", async (url, init) => {
+      const pathname = new URL(url).pathname;
+      sent.push(pathname);
+      if (stream === "runs" && pathname === "/iap/client-events") return new Response("{}", { status: 404 });
+      if (pathname === endpoint && refuse) { refuse = false; return new Response("{}", { status: 401 }); }
+      const body = JSON.parse(init.body);
+      return new Response(JSON.stringify({ results: (body.events ?? body.reports ?? []).map((entry) => ({ ...entry, outcome: "accepted" })) }), { status: 200 });
+    });
+    await shipQueuedAudit(config);
+    assert.equal((await wal().status()).paused, true);
+    assert.equal((await wal().status()).undeliverable, 1);
+    await shipQueuedAudit(config);
+    assert.deepEqual(sent, stream === "runs" ? [endpoint, "/iap/client-events"] : [endpoint]);
+    t.mock.timers.tick(120_000);
+    await shipQueuedAudit(config);
+    assert.deepEqual(sent, stream === "runs" ? [endpoint, "/iap/client-events", "/iap/validate-key", endpoint, "/iap/client-events"] : [endpoint, "/iap/validate-key", endpoint]);
+    assert.deepEqual(await wal().readPending(), []);
+    await wal().appendLine({ ...sample, ...(stream === "runs" ? { report_seq: 2 } : { event_id: row(2).client_row_id }) });
+    await wal().drain(async () => ({ status: 401, body: {} }));
+    await probeBackend(config);
+    assert.equal((await wal().status()).undeliverable, 0);
+    await wal().drain(async () => ({ status: 401, body: {} }));
+    await createIapService(config)[stream === "runs" ? "shipRunBatch" : "shipHealthBatch"]([sample]);
+    assert.equal((await wal().status()).undeliverable, 0);
+  });
+}
+
+// regression: #0013
+test("reporting off leaves existing run reports and their health events untouched", async (t) => {
+  const { shipQueuedAudit } = await import("../plugins/armorcodex/scripts/lib/audit-delivery.mjs");
+  const { dataDir } = await setup(t);
+  const config = { ...legacyLogin(), dataDir, timeoutMs: 1000, runReportingEnabled: false };
+  const runs = createAuditWal({ dataDir, config, stream: "runs" });
+  const health = createAuditWal({ dataDir, config, stream: "health" });
+  await runs.appendLine({ run_id: "prompt-1", report_seq: 1, session_id: "root", started_at: new Date().toISOString(), tool_calls: 0, gated_tool_calls: 0, plan_ids: [] });
+  await health.appendLine({ event_id: row().client_row_id, type: "queue_stalled", queue: "runs", count: 1, reason_code: "server_error", occurred_at: new Date().toISOString() });
+  const sent = [];
+  t.mock.method(globalThis, "fetch", async (url, init) => {
+    const body = JSON.parse(init.body);
+    sent.push(new URL(url).pathname);
+    return new Response(JSON.stringify({ results: (body.reports ?? body.events).map((row) => ({ ...row, outcome: "accepted" })) }), { status: 200 });
+  });
+  await shipQueuedAudit(config);
+  assert.deepEqual(sent, []);
+  assert.equal((await runs.readPending()).length, 1);
+  assert.equal((await health.readPending()).length, 1);
+  config.runReportingEnabled = true;
+  await shipQueuedAudit(config);
+  assert.deepEqual(sent, ["/iap/runs/batch", "/iap/client-events"]);
+  assert.deepEqual(await runs.readPending(), []);
+  assert.deepEqual(await health.readPending(), []);
 });
 
 // regression: #0010
@@ -345,7 +509,9 @@ test("health transport sends event ids and preserves per event outcomes", async 
   assert.equal(reply.body.results[0].outcome, "duplicate");
 });
 
+// regression: #0012
 test("local status shows undeliverable rows, dead letters and capture failures", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
   const { wal, dataDir } = await setup(t, { sizeLimits: { maxRowBytes: 1024, maxBatchBytes: 4096, maxBatchRows: 10, truncationMarker: { truncated: true } } });
   await wal.appendLine(row(1));
   await wal.appendLine({ ...row(2), error_message: "x".repeat(2048) });
@@ -360,6 +526,15 @@ test("local status shows undeliverable rows, dead letters and capture failures",
   assert.match(JSON.stringify(reply), /Audit capture failures: 1/);
   assert.match(JSON.stringify(reply), /Health events waiting to upload: 1/);
   assert.match(JSON.stringify(reply), /Health reporting paused: yes/);
+  const health = createAuditWal({ dataDir, login, stream: "health" });
+  const runs = createAuditWal({ dataDir, login, stream: "runs" });
+  t.mock.timers.tick(30_000);
+  await health.drain(async ({ rows }) => ({ status: 422, body: { results: rows.map(({ event_id }) => ({ event_id, outcome: "rejected" })) } }));
+  await runs.appendLine({ run_id: "rejected-run", report_seq: 1 });
+  await runs.drain(async ({ rows }) => ({ status: 422, body: { results: rows.map((entry) => ({ ...entry, outcome: "rejected" })) } }));
+  const status = await handleUserPromptSubmit({ session_id: "status", prompt: "/armor status" }, { ...config, runReportingEnabled: true });
+  assert.match(status.reason, /Dead letter health events: 1/);
+  assert.match(status.reason, /Dead letter run reports: 1/);
 });
 
 test("a hook reports a capture storage failure instead of returning success", async (t) => {
