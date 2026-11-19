@@ -420,7 +420,7 @@ for (const stream of ["health", "runs"]) {
 }
 
 // regression: #0012
-it("each stalled queue reports its whole depth once an hour, including another login", async () => {
+it("each stalled queue reports its overdue depth once an hour, including another login", async () => {
   const h = await healthStore();
   h.options.sizeLimits = { maxRowBytes: 1024, maxBatchBytes: 4096, maxBatchRows: 1, truncationMarker: { truncated: true } };
   await h.audit().appendLine({ ...auditRow(1), input: { text: "x".repeat(800) } });
@@ -430,6 +430,7 @@ it("each stalled queue reports its whole depth once an hour, including another l
   h.options.login = { ...h.options.login, keyId: "key-b" };
   await h.audit().appendLine(auditRow(2));
   await h.audit().drain(async () => { throw new Error("offline"); });
+  h.advance(5000);
   await h.audit().reportHealth();
   const events = (await h.health().readPending()).map(({ row }) => row);
   assert.equal(events.length, 2);
@@ -457,6 +458,28 @@ it("answered retryable rows report server_error rather than an unreachable backe
   const h = await healthStore();
   await h.audit().appendLine(auditRow(1));
   await h.audit().drain(async () => ({ status: 200, body: { results: [{ client_row_id: auditRow(1).client_row_id, outcome: "retryable" }] } }));
+  h.advance(5000);
   await h.audit().reportHealth();
   assert.equal((await h.health().readPending())[0].row.reason_code, "server_error");
+});
+
+// regression: #0012
+it("stall counts and age exclude persisted retry deadlines and Retry-After waits", async () => {
+  const h = await healthStore();
+  await h.audit().appendLine({ ...auditRow(1), executed_at: new Date(h.now()).toISOString() });
+  await h.audit().drain(async () => ({ status: 429, headers: { "retry-after": "7200" }, body: {} }));
+  h.advance(30_000);
+  await h.audit().appendLine({ ...auditRow(2), executed_at: new Date(h.now()).toISOString() });
+  await h.audit().drain(async () => ({ status: 503, body: {} }));
+  await h.audit().reportHealth();
+  assert.deepEqual(await h.health().readPending(), []);
+  h.advance(5000);
+  await h.audit().reportHealth();
+  const [entry] = await h.health().readPending();
+  assert.equal(entry.row.count, 1);
+  assert.equal(entry.row.oldest_pending_seconds, 5);
+  assert.deepEqual(entry.login, h.options.login);
+  h.advance(7_165_000);
+  await h.audit().reportHealth();
+  assert.deepEqual((await h.health().readPending()).map(({ row }) => row.count), [1, 2]);
 });

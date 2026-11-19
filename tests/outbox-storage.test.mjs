@@ -203,7 +203,8 @@ test("appends keep the queue inode and retire settled state and dead letters fro
 
 // regression: #0012
 test("an audit append does not rewrite segment state and run appends do not reparse prior rows", async (t) => {
-  const { dataDir, wal } = await setup(t);
+  const clock = { now: () => Date.parse("2026-11-15T12:00:00Z"), random: () => 0 };
+  const { dataDir, wal, reopen } = await setup(t, { clock });
   await wal.appendLine(row(1));
   const store = path.join(dataDir, "audit", "outbox-v1");
   const segment = (await readdir(store)).find((name) => name.startsWith("queue."));
@@ -213,7 +214,7 @@ test("an audit append does not rewrite segment state and run appends do not repa
   assert.equal((await stat(stateFile)).ino, before.ino);
   await wal.drain(async () => { throw new Error("offline"); });
   await wal.reportHealth();
-  const runs = createAuditWal({ dataDir, login, stream: "runs" });
+  const runs = createAuditWal({ dataDir, login, clock, stream: "runs" });
   const report = { run_id: "prompt-1", report_seq: 1, started_at: "2026-11-15T12:00:00Z", session_id: "root", tool_calls: 0, gated_tool_calls: 0, plan_ids: [] };
   await runs.appendLine(report);
   const original = fs.readFileSync;
@@ -226,11 +227,17 @@ test("an audit append does not rewrite segment state and run appends do not repa
     await runs.appendLine(report);
     await runs.appendLine({ ...report, report_seq: 2 });
     await wal.reportHealth();
+    await reopen().reportHealth();
   } finally {
     reading.mock.restore();
     syncBuiltinESMExports();
   }
   assert.deepEqual((await runs.readPending()).map(({ row }) => row.report_seq), [1, 2]);
+  const health = createAuditWal({ dataDir, login, clock, stream: "health" });
+  assert.deepEqual(await health.readPending(), []);
+  await wal.appendLine(row(3));
+  await reopen().reportHealth();
+  assert.deepEqual((await health.readPending()).map(({ row }) => row.count), [1]);
 });
 
 // regression: #0012

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
-import { loadConfig } from "../plugins/armorcodex/scripts/lib/config.mjs";
+import { loadConfig, loadSettings } from "../plugins/armorcodex/scripts/lib/config.mjs";
 
 const { ARMORIQ_ENV: BUILD_ENV } = createRequire(
   new URL("../plugins/armorcodex/package.json", import.meta.url),
@@ -29,6 +29,16 @@ const LOCAL = {
 };
 
 const BY_ENV = { production: PRODUCTION, staging: STAGING, local: LOCAL };
+
+// regression: #0013
+test("run reporting enables only for the exact true value under either name", () => {
+  assert.equal(loadSettings({}).runReportingEnabled, false);
+  for (const name of ["ARMORIQ_RUN_REPORTING_ENABLED", "ARMORCODEX_RUN_REPORTING_ENABLED", "CODEX_PLUGIN_OPTION_RUN_REPORTING_ENABLED", "CLAUDE_PLUGIN_OPTION_RUN_REPORTING_ENABLED"]) {
+    for (const value of ["true", "false", "1", "yes", "TRUE", " true ", ""]) {
+      assert.equal(loadSettings({ [name]: value }).runReportingEnabled, value === "true", `${name}=${JSON.stringify(value)}`);
+    }
+  }
+});
 
 function endpoints(config) {
   return {

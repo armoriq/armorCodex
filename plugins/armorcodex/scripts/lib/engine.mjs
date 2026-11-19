@@ -364,16 +364,17 @@ export function sessionBanner(config, { unreadable = false, posture = null } = {
 
 export async function handleSessionStart(input, config, updateOptions = {}) {
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
-  if (!sessionId || (config.runReportingEnabled && !isRootRunHook(input))) return null;
-  const owner = config.runReportingEnabled ? harnessProcess() : null;
+  if (!sessionId) return null;
+  const rootRun = config.runReportingEnabled && isRootRunHook(input);
+  const owner = rootRun ? harnessProcess() : null;
 
-  await accountForRun(config, (state) => recoverRuns(state, sessionId, input.source));
+  if (rootRun) await accountForRun(config, (state) => recoverRuns(state, sessionId, input.source));
   await recordHookActivity(input, config, (session) => {
-    if (config.runReportingEnabled) session.runOwner = owner;
+    if (rootRun) session.runOwner = owner;
     session.startedAt = nowEpochSeconds();
     session.discoveredTools = [];
   });
-  await publishRunReports(config);
+  if (rootRun) await publishRunReports(config);
 
   debugLog(config, `session started: ${sessionId}, mode=${config.mode}`);
 
@@ -401,7 +402,7 @@ export async function handleUserPromptSubmit(input, config) {
   if (!prompt || !sessionId) {
     return null;
   }
-  if (config.runReportingEnabled ? !isRootRunHook(input) : input.parent_session_id || input.is_subagent) return null;
+  if (input.parent_session_id || input.is_subagent) return null;
   if (isStatusCommand(prompt)) {
     const status = await createAuditWal({ dataDir: config.dataDir, config }).status();
     const healthStatus = await createAuditWal({ dataDir: config.dataDir, config, stream: "health" }).status();
@@ -447,12 +448,14 @@ export async function handleUserPromptSubmit(input, config) {
 
   const session = await recordHookActivity(input, config, (session) => {
     beginPrompt(session, prompt);
-    prepareRun(sessionId, session, config);
+    if (isRootRunHook(input)) prepareRun(sessionId, session, config);
     session.lastPrompt = prompt;
     session.lastPromptAt = nowEpochSeconds();
   });
-  await accountForRun(config, (state) => startRun(state, sessionId, session, config));
-  await publishRunReports(config);
+  if (isRootRunHook(input)) {
+    await accountForRun(config, (state) => startRun(state, sessionId, session, config));
+    await publishRunReports(config);
+  }
 
   const parts = [];
   if (config.planningEnabled) {
@@ -1001,38 +1004,44 @@ export async function handlePostToolUseFailure(input, config, envelope = createA
 
 export async function handleStop(input, config) {
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
-  if (!sessionId || (config.runReportingEnabled && !isRootRunHook(input))) return null;
+  if (!sessionId) return null;
+  const rootRun = config.runReportingEnabled && isRootRunHook(input);
 
   const session = await recordHookActivity(input, config, (session) => {
     session.promptOpenSince = null;
     session.lastStopAt = nowEpochSeconds();
-    if (config.runReportingEnabled) {
+    if (rootRun) {
       const context = session.runStarts?.find(({ run_id }) => run_id === session.runId);
       if (context) context.closing ??= { ended_at: new Date(Date.now()).toISOString(), end_reason: "stop" };
     }
   });
-  await accountForRun(config, (state) => {
-    startRun(state, sessionId, session, config);
-    closeRun(state, session.runId, "stop");
-  });
-  await publishRunReports(config);
+  if (rootRun) {
+    await accountForRun(config, (state) => {
+      startRun(state, sessionId, session, config);
+      closeRun(state, session.runId, "stop");
+    });
+    await publishRunReports(config);
+  }
   return null;
 }
 
 export async function handleSessionEnd(input, config) {
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
-  if (!sessionId || (config.runReportingEnabled && !isRootRunHook(input))) return null;
+  if (!sessionId) return null;
+  const rootRun = config.runReportingEnabled && isRootRunHook(input);
 
   const session = await withRuntimeState(config.runtimeFile, (state) => {
-    const session = config.runReportingEnabled ? structuredClone(getSession(state, sessionId)) : null;
+    const session = rootRun ? structuredClone(getSession(state, sessionId)) : null;
     delete state.sessions[sessionId];
     return session;
   });
-  await accountForRun(config, (state) => {
-    if (session) startRun(state, sessionId, session, config);
-    closeRun(state, session?.runId, "session_end");
-  });
-  await publishRunReports(config);
+  if (rootRun) {
+    await accountForRun(config, (state) => {
+      if (session) startRun(state, sessionId, session, config);
+      closeRun(state, session?.runId, "session_end");
+    });
+    await publishRunReports(config);
+  }
 
   debugLog(config, `session ended: ${sessionId}`);
   return null;
