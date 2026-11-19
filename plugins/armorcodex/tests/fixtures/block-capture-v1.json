@@ -1,0 +1,962 @@
+{
+  "version": 1,
+  "clientRowId": {
+    "algorithm": "UUID v5",
+    "namespace": "38e3839f-d44e-5317-b41f-b2738b0a247a",
+    "name": "<root session id>:<tool call id>:<phase>",
+    "phases": [
+      "decision",
+      "result"
+    ],
+    "statusIncluded": false,
+    "vectors": [
+      {
+        "rootSessionId": "session-1",
+        "toolCallId": "tool-call-1",
+        "phase": "decision",
+        "clientRowId": "176f57b7-4cd2-54e6-88f1-369f22f5ab91"
+      },
+      {
+        "rootSessionId": "session-1",
+        "toolCallId": "tool-call-1",
+        "phase": "result",
+        "clientRowId": "9bfbba71-1197-5d58-b7f3-7265ea21ea3c"
+      },
+      {
+        "rootSessionId": "session-1",
+        "toolCallId": "tool-call-2",
+        "phase": "decision",
+        "clientRowId": "952e3a9d-2b78-5dca-b0ce-b934ba8fec8a"
+      },
+      {
+        "rootSessionId": "session-1",
+        "toolCallId": "tool-call-2",
+        "phase": "result",
+        "clientRowId": "445370be-7d4e-5a55-ba61-a95f0a897c71"
+      },
+      {
+        "rootSessionId": "root:session",
+        "toolCallId": "call:with:colons",
+        "phase": "decision",
+        "clientRowId": "686eefa2-6c6e-54db-8cdb-ff593553eaeb"
+      },
+      {
+        "rootSessionId": "root:session",
+        "toolCallId": "call:with:colons",
+        "phase": "result",
+        "clientRowId": "0bddb1ff-4902-5b2a-9b6e-8073e91c288e"
+      }
+    ]
+  },
+  "reasonCodes": [
+    {
+      "decisionCode": "policy_deny",
+      "producers": {
+        "backend": [
+          "block",
+          "agent_killed",
+          "intent_plan_killed",
+          "delegation_rejected",
+          "delegation_expired"
+        ],
+        "armorclaude": [
+          "policy_denied",
+          "policy_v2_block",
+          "mcp_server_denied",
+          "plan_check_denied"
+        ],
+        "armorcodex": ["policy_denied", "plan_check_denied"],
+        "armoropencode": [
+          "policy_forbid",
+          "backend_denied_tool"
+        ],
+        "armorantigravity": [
+          "policy_forbid",
+          "backend_denied_tool",
+          "mcp_server_denied"
+        ]
+      }
+    },
+    {
+      "decisionCode": "protected_resource",
+      "producers": {
+        "armorclaude": [
+          "protected_policy_file",
+          "policy_admin_command"
+        ],
+        "armorcodex": [],
+        "armoropencode": [
+          "builtin_protected",
+          "own_tool_shadowed"
+        ],
+        "armorantigravity": [
+          "builtin_protected",
+          "own_tool_shadowed"
+        ]
+      }
+    },
+    {
+      "decisionCode": "missing_plan",
+      "producers": {
+        "backend": ["intent_token_required", "intent_plan_not_found"],
+        "armorclaude": [
+          "intent_plan_missing"
+        ],
+        "armorcodex": ["intent_plan_missing"],
+        "armoropencode": [
+          "intent_plan_missing"
+        ],
+        "armorantigravity": [
+          "intent_plan_missing"
+        ]
+      }
+    },
+    {
+      "decisionCode": "out_of_scope",
+      "producers": {
+        "backend": ["tool_not_in_plan"],
+        "armorclaude": [
+          "intent_drift",
+          "intent_token_blocked"
+        ],
+        "armorcodex": ["intent_drift", "intent_parameter_mismatch", "intent_plan_empty"],
+        "armoropencode": [
+          "intent_drift"
+        ],
+        "armorantigravity": [
+          "intent_drift"
+        ]
+      }
+    },
+    {
+      "decisionCode": "token_expired",
+      "producers": {
+        "backend": ["intent_plan_expired"],
+        "armorclaude": [
+          "intent_token_expired"
+        ],
+        "armorcodex": ["intent_token_expired"],
+        "armoropencode": [
+          "intent_token_expired"
+        ],
+        "armorantigravity": [
+          "intent_token_expired"
+        ]
+      }
+    },
+    {
+      "decisionCode": "plan_request_failed",
+      "producers": {
+        "armorclaude": [
+          "intent_planning_failed"
+        ],
+        "armorcodex": ["intent_token_not_issued"],
+        "armoropencode": [],
+        "armorantigravity": []
+      }
+    },
+    {
+      "decisionCode": "integrity",
+      "producers": {
+        "backend": [
+          "invalid_intent_token",
+          "intent_token_agent_mismatch",
+          "intent_step_proof_missing",
+          "intent_anchor_chain_missing",
+          "intent_anchor_chain_broken",
+          "intent_anchor_chain_rejected"
+        ],
+        "armorclaude": [
+          "csrg_proof_invalid",
+          "csrg_proof_rejected",
+          "crypto_policy_mismatch",
+          "remote_verify_denied"
+        ],
+        "armorcodex": ["crypto_policy_mismatch", "csrg_proof_invalid", "csrg_proof_missing", "remote_verify_denied"],
+        "armoropencode": [],
+        "armorantigravity": []
+      }
+    },
+    {
+      "decisionCode": "account",
+      "producers": {
+        "backend": ["agent_inactive"],
+        "armorclaude": [],
+        "armorcodex": [],
+        "armoropencode": [
+          "account_revoked",
+          "billing_blocked"
+        ],
+        "armorantigravity": [
+          "account_revoked",
+          "billing_blocked"
+        ]
+      }
+    },
+    {
+      "decisionCode": "approval_required",
+      "producers": {
+        "backend": ["hold"],
+        "armorclaude": [
+          "policy_requires_approval",
+          "policy_v2_hold",
+          "mcp_server_unapproved"
+        ],
+        "armorcodex": [
+          "require_approval"
+        ],
+        "armoropencode": [
+          "hold"
+        ],
+        "armorantigravity": [
+          "approval_required"
+        ]
+      }
+    },
+    {
+      "decisionCode": "outage",
+      "producers": {
+        "backend": ["step_verification_unavailable"],
+        "armorclaude": [
+          "backend_unreachable"
+        ],
+        "armorcodex": [
+          "backend_unreachable"
+        ],
+        "armoropencode": [
+          "backend_unreachable"
+        ],
+        "armorantigravity": [
+          "backend_unreachable"
+        ]
+      }
+    },
+    {
+      "decisionCode": "internal_error",
+      "producers": {
+        "backend": ["agent_unresolved"],
+        "armorclaude": [
+          "internal_error",
+          "invalid_payload",
+          "missing_tool_name",
+          "remote_verify_failed"
+        ],
+        "armorcodex": ["remote_verify_failed", "invalid_payload", "missing_tool_name", "internal_error"],
+        "armoropencode": [
+          "internal_error"
+        ],
+        "armorantigravity": [
+          "internal_error",
+          "daemon_unavailable"
+        ]
+      }
+    },
+    {
+      "decisionCode": "other",
+      "producers": {
+        "armorclaude": [],
+        "armorcodex": [],
+        "armoropencode": [],
+        "armorantigravity": []
+      }
+    }
+  ],
+  "pendingProducerCodes": {
+    "armorcodex": {
+      "policyDenyAndPlanCheckCodes": ["policy_denied", "plan_check_denied"],
+      "missingPlanCodes": ["intent_plan_missing"],
+      "driftAndParameterCodes": ["intent_drift", "intent_parameter_mismatch", "intent_plan_empty"],
+      "expiryCodes": ["intent_token_expired"],
+      "slowIssuanceCodes": ["intent_token_not_issued"],
+      "csrgAndVerifyCodes": ["crypto_policy_mismatch", "csrg_proof_invalid", "csrg_proof_missing", "remote_verify_denied", "remote_verify_failed"],
+      "invalidInputInternalErrorAndMissingToolNameCodes": ["invalid_payload", "missing_tool_name", "internal_error"]
+    },
+    "armorantigravity": {
+      "mcpServerNotApprovedCodes": [],
+      "protocolAndCrashFallbackCodes": []
+    }
+  },
+  "prefixRule": {
+    "bracket": "^\\[([a-z][a-z0-9_]*)\\]",
+    "token": "^([a-z][a-z0-9_]*)(?=$|:|\\s)",
+    "precedence": [
+      "valid decision_code",
+      "prefix token",
+      "other"
+    ],
+    "matching": "Exact match across every plugin column, then a decision code itself, then legacy reasons.",
+    "legacyReasons": {
+      "plan_revision": "plan_revision",
+      "backend_unreachable": "outage"
+    }
+  },
+  "sizeLimits": {
+    "source": "src/bootstrap/body-parsers.ts",
+    "backendRequestLimit": "10mb",
+    "backendRequestBytes": 10485760,
+    "maxRowBytes": 262144,
+    "maxBatchBytes": 8388608,
+    "maxBatchRows": 200,
+    "encoding": "UTF-8 JSON bytes, including the complete batch envelope",
+    "shrinkOrder": [
+      "input",
+      "output"
+    ],
+    "truncationMarker": {
+      "truncated": true
+    },
+    "preserve": [
+      "client_row_id",
+      "plan_id",
+      "context_plan_id",
+      "prompt_id",
+      "session_id",
+      "executed_at",
+      "decision_code",
+      "action",
+      "tool",
+      "status"
+    ],
+    "metadataOversizeReason": "oversize"
+  },
+  "reasonCases": [
+    {
+      "name": "valid field wins",
+      "row": {
+        "decision_code": "policy_deny",
+        "error_message": "intent_plan_missing"
+      },
+      "reasonCode": "policy_deny"
+    },
+    {
+      "name": "invalid field uses prefix",
+      "row": {
+        "decision_code": "not_a_code",
+        "error_message": "intent_plan_missing"
+      },
+      "reasonCode": "missing_plan"
+    },
+    {
+      "name": "producer code is not a valid field",
+      "row": {
+        "decision_code": "intent_plan_missing"
+      },
+      "reasonCode": "other"
+    },
+    {
+      "name": "bare code",
+      "row": {
+        "error_message": "intent_plan_missing"
+      },
+      "reasonCode": "missing_plan"
+    },
+    {
+      "name": "colon prefix",
+      "row": {
+        "error_message": "policy_forbid: forbidden"
+      },
+      "reasonCode": "policy_deny"
+    },
+    {
+      "name": "space prefix",
+      "row": {
+        "error_message": "approval_required ask an admin"
+      },
+      "reasonCode": "approval_required"
+    },
+    {
+      "name": "tab boundary",
+      "row": {
+        "error_message": "intent_drift\toutside plan"
+      },
+      "reasonCode": "out_of_scope"
+    },
+    {
+      "name": "bracket prefix",
+      "row": {
+        "error_message": "[intent_token_expired] expired"
+      },
+      "reasonCode": "token_expired"
+    },
+    {
+      "name": "canonical prefix",
+      "row": {
+        "error_message": "[protected_resource] locked"
+      },
+      "reasonCode": "protected_resource"
+    },
+    {
+      "name": "outage prefix",
+      "row": {
+        "error_message": "backend_unreachable: timeout"
+      },
+      "reasonCode": "outage"
+    },
+    {
+      "name": "legacy revision",
+      "row": {
+        "error_message": "plan_revision: refreshed"
+      },
+      "reasonCode": "plan_revision"
+    },
+    {
+      "name": "bare legacy revision",
+      "row": {
+        "error_message": "plan_revision"
+      },
+      "reasonCode": "plan_revision"
+    },
+    {
+      "name": "bracket legacy revision",
+      "row": {
+        "error_message": "[plan_revision] revised"
+      },
+      "reasonCode": "plan_revision"
+    },
+    {
+      "name": "valid field precedes legacy",
+      "row": {
+        "decision_code": "approval_required",
+        "error_message": "plan_revision: revised"
+      },
+      "reasonCode": "approval_required"
+    },
+    {
+      "name": "legacy is not a decision field",
+      "row": {
+        "decision_code": "plan_revision"
+      },
+      "reasonCode": "other"
+    },
+    {
+      "name": "free text",
+      "row": {
+        "error_message": "Permission denied for this tool"
+      },
+      "reasonCode": "other"
+    },
+    {
+      "name": "unknown prefix",
+      "row": {
+        "error_message": "unknown_code: failed"
+      },
+      "reasonCode": "other"
+    },
+    {
+      "name": "no reason",
+      "row": {},
+      "reasonCode": "other"
+    },
+    {
+      "name": "empty reason",
+      "row": {
+        "error_message": ""
+      },
+      "reasonCode": "other"
+    },
+    {
+      "name": "leading whitespace",
+      "row": {
+        "error_message": " intent_plan_missing"
+      },
+      "reasonCode": "other"
+    },
+    {
+      "name": "case sensitive",
+      "row": {
+        "error_message": "Intent_plan_missing"
+      },
+      "reasonCode": "other"
+    },
+    {
+      "name": "punctuation boundary",
+      "row": {
+        "error_message": "intent_plan_missing.failed"
+      },
+      "reasonCode": "other"
+    },
+    {
+      "name": "hyphen boundary",
+      "row": {
+        "error_message": "intent_plan_missing-extra"
+      },
+      "reasonCode": "other"
+    },
+    {
+      "name": "unclosed bracket",
+      "row": {
+        "error_message": "[intent_plan_missing"
+      },
+      "reasonCode": "other"
+    },
+    {
+      "name": "invalid bracket token",
+      "row": {
+        "error_message": "[intent-plan-missing]"
+      },
+      "reasonCode": "other"
+    },
+    {
+      "name": "code later in text",
+      "row": {
+        "error_message": "Denied: intent_plan_missing"
+      },
+      "reasonCode": "other"
+    },
+    {
+      "name": "decision field policy_deny",
+      "row": {
+        "decision_code": "policy_deny"
+      },
+      "reasonCode": "policy_deny"
+    },
+    {
+      "name": "decision field protected_resource",
+      "row": {
+        "decision_code": "protected_resource"
+      },
+      "reasonCode": "protected_resource"
+    },
+    {
+      "name": "decision field missing_plan",
+      "row": {
+        "decision_code": "missing_plan"
+      },
+      "reasonCode": "missing_plan"
+    },
+    {
+      "name": "decision field out_of_scope",
+      "row": {
+        "decision_code": "out_of_scope"
+      },
+      "reasonCode": "out_of_scope"
+    },
+    {
+      "name": "decision field token_expired",
+      "row": {
+        "decision_code": "token_expired"
+      },
+      "reasonCode": "token_expired"
+    },
+    {
+      "name": "decision field plan_request_failed",
+      "row": {
+        "decision_code": "plan_request_failed"
+      },
+      "reasonCode": "plan_request_failed"
+    },
+    {
+      "name": "decision field integrity",
+      "row": {
+        "decision_code": "integrity"
+      },
+      "reasonCode": "integrity"
+    },
+    {
+      "name": "decision field account",
+      "row": {
+        "decision_code": "account"
+      },
+      "reasonCode": "account"
+    },
+    {
+      "name": "decision field approval_required",
+      "row": {
+        "decision_code": "approval_required"
+      },
+      "reasonCode": "approval_required"
+    },
+    {
+      "name": "decision field outage",
+      "row": {
+        "decision_code": "outage"
+      },
+      "reasonCode": "outage"
+    },
+    {
+      "name": "decision field internal_error",
+      "row": {
+        "decision_code": "internal_error"
+      },
+      "reasonCode": "internal_error"
+    },
+    {
+      "name": "decision field other",
+      "row": {
+        "decision_code": "other"
+      },
+      "reasonCode": "other"
+    },
+    {
+      "name": "armorclaude policy_denied",
+      "row": {
+        "error_message": "policy_denied"
+      },
+      "reasonCode": "policy_deny"
+    },
+    {
+      "name": "armorclaude policy_v2_block",
+      "row": {
+        "error_message": "policy_v2_block"
+      },
+      "reasonCode": "policy_deny"
+    },
+    {
+      "name": "armorclaude mcp_server_denied",
+      "row": {
+        "error_message": "mcp_server_denied"
+      },
+      "reasonCode": "policy_deny"
+    },
+    {
+      "name": "armorclaude plan_check_denied",
+      "row": {
+        "error_message": "plan_check_denied"
+      },
+      "reasonCode": "policy_deny"
+    },
+    {
+      "name": "armoropencode policy_forbid",
+      "row": {
+        "error_message": "policy_forbid"
+      },
+      "reasonCode": "policy_deny"
+    },
+    {
+      "name": "armoropencode backend_denied_tool",
+      "row": {
+        "error_message": "backend_denied_tool"
+      },
+      "reasonCode": "policy_deny"
+    },
+    {
+      "name": "armorantigravity policy_forbid",
+      "row": {
+        "error_message": "policy_forbid"
+      },
+      "reasonCode": "policy_deny"
+    },
+    {
+      "name": "armorantigravity backend_denied_tool",
+      "row": {
+        "error_message": "backend_denied_tool"
+      },
+      "reasonCode": "policy_deny"
+    },
+    {
+      "name": "armorantigravity mcp_server_denied",
+      "row": {
+        "error_message": "mcp_server_denied"
+      },
+      "reasonCode": "policy_deny"
+    },
+    {
+      "name": "armorclaude protected_policy_file",
+      "row": {
+        "error_message": "protected_policy_file"
+      },
+      "reasonCode": "protected_resource"
+    },
+    {
+      "name": "armorclaude policy_admin_command",
+      "row": {
+        "error_message": "policy_admin_command"
+      },
+      "reasonCode": "protected_resource"
+    },
+    {
+      "name": "armoropencode builtin_protected",
+      "row": {
+        "error_message": "builtin_protected"
+      },
+      "reasonCode": "protected_resource"
+    },
+    {
+      "name": "armoropencode own_tool_shadowed",
+      "row": {
+        "error_message": "own_tool_shadowed"
+      },
+      "reasonCode": "protected_resource"
+    },
+    {
+      "name": "armorantigravity builtin_protected",
+      "row": {
+        "error_message": "builtin_protected"
+      },
+      "reasonCode": "protected_resource"
+    },
+    {
+      "name": "armorantigravity own_tool_shadowed",
+      "row": {
+        "error_message": "own_tool_shadowed"
+      },
+      "reasonCode": "protected_resource"
+    },
+    {
+      "name": "armorclaude intent_plan_missing",
+      "row": {
+        "error_message": "intent_plan_missing"
+      },
+      "reasonCode": "missing_plan"
+    },
+    {
+      "name": "armoropencode intent_plan_missing",
+      "row": {
+        "error_message": "intent_plan_missing"
+      },
+      "reasonCode": "missing_plan"
+    },
+    {
+      "name": "armorantigravity intent_plan_missing",
+      "row": {
+        "error_message": "intent_plan_missing"
+      },
+      "reasonCode": "missing_plan"
+    },
+    {
+      "name": "armorclaude intent_drift",
+      "row": {
+        "error_message": "intent_drift"
+      },
+      "reasonCode": "out_of_scope"
+    },
+    {
+      "name": "armorclaude intent_token_blocked",
+      "row": {
+        "error_message": "intent_token_blocked"
+      },
+      "reasonCode": "out_of_scope"
+    },
+    {
+      "name": "armoropencode intent_drift",
+      "row": {
+        "error_message": "intent_drift"
+      },
+      "reasonCode": "out_of_scope"
+    },
+    {
+      "name": "armorantigravity intent_drift",
+      "row": {
+        "error_message": "intent_drift"
+      },
+      "reasonCode": "out_of_scope"
+    },
+    {
+      "name": "armorclaude intent_token_expired",
+      "row": {
+        "error_message": "intent_token_expired"
+      },
+      "reasonCode": "token_expired"
+    },
+    {
+      "name": "armoropencode intent_token_expired",
+      "row": {
+        "error_message": "intent_token_expired"
+      },
+      "reasonCode": "token_expired"
+    },
+    {
+      "name": "armorantigravity intent_token_expired",
+      "row": {
+        "error_message": "intent_token_expired"
+      },
+      "reasonCode": "token_expired"
+    },
+    {
+      "name": "armorclaude intent_planning_failed",
+      "row": {
+        "error_message": "intent_planning_failed"
+      },
+      "reasonCode": "plan_request_failed"
+    },
+    {
+      "name": "armorclaude csrg_proof_invalid",
+      "row": {
+        "error_message": "csrg_proof_invalid"
+      },
+      "reasonCode": "integrity"
+    },
+    {
+      "name": "armorclaude csrg_proof_rejected",
+      "row": {
+        "error_message": "csrg_proof_rejected"
+      },
+      "reasonCode": "integrity"
+    },
+    {
+      "name": "armorclaude crypto_policy_mismatch",
+      "row": {
+        "error_message": "crypto_policy_mismatch"
+      },
+      "reasonCode": "integrity"
+    },
+    {
+      "name": "armorclaude remote_verify_denied",
+      "row": {
+        "error_message": "remote_verify_denied"
+      },
+      "reasonCode": "integrity"
+    },
+    {
+      "name": "armoropencode account_revoked",
+      "row": {
+        "error_message": "account_revoked"
+      },
+      "reasonCode": "account"
+    },
+    {
+      "name": "armoropencode billing_blocked",
+      "row": {
+        "error_message": "billing_blocked"
+      },
+      "reasonCode": "account"
+    },
+    {
+      "name": "armorantigravity account_revoked",
+      "row": {
+        "error_message": "account_revoked"
+      },
+      "reasonCode": "account"
+    },
+    {
+      "name": "armorantigravity billing_blocked",
+      "row": {
+        "error_message": "billing_blocked"
+      },
+      "reasonCode": "account"
+    },
+    {
+      "name": "armorclaude policy_requires_approval",
+      "row": {
+        "error_message": "policy_requires_approval"
+      },
+      "reasonCode": "approval_required"
+    },
+    {
+      "name": "armorclaude policy_v2_hold",
+      "row": {
+        "error_message": "policy_v2_hold"
+      },
+      "reasonCode": "approval_required"
+    },
+    {
+      "name": "armorclaude mcp_server_unapproved",
+      "row": {
+        "error_message": "mcp_server_unapproved"
+      },
+      "reasonCode": "approval_required"
+    },
+    {
+      "name": "armorcodex require_approval",
+      "row": {
+        "error_message": "require_approval"
+      },
+      "reasonCode": "approval_required"
+    },
+    {
+      "name": "armoropencode hold",
+      "row": {
+        "error_message": "hold"
+      },
+      "reasonCode": "approval_required"
+    },
+    {
+      "name": "armorantigravity approval_required",
+      "row": {
+        "error_message": "approval_required"
+      },
+      "reasonCode": "approval_required"
+    },
+    {
+      "name": "armorclaude backend_unreachable",
+      "row": {
+        "error_message": "backend_unreachable"
+      },
+      "reasonCode": "outage"
+    },
+    {
+      "name": "armorcodex backend_unreachable",
+      "row": {
+        "error_message": "backend_unreachable"
+      },
+      "reasonCode": "outage"
+    },
+    {
+      "name": "armoropencode backend_unreachable",
+      "row": {
+        "error_message": "backend_unreachable"
+      },
+      "reasonCode": "outage"
+    },
+    {
+      "name": "armorantigravity backend_unreachable",
+      "row": {
+        "error_message": "backend_unreachable"
+      },
+      "reasonCode": "outage"
+    },
+    {
+      "name": "armorclaude internal_error",
+      "row": {
+        "error_message": "internal_error"
+      },
+      "reasonCode": "internal_error"
+    },
+    {
+      "name": "armorclaude invalid_payload",
+      "row": {
+        "error_message": "invalid_payload"
+      },
+      "reasonCode": "internal_error"
+    },
+    {
+      "name": "armorclaude missing_tool_name",
+      "row": {
+        "error_message": "missing_tool_name"
+      },
+      "reasonCode": "internal_error"
+    },
+    {
+      "name": "armorclaude remote_verify_failed",
+      "row": {
+        "error_message": "remote_verify_failed"
+      },
+      "reasonCode": "internal_error"
+    },
+    {
+      "name": "armoropencode internal_error",
+      "row": {
+        "error_message": "internal_error"
+      },
+      "reasonCode": "internal_error"
+    },
+    {
+      "name": "armorantigravity internal_error",
+      "row": {
+        "error_message": "internal_error"
+      },
+      "reasonCode": "internal_error"
+    },
+    {
+      "name": "armorantigravity daemon_unavailable",
+      "row": {
+        "error_message": "daemon_unavailable"
+      },
+      "reasonCode": "internal_error"
+    }
+  ],
+  "reasonLabels": {
+    "policy_deny": "Policy denied",
+    "protected_resource": "Protected resource",
+    "missing_plan": "No plan registered",
+    "out_of_scope": "Outside the plan",
+    "token_expired": "Plan token expired",
+    "plan_request_failed": "Plan request failed",
+    "integrity": "Integrity check failed",
+    "account": "Account blocked",
+    "approval_required": "Needs approval",
+    "outage": "Backend unreachable",
+    "internal_error": "Internal error",
+    "other": "Other"
+  }
+}
