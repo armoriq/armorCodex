@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { handlePostToolUse, handlePreToolUse } from "../plugins/armorcodex/scripts/lib/engine.mjs";
 import { requestIntent } from "../plugins/armorcodex/scripts/lib/intent.mjs";
+import { recordBackendOutcome } from "../plugins/armorcodex/scripts/lib/backend-posture.mjs";
 
 const { ArmorIQClient } = createRequire(new URL("../plugins/armorcodex/package.json", import.meta.url))(
   "@armoriq/sdk-dev"
@@ -23,6 +24,7 @@ async function setup({ mode = "enforce", planCheck }) {
     policyFile: path.join(dataDir, "policy.json"),
     runtimeFile: path.join(dataDir, "runtime.json"),
     apiKey: "ak_test_plancheck00000000000000000000",
+    backendEndpoint: "https://audit.invalid",
     auditEnabled: true,
     useSdkIntent: false,
     intentEndpoint: "",
@@ -44,6 +46,7 @@ async function setup({ mode = "enforce", planCheck }) {
     path.join(dataDir, `pending-plan.${SESSION}.json`),
     JSON.stringify({ plan: PLAN, tokenRaw: JSON.stringify(token), allowedActions: [], expiresAt, planCheck })
   );
+  await recordBackendOutcome(config, "ok");
   return config;
 }
 

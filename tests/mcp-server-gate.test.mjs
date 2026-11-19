@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { handleArmorPolicyCommand } from "../plugins/armorcodex/scripts/lib/armor-policy-commands.mjs";
 import { loadConfig } from "../plugins/armorcodex/scripts/lib/config.mjs";
+import { recordBackendOutcome } from "../plugins/armorcodex/scripts/lib/backend-posture.mjs";
 import { handlePreToolUse } from "../plugins/armorcodex/scripts/lib/engine.mjs";
 import { withHome } from "./helpers/login.mjs";
 
@@ -94,6 +95,8 @@ test("a blocked audit row redacts secrets in the backend's deny reason", async (
     policyFile: path.join(dataDir, "policy.json"),
     runtimeFile: path.join(dataDir, "runtime.json"),
     apiKey: "ak_test_redact00000000000000000000000",
+    backendEndpoint: "https://audit.invalid",
+    userId: "user-login",
     auditEnabled: true,
     intentRequired: true,
     agentId: "codex",
@@ -101,6 +104,7 @@ test("a blocked audit row redacts secrets in the backend's deny reason", async (
   };
   const planCheck = { deniedTools: ["Bash"], deniedReasons: ["Bash: rejected, token=sk_live_0123456789abcdef"] };
   await writeFile(config.runtimeFile, JSON.stringify({ sessions: { "sess-mcp": { planCheck } } }));
+  await recordBackendOutcome(config, "ok");
   const decision = await preToolUse(config, "Bash");
   assert.equal(decision?.hookSpecificOutput?.permissionDecision, "deny");
   const rows = (await readFile(path.join(dataDir, "audit", "current.jsonl"), "utf8"))

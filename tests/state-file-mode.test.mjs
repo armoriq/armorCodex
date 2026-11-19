@@ -82,17 +82,16 @@ test("the hook router makes an existing data dir 0700", async () => {
 
 test("the audit WAL holding tool inputs is owner-only", async () => {
   const dataDir = await openDataDir();
-  const wal = createAuditWal({ dataDir });
+  const wal = createAuditWal({ dataDir, login: { backend: "https://audit.invalid", keyId: "mode-test" } });
   await wal.appendLine({ tool: "Bash", input: { command: "curl -H 'Authorization: Bearer abc123'" } });
-  const { currentPath, offsetPath, archiveDir } = wal._paths;
+  const { currentPath, statePath, archiveDir } = wal._paths;
   assert.match(await readFile(currentPath, "utf8"), /Bearer abc123/);
   assert.equal(await modeOf(currentPath), 0o600);
   assert.equal(await modeOf(path.dirname(currentPath)), 0o700);
   assert.equal(await modeOf(archiveDir), 0o700);
 
-  const { endOffset } = await wal.readBatch();
-  await wal.advanceOffset(endOffset);
-  assert.equal(await modeOf(offsetPath), 0o600);
+  await wal.drain(async ({ rows }) => ({ status: 200, body: { results: rows.map(({ client_row_id }) => ({ client_row_id, outcome: "accepted" })) } }));
+  assert.equal(await modeOf(statePath), 0o600);
 });
 
 test("the audit WAL closes an existing 0644 log in a 0755 dir", async () => {
@@ -105,12 +104,14 @@ test("the audit WAL closes an existing 0644 log in a 0755 dir", async () => {
   await writeFile(currentPath, `${JSON.stringify({ tool: "Bash" })}\n`);
   await chmod(currentPath, 0o644);
 
-  const wal = createAuditWal({ dataDir });
+  const wal = createAuditWal({ dataDir, login: { backend: "https://audit.invalid", keyId: "mode-test" } });
   await wal.appendLine({ tool: "Read" });
   assert.equal(await modeOf(currentPath), 0o600);
   assert.equal(await modeOf(auditDir), 0o700);
   assert.equal(await modeOf(path.join(auditDir, "archive")), 0o700);
-  assert.equal((await readFile(currentPath, "utf8")).trim().split("\n").length, 2);
+  assert.equal((await readFile(currentPath, "utf8")).trim().split("\n").length, 1);
+  assert.equal((await wal.readPending()).length, 2);
+  assert.equal((await wal.status()).undeliverable, 1);
 });
 
 test("appendNdjsonLine creates an owner-only turn log in an owner-only dir", async () => {

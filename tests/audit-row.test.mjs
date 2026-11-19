@@ -6,8 +6,11 @@ import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { handlePostToolUse, handlePostToolUseFailure, handlePreToolUse } from "../plugins/armorcodex/scripts/lib/engine.mjs";
+import { createAuditWal } from "../plugins/armorcodex/scripts/lib/audit-wal.mjs";
+import { recordBackendOutcome } from "../plugins/armorcodex/scripts/lib/backend-posture.mjs";
 
-const WAL_LINE_CAP = 4000;
+const { sizeLimits } = JSON.parse(await readFile(new URL("../plugins/armorcodex/tests/fixtures/block-capture-v1.json", import.meta.url), "utf8"));
+const WAL_LINE_CAP = sizeLimits.maxRowBytes;
 const PLAN_ID = randomUUID();
 const SESSION = "sess-audit";
 const PLAN = { steps: [{ action: "Bash" }, { action: "Read" }], metadata: { goal: "inspect" } };
@@ -30,6 +33,7 @@ async function setup() {
     policyFile: path.join(dataDir, "policy.json"),
     runtimeFile: path.join(dataDir, "runtime.json"),
     apiKey: "ak_test_auditrow0000000000000000000",
+    backendEndpoint: "https://audit.invalid",
     auditEnabled: true,
     useSdkIntent: false,
     intentEndpoint: "",
@@ -49,6 +53,7 @@ async function setup() {
     config.runtimeFile,
     JSON.stringify({ sessions: { [SESSION]: { intentTokenRaw: JSON.stringify(sdkIntentToken()), plan: PLAN, countedPlanId: PLAN_ID, tokenPlanId: PLAN_ID } } })
   );
+  await recordBackendOutcome(config, "ok");
   return config;
 }
 
@@ -112,12 +117,12 @@ test("audit rows reference the plan by id and carry no token, so a 16 KB token s
 
 test("an oversized tool output is cut to fit and marked truncated", async () => {
   const config = await setup();
-  const big = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`k${i}`, "x".repeat(1500)]));
+  config.sanitize.maxChars = 20_000;
+  const big = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`k${i}`, "x".repeat(15_000)]));
   await post(config, { tool_response: big });
   const [row] = await walRows(config);
   assert.ok(row, "expected one audit row");
-  assert.equal(row.output.truncated, true);
-  assert.ok(row.output.originalBytes > 50_000);
+  assert.deepEqual(row.output, sizeLimits.truncationMarker);
   assert.ok(Buffer.byteLength(JSON.stringify(row)) <= WAL_LINE_CAP);
 });
 
@@ -135,19 +140,15 @@ test("duration_ms carries the time between PreToolUse and PostToolUse for the sa
   assert.equal(row.duration_ms, 150);
 });
 
-test("a row that cannot fit even after cutting is reported on stderr, not dropped silently", async () => {
+test("metadata that cannot fit is preserved in a counted dead letter", async () => {
   const config = await setup();
-  const written = [];
-  const original = process.stderr.write;
-  process.stderr.write = (chunk, ...rest) => {
-    written.push(String(chunk));
-    return original.call(process.stderr, chunk, ...rest);
-  };
-  try {
-    await post(config, { tool_name: `tool_${"z".repeat(5000)}` });
-  } finally {
-    process.stderr.write = original;
-  }
+  const tool = `tool_${"z".repeat(WAL_LINE_CAP)}`;
+  await post(config, { tool_name: tool });
   assert.deepEqual(await walRows(config), []);
-  assert.ok(written.some((line) => /audit row rejected/.test(line)), written.join(""));
+  const wal = createAuditWal({ dataDir: config.dataDir, config });
+  const [dead] = await wal.readDeadLetters();
+  assert.equal(dead.row.tool, tool);
+  assert.equal(dead.reason, "oversize");
+  assert.equal(dead.attempts, 0);
+  assert.equal((await wal.status()).deadLetters, 1);
 });

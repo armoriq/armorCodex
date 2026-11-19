@@ -8,15 +8,8 @@ import {
 import { createAuditWal } from "./audit-wal.mjs";
 import { requireEndpoint } from "./config.mjs";
 
-const walCache = new Map();
 function getAuditWal(config) {
-  const key = config.dataDir;
-  let wal = walCache.get(key);
-  if (!wal) {
-    wal = createAuditWal({ dataDir: config.dataDir });
-    walCache.set(key, wal);
-  }
-  return wal;
+  return createAuditWal({ dataDir: config.dataDir, config });
 }
 
 export function createIapService(config) {
@@ -148,15 +141,15 @@ export function createIapService(config) {
       return response.data;
     },
 
-    async enqueueAudit(dto) {
+    async enqueueAudit(dto, options) {
       const wal = getAuditWal(config);
-      await wal.appendLine(dto);
+      await wal.appendLine(dto, options);
     },
 
-    /** Throws on failure; the caller must not advance the WAL offset or the failed rows are lost. */
+    /** Preserve status, outcomes and Retry-After so the outbox never acknowledges an unproved delivery. */
     async shipAuditBatch(rows) {
       if (!Array.isArray(rows) || rows.length === 0) {
-        return { written: 0, failures: [] };
+        return { status: 200, body: { written: 0, failures: [] }, headers: {} };
       }
       const response = await postJson(
         `${backendEndpoint}/iap/audit/batch`,
@@ -164,13 +157,7 @@ export function createIapService(config) {
         headers,
         timeoutMs
       );
-      if (!response.ok || !response.data) {
-        const message = response.text
-          ? `IAP audit batch failed: ${response.text}`
-          : `IAP audit batch failed with status ${response.status}`;
-        throw Object.assign(new Error(message), { status: response.status });
-      }
-      return response.data;
+      return { status: response.status, body: response.data, headers: response.headers };
     },
 
     csrgProofsRequired() {
