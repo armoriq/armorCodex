@@ -481,6 +481,15 @@ export function validateCsrgProofHeaders(proofs, required) {
   return null;
 }
 
+/**
+ * The policy CSRG signs into the token. CSRG reads it as an allow/deny list and
+ * refuses every plan step when it has no allow list, so a held call could never
+ * pass the backend's step check. Local rules are already enforced in PreToolUse.
+ */
+function csrgIntentPolicy(policyHash) {
+  return { allow: ["*"], deny: [], metadata: { source: "codex", policyHash: policyHash ?? "" } };
+}
+
 export async function requestIntent(config, payload) {
   if (!isPlainObject(payload.plan)) {
     throw new Error("ArmorCodex requests an intent token only for a registered plan");
@@ -533,7 +542,7 @@ export async function requestIntent(config, payload) {
     ...payload.metadata
   };
   const capture = client.capturePlan(config.llmId, payload.prompt || "", plan, metadata);
-  const token = await client.getIntentToken(capture, payload.policy, payload.validitySeconds, {
+  const token = await client.getIntentToken(capture, csrgIntentPolicy(payload.policy_hash), payload.validitySeconds, {
     contextId: payload.session_id
   });
   const tokenRaw = JSON.stringify(token);
