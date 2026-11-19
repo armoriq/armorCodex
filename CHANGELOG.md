@@ -4,6 +4,29 @@ All notable changes to ArmorCodex are recorded here. Format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Fixed
+- An auto-update now brings ArmorCodex's own entries in `~/.codex/hooks.json` up to the current definition, so installs that moved to 0.3.9 on their own stop logging `warning: clamping SessionEnd hook timeout to 3s`. At session start, when an entry pointing at the managed install differs, a background step rewrites it and records trust for the changed hooks through `codex app-server`, as the installer does. If the trust step fails, `hooks.json` and the previous trust are put back and the reason is written to `~/.codex/armorcodex/hooks-sync.log`; it is retried after an hour. Other tools' hooks, hooks the person never trusted, and entries pointing at another checkout are left alone. `ARMORCODEX_NO_AUTO_UPDATE=1` turns it off.
+
+### Changed
+- The installer and the update path write hook entries from one module, `plugins/armorcodex/scripts/lib/hooks-file.mjs`. The installer runs it from the checked out plugin.
+
+## [0.3.9] - 2026-11-18
+
+### Fixed
+- The SessionEnd hook asks Codex for a 3s timeout instead of 30s. Codex caps SessionEnd at 3s and printed `warning: clamping SessionEnd hook timeout to 3s` on every session when asked for more. The installer, `hooks/hooks.json` and `.codex/hooks.json` all use 3, and rerunning the installer brings existing ArmorCodex hook entries up to the current timeout and status message, keeping each entry's command. An auto-update did not: installs that moved to 0.3.9 on their own kept SessionEnd at 30 and still logged the warning (fixed in the next release). SessionEnd's removal from the live sessions list now waits at most 1s for its lock, so it fits inside that cap.
+- A failed release lookup (offline, GitHub rate limit) no longer moves an install that sits on a release tag onto unreleased `main`; it keeps the installed version.
+- The installer no longer moves an install that is newer than the latest release back to that release.
+- A `[features]` header with a trailing comment in `config.toml` now gets `hooks = true`. Before, hooks stayed off.
+- A failed first-time install deletes the plugin directory only when that run created it.
+
+### Changed
+- `install_armorcodex.sh` in this repository is the single source of the installer. The hosted https://armoriq.ai/install_armorcodex.sh is moving to a small wrapper that downloads this file from `main`. The release lookup timeout is 10s instead of 5s.
+
+## [0.3.8] - 2026-11-17
+
+### Changed
+- No functional change. This patch release proves that installs on 0.3.7 move to a new release on their own: the session after it is published prepares 0.3.8 beside the install, and the next session switches to it.
+
 ## [0.3.7] - 2026-11-16
 
 ### Added

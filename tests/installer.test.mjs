@@ -251,6 +251,31 @@ test("install then uninstall leaves another tool's hooks.json byte-identical, wh
   assert.equal(readFileSync(hooksPath, "utf8"), foreign);
 });
 
+test("a piped uninstall strips the ArmorCodex hooks even when the plugin folder is gone", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "armorcodex-uninstall-gone-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const hooksPath = join(home, ".codex", "hooks.json");
+  mkdirSync(join(home, ".codex"), { recursive: true });
+  const other = { type: "command", command: "/opt/other-tool/on-end", timeout: 2 };
+  const ours = (event) => ({ type: "command", command: `node ${home}/.armoriq/armorCodex/plugins/armorcodex/scripts/bootstrap.mjs router`, statusMessage: `ArmorCodex ${event}` });
+  const foreign = { hooks: { SessionEnd: [{ hooks: [other] }] } };
+  const withOurs = { hooks: { SessionStart: [{ hooks: [ours("start")] }], SessionEnd: [{ hooks: [other] }, { hooks: [ours("end")] }] } };
+  writeFileSync(hooksPath, `${JSON.stringify(withOurs, null, 4)}\n`);
+  assert.equal(existsSync(join(home, ".armoriq")), false);
+
+  const result = spawnSync("bash", ["-s", "--", "--uninstall"], {
+    cwd: root,
+    input: readFileSync(new URL("../install_armorcodex.sh", import.meta.url)),
+    encoding: "utf8",
+    env: { ...process.env, HOME: home, NO_COLOR: "1" },
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.doesNotMatch(result.stdout, /couldn't safely remove/);
+  assert.equal(readFileSync(hooksPath, "utf8"), `${JSON.stringify(foreign, null, 4)}\n`);
+});
+
 test("an update with an old-format credentials.json reaches the login step", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "armorcodex-update-v1-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -568,6 +593,9 @@ function pluginRepo(root) {
   git(work, "config", "user.name", "test");
   git(work, "config", "commit.gpgsign", "false");
   writeFileSync(join(work, "plugins", "armorcodex", "scripts", "bootstrap.mjs"), "");
+  for (const file of ["scripts/hooks-file.mjs", "scripts/lib/hooks-file.mjs"]) {
+    cpSync(new URL(`../plugins/armorcodex/${file}`, import.meta.url).pathname, join(work, "plugins", "armorcodex", file));
+  }
   writeFileSync(
     join(work, "plugins", "armorcodex", "scripts", "lib", "config.mjs"),
     'export const loadConfig = () => (process.env.TEST_NO_LOGIN ? {} : { apiKey: "ak_test_update" });\n'
@@ -765,3 +793,99 @@ test("a local checkout run without a login leaves ARMORCODEX_INSTALL_HOME alone"
   assert.match(result.stdout, /rolling back/);
   assert.equal(readFileSync(join(installHome, "keep.txt"), "utf8"), "not used by a local checkout run");
 });
+
+test("an update moves an existing ArmorCodex SessionEnd hook to the 3s timeout Codex honours", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "armorcodex-session-end-timeout-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const binDir = join(root, "bin");
+  const hooksPath = join(home, ".codex", "hooks.json");
+  mkdirSync(join(home, ".codex"), { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  stubTools(binDir);
+  saveCodexLogin(home);
+
+  const fresh = await runInstaller(root, home, binDir);
+  assert.equal(fresh.status, 0, fresh.stderr || fresh.stdout);
+  const installed = JSON.parse(readFileSync(hooksPath, "utf8"));
+  assert.equal(installed.hooks.SessionEnd[0].hooks[0].timeout, 3);
+  assert.equal(installed.hooks.Stop[0].hooks[0].timeout, 30);
+
+  const other = { type: "command", command: "/opt/other-tool/on-end", timeout: 30 };
+  installed.hooks.SessionEnd[0].hooks[0].timeout = 30;
+  installed.hooks.SessionEnd.push({ hooks: [other] });
+  writeFileSync(hooksPath, `${JSON.stringify(installed, null, 2)}\n`);
+  const ourCommand = installed.hooks.SessionEnd[0].hooks[0].command;
+
+  const update = await runInstaller(root, home, binDir);
+
+  assert.equal(update.status, 0, update.stderr || update.stdout);
+  assert.match(update.stdout, /updated ArmorCodex SessionEnd hook\(s\)/);
+  assert.doesNotMatch(update.stdout, /added missing/);
+  const { hooks } = JSON.parse(readFileSync(hooksPath, "utf8"));
+  assert.deepEqual(hooks.SessionEnd[0].hooks, [{ type: "command", command: ourCommand, timeout: 3 }]);
+  assert.deepEqual(hooks.SessionEnd[1].hooks, [other]);
+
+  const again = await runInstaller(root, home, binDir);
+  assert.equal(again.status, 0, again.stderr || again.stdout);
+  assert.match(again.stdout, /global hooks already reference ArmorCodex/);
+});
+
+test("a [features] header with a trailing comment still gets the hooks flag", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "armorcodex-features-comment-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const binDir = join(root, "bin");
+  mkdirSync(join(home, ".codex"), { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  writeFileSync(join(home, ".codex", "config.toml"), "[features] # mine\njs_repl = true\n");
+  stubTools(binDir);
+  saveCodexLogin(home);
+
+  const result = await runInstaller(root, home, binDir);
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.doesNotMatch(result.stdout + result.stderr, /hooks feature flag not set/);
+  const config = readFileSync(join(home, ".codex", "config.toml"), "utf8");
+  assert.equal(config.match(/^\[features\]/gm)?.length, 1, config);
+  assert.match(config, /^\[features\] # mine\nhooks = true\njs_repl = true$/m);
+});
+
+const OLD_MANAGED_BLOCK = '\n# >>> ArmorCodex managed block (do not edit manually) >>>\n[features]\ncodex_hooks = true\n\n[mcp_servers.armorcodex-policy]\ncommand = "node"\nargs = ["/old/bootstrap.mjs", "mcp"]\n# <<< ArmorCodex managed block <<<\n';
+
+for (const { name, before, runs = 1, uninstall = false, features } of [
+  { name: "an existing [features] table gets the hooks flag merged in", before: "[features]\njs_repl = true\n", features: ["hooks = true", "js_repl = true"] },
+  { name: "a config with no [features] table gets one", before: 'model = "o3"\n', features: ["hooks = true"] },
+  { name: "a config an old installer left with two [features] tables heals", before: `[features]\njs_repl = true\n${OLD_MANAGED_BLOCK}`, features: ["hooks = true", "js_repl = true"] },
+  { name: "a hooks value the user set is kept", before: "[features]\nhooks = false\n", features: ["hooks = false"] },
+  { name: "re-running does not add a second table or flag", before: "[features]\njs_repl = true\n", runs: 3, features: ["hooks = true", "js_repl = true"] },
+  { name: "uninstall leaves a single [features] table", before: "[features]\njs_repl = true\n", uninstall: true, features: ["hooks = true", "js_repl = true"] },
+]) {
+  test(`config.toml: ${name}`, async (t) => {
+    const root = mkdtempSync(join(tmpdir(), "armorcodex-features-"));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const home = join(root, "home");
+    const binDir = join(root, "bin");
+    const configPath = join(home, ".codex", "config.toml");
+    mkdirSync(join(home, ".codex"), { recursive: true });
+    mkdirSync(binDir, { recursive: true });
+    writeFileSync(configPath, before);
+    stubTools(binDir);
+    saveCodexLogin(home);
+
+    for (let run = 0; run < runs; run++) {
+      const result = await runInstaller(root, home, binDir);
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+    }
+    if (uninstall) {
+      const result = await runInstaller(root, home, binDir, "--uninstall");
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+    }
+
+    const config = readFileSync(configPath, "utf8");
+    assert.equal(config.match(/^\s*\[features\]/gm)?.length, 1, config);
+    const table = config.split(/^\s*\[features\][^\n]*\n/m)[1].split(/^\s*\[/m)[0];
+    assert.deepEqual(table.split("\n").map((line) => line.trim()).filter((line) => line && !line.startsWith("#")).sort(), features, config);
+    assert.equal(/ArmorCodex managed block/.test(config), !uninstall, config);
+  });
+}

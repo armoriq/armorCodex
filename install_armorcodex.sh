@@ -90,6 +90,10 @@ MARK_END="# <<< ArmorCodex managed block <<<"
 
 DO_UNINSTALL=0
 HAD_INSTALL=0
+# Captured before anything is written, so a failed run deletes only a plugin
+# directory it created itself.
+HAD_INSTALL_HOME=0
+[[ -d "${INSTALL_HOME}" ]] && HAD_INSTALL_HOME=1
 FORCE_MODE=""
 if [[ "${ARMORIQ_FORCE_INSTALL:-0}" == "1" ]]; then
   FORCE_MODE="install"
@@ -340,26 +344,59 @@ refuse_other_channel() {
   exit 1
 }
 
+installed_version() {
+  local manifest
+  for manifest in "${INSTALL_HOME}/plugins/armorcodex/package.json" "${INSTALL_HOME}/package.json"; do
+    [[ -f "${manifest}" ]] || continue
+    node -e 'const v = require(process.argv[1]).version; if (typeof v === "string") process.stdout.write(v);' \
+      "${manifest}" 2>/dev/null || true
+    return 0
+  done
+}
+
+# True when version $1 is strictly newer than $2. A prerelease (1.2.0-rc.1) is
+# older than its release (1.2.0), which sort -V alone gets backwards.
+version_newer() {
+  local core1="${1%%-*}" core2="${2%%-*}"
+  if [[ "${core1}" == "${core2}" ]]; then
+    [[ "$1" == "${core1}" && "$2" != "${core2}" ]]
+    return
+  fi
+  [[ "$(printf '%s\n%s\n' "${core1}" "${core2}" | sort -V | tail -n 1)" == "${core1}" ]]
+}
+
 # An install must land on a version that was released and tested, not on
 # whatever happens to be on main. ARMORCODEX_GIT_REF overrides with any ref.
+# Leaves PLUGIN_GIT_REF empty when the existing checkout should stay put.
 resolve_git_ref() {
   if [[ -n "${PLUGIN_GIT_REF}" ]]; then
     return 0
   fi
-  local tag
+  local tag current
   # `|| true` because set -e plus pipefail would otherwise abort the whole
   # install when the machine is offline or the repo has no release yet.
-  tag="$(curl -fsSL --max-time 5 "${RELEASE_API%/}/repos/${MARKETPLACE_REPO}/releases/latest" 2>/dev/null \
+  tag="$(curl -fsSL --max-time 10 "${RELEASE_API%/}/repos/${MARKETPLACE_REPO}/releases/latest" 2>/dev/null \
     | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' \
     | head -n 1 \
     | sed 's/.*"\([^"]*\)"$/\1/' || true)"
-  if [[ "${tag}" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+ ]]; then
-    PLUGIN_GIT_REF="${tag}"
-    info "installing release ${B}${tag}${N}"
-  else
+  if [[ ! "${tag}" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+    # One failed lookup (offline, GitHub rate limit) must not move an install
+    # that sits on a release tag onto unreleased main.
+    if [[ -d "${INSTALL_HOME}/.git" ]] && ! git -C "${INSTALL_HOME}" symbolic-ref -q HEAD >/dev/null 2>&1; then
+      warn "couldn't resolve the latest release, leaving the installed version as it is"
+      return 0
+    fi
     PLUGIN_GIT_REF="main"
     warn "couldn't resolve the latest release, falling back to ${B}main${N}"
+    return 0
   fi
+  current="$(installed_version)"
+  if [[ -d "${INSTALL_HOME}/.git" && -n "${current}" ]] && version_newer "${current}" "${tag#v}"; then
+    warn "installed ArmorCodex ${current} is newer than the latest release ${tag}, leaving it as it is"
+    return 0
+  fi
+  PLUGIN_GIT_REF="${tag}"
+  info "installing release ${B}${tag}${N}"
 }
 
 fetch_plugin_source() {
@@ -378,7 +415,9 @@ fetch_plugin_source() {
   resolve_git_ref
   mkdir -p "$(dirname "${INSTALL_HOME}")"
 
-  if [[ -d "${INSTALL_HOME}/.git" ]]; then
+  if [[ -d "${INSTALL_HOME}/.git" && -z "${PLUGIN_GIT_REF}" ]]; then
+    ok "kept ${INSTALL_HOME} at $(git -C "${INSTALL_HOME}" rev-parse --short HEAD 2>/dev/null || echo HEAD)"
+  elif [[ -d "${INSTALL_HOME}/.git" ]]; then
     refuse_other_channel
     info "refreshing ${INSTALL_HOME} (git pull)"
     # FETCH_HEAD rather than origin/<ref>: a release tag has no remote-tracking
@@ -426,10 +465,13 @@ EOF
   # [features] table (e.g. js_repl), and TOML forbids two of the same table,
   # so merge the flag into the existing table instead of emitting our own
   # header (a second [features] is what caused "duplicate key [features]").
+  # The detect and the insert share one pattern: a header with a trailing
+  # comment used to pass the detect, miss the insert, and leave hooks off.
+  local features_header='^[[:space:]]*\[features\][[:space:]]*(#.*)?$'
   if grep -qE '^[[:space:]]*(hooks|codex_hooks)[[:space:]]*=' "${CONFIG_TOML}"; then
     :
-  elif grep -qE '^\[features\]' "${CONFIG_TOML}"; then
-    awk 'BEGIN{done=0} !done && /^\[features\][[:space:]]*$/ {print; print "hooks = true"; done=1; next} {print}' \
+  elif grep -qE "${features_header}" "${CONFIG_TOML}"; then
+    FEATURES_HEADER="${features_header}" awk '!done && $0 ~ ENVIRON["FEATURES_HEADER"] {print; print "hooks = true"; done=1; next} {print}' \
       "${CONFIG_TOML}" > "${CONFIG_TOML}.armorcodex.tmp" \
       && mv "${CONFIG_TOML}.armorcodex.tmp" "${CONFIG_TOML}"
   else
@@ -439,99 +481,54 @@ EOF
 }
 
 codex_hooks_json() {
-  node --input-type=module - "$1" "${GLOBAL_HOOKS}" "${BOOTSTRAP_PATH}" <<'NODE'
-import { chmodSync, existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+  local module="${PLUGIN_PATH}/scripts/hooks-file.mjs"
+  if [[ -f "${module}" ]]; then
+    node "${module}" "$1" "${GLOBAL_HOOKS}" "${BOOTSTRAP_PATH}"
+  elif [[ "$1" == "remove" ]]; then
+    strip_hooks_without_plugin
+  else
+    echo "${module} is missing; this checkout predates the shared hooks writer" >&2
+    return 1
+  fi
+}
 
-const [mode, hooksPath, bootstrapPath] = process.argv.slice(2);
+strip_hooks_without_plugin() {
+  [[ -f "${GLOBAL_HOOKS}" ]] || { printf absent; return 0; }
+  node --input-type=module - "${GLOBAL_HOOKS}" <<'NODE'
+import { chmodSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+const [hooksPath] = process.argv.slice(2);
 const tempPath = `${hooksPath}.armorcodex.tmp-${process.pid}`;
-const command = `node ${bootstrapPath} router`;
-const hook = (extra) => ({ type: "command", command, ...extra });
-const GROUPS = {
-  SessionStart: { matcher: "startup|resume", hooks: [hook({ statusMessage: "Starting ArmorCodex" })] },
-  UserPromptSubmit: { hooks: [hook({ statusMessage: "Loading ArmorCodex intent policy" })] },
-  PreToolUse: { matcher: "*", hooks: [hook({ statusMessage: "Checking ArmorCodex policy" })] },
-  PermissionRequest: { matcher: "*", hooks: [hook({ statusMessage: "Checking ArmorCodex approval policy" })] },
-  PostToolUse: { matcher: "*", hooks: [hook({ statusMessage: "Auditing ArmorCodex command" })] },
-  Stop: { hooks: [hook({ timeout: 30 })] },
-  SessionEnd: { hooks: [hook({ timeout: 30 })] },
-};
-
 const ours = (entry) => entry?.type === "command"
   && typeof entry.command === "string"
   && entry.command.endsWith("bootstrap.mjs router")
   && /armorcodex/i.test(`${entry.command} ${entry.statusMessage ?? ""}`);
 const hasOurs = (group) => Array.isArray(group?.hooks) && group.hooks.some(ours);
-
-// Written back in the file's own indentation and trailing newline, so an
-// install followed by an uninstall leaves another tool's file byte-identical.
-let layout = { indent: 2, newline: "\n" };
-
-function readConfig() {
+try {
   const text = readFileSync(hooksPath, "utf8");
   const config = JSON.parse(text);
-  layout = {
-    indent: text.match(/^([ \t]+)\S/m)?.[1] ?? (text.trim().includes("\n") ? 2 : 0),
-    newline: text.endsWith("\n") ? "\n" : "",
-  };
-  if (!config.hooks || typeof config.hooks !== "object" || Array.isArray(config.hooks)) {
-    throw new Error("top-level hooks must be an object");
-  }
+  if (!config?.hooks || typeof config.hooks !== "object" || Array.isArray(config.hooks)) throw new Error("top-level hooks must be an object");
+  let removed = 0;
   for (const [event, groups] of Object.entries(config.hooks)) {
     if (!Array.isArray(groups)) throw new Error(`hooks.${event} must be an array`);
-  }
-  return config;
-}
-
-function addMissing(hooks) {
-  const added = Object.keys(GROUPS).filter((event) => !(hooks[event] ?? []).some(hasOurs));
-  for (const event of added) hooks[event] = [...(hooks[event] ?? []), GROUPS[event]];
-  return added;
-}
-
-function stripGroup(group) {
-  return hasOurs(group) ? { ...group, hooks: group.hooks.filter((entry) => !ours(entry)) } : group;
-}
-
-function removeOurs(hooks) {
-  let removed = 0;
-  for (const [event, groups] of Object.entries(hooks)) {
-    const kept = groups.map(stripGroup).filter((group) => !Array.isArray(group?.hooks) || group.hooks.length > 0);
     removed += groups.filter(hasOurs).length;
-    if (kept.length > 0) hooks[event] = kept;
-    else delete hooks[event];
+    const kept = groups
+      .map((group) => (hasOurs(group) ? { ...group, hooks: group.hooks.filter((entry) => !ours(entry)) } : group))
+      .filter((group) => !Array.isArray(group?.hooks) || group.hooks.length > 0);
+    if (kept.length > 0) config.hooks[event] = kept;
+    else delete config.hooks[event];
   }
-  return removed;
-}
-
-function save(config, existed) {
-  writeFileSync(tempPath, `${JSON.stringify(config, null, layout.indent)}${layout.newline}`, { flag: "wx" });
-  if (existed) chmodSync(tempPath, statSync(hooksPath).mode & 0o7777);
-  renameSync(tempPath, hooksPath);
-}
-
-function add() {
-  const existed = existsSync(hooksPath);
-  const config = existed ? readConfig() : { hooks: {} };
-  const added = addMissing(config.hooks);
-  if (added.length === 0) return "present";
-  save(config, existed);
-  return existed ? `repaired:${added.join(", ")}` : "created";
-}
-
-function remove() {
-  if (!existsSync(hooksPath)) return "absent";
-  const config = readConfig();
-  if (removeOurs(config.hooks) === 0) return "absent";
-  if (Object.keys(config.hooks).length === 0 && Object.keys(config).length === 1) {
+  if (removed === 0) {
+    process.stdout.write("absent");
+  } else if (Object.keys(config.hooks).length === 0 && Object.keys(config).length === 1) {
     rmSync(hooksPath, { force: true });
-    return "removed";
+    process.stdout.write("removed");
+  } else {
+    const indent = text.match(/^([ \t]+)\S/m)?.[1] ?? (text.trim().includes("\n") ? 2 : 0);
+    writeFileSync(tempPath, `${JSON.stringify(config, null, indent)}${text.endsWith("\n") ? "\n" : ""}`, { flag: "wx" });
+    chmodSync(tempPath, statSync(hooksPath).mode & 0o7777);
+    renameSync(tempPath, hooksPath);
+    process.stdout.write("stripped");
   }
-  save(config, true);
-  return "stripped";
-}
-
-try {
-  process.stdout.write(mode === "remove" ? remove() : add());
 } catch (error) {
   rmSync(tempPath, { force: true });
   console.error(error instanceof Error ? error.message : String(error));
@@ -549,7 +546,13 @@ ensure_global_hooks() {
   fi
   case "${result}" in
     created) ok "installed global ArmorCodex hooks at ${GLOBAL_HOOKS}" ;;
-    repaired:*) ok "added missing ArmorCodex ${result#repaired:} hook(s) to ${GLOBAL_HOOKS}" ;;
+    repaired:*)
+      local added="${result#repaired:}" refreshed
+      refreshed="${added#*|}"
+      added="${added%%|*}"
+      [[ -n "${added}" ]] && ok "added missing ArmorCodex ${added} hook(s) to ${GLOBAL_HOOKS}"
+      [[ -n "${refreshed}" ]] && ok "updated ArmorCodex ${refreshed} hook(s) in ${GLOBAL_HOOKS}"
+      ;;
     *) ok "global hooks already reference ArmorCodex" ;;
   esac
   trust_codex_hooks
@@ -707,7 +710,7 @@ abort_install() {
     strip_managed_block "${CONFIG_TOML}" 2>/dev/null && info "removed managed block from ${CONFIG_TOML}" || true
   fi
   remove_codex_hooks
-  if [[ "${LOCAL_CHECKOUT}" -eq 0 && -d "${INSTALL_HOME}" ]]; then
+  if [[ "${LOCAL_CHECKOUT}" -eq 0 && "${HAD_INSTALL_HOME}" -eq 0 && -d "${INSTALL_HOME}" ]]; then
     rm -rf "${INSTALL_HOME}" && info "removed plugin source ${INSTALL_HOME}" || true
   fi
   echo

@@ -51,20 +51,26 @@ export function harnessProcess(start = process.ppid) {
 const sessionsFile = (dir) => path.join(dir, "sessions.json");
 const sessionsLock = (dir) => path.join(dir, "sessions.lock");
 
-function updateSessions(dir, change) {
+function updateSessions(dir, change, waitMs) {
   return withFileLock(sessionsLock(dir), async () => {
     const sessions = change(await readJson(sessionsFile(dir), {}));
     await writeJson(sessionsFile(dir), sessions);
     return sessions;
-  });
+  }, waitMs);
 }
 
 export const registerSession = (dir, sessionId, { pid, startedAt }) =>
   updateSessions(dir, (s) => ({ ...s, [sessionId]: { pid, startedAt } }));
 
+// Runs inside SessionEnd, which Codex stops waiting for after 3s. Giving up on a busy lock
+// is safe: liveSessions drops the entry once the Codex process has exited.
+const END_SESSION_LOCK_WAIT_MS = 1_000;
+
 export const endSession = (dir, sessionId) =>
-  updateSessions(dir, (s) =>
-    Object.fromEntries(Object.entries(s).filter(([id]) => id !== sessionId))
+  updateSessions(
+    dir,
+    (s) => Object.fromEntries(Object.entries(s).filter(([id]) => id !== sessionId)),
+    END_SESSION_LOCK_WAIT_MS
   );
 
 export async function liveSessions(dir) {
