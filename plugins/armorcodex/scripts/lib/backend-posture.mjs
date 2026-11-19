@@ -122,7 +122,7 @@ const POSTURE_LINES = {
   signed_out: "rejected the stored key (401): running in local only mode until you sign in again"
 };
 
-export async function formatArmorStatus(config, { queuedRows, undeliverable = 0, deadLetters = 0, captureFailures = 0 }) {
+export async function formatArmorStatus(config, { queuedRows, undeliverable = 0, deadLetters = 0, captureFailures = 0, healthPending = 0, healthPaused = false }) {
   const lines = ["ArmorCodex status"];
   if (!config.apiKey) {
     lines.push(`  Signed in: no (local only mode, ${config.backendEndpoint})`);
@@ -136,6 +136,8 @@ export async function formatArmorStatus(config, { queuedRows, undeliverable = 0,
   lines.push(`  Undeliverable audit rows: ${undeliverable}`);
   lines.push(`  Dead letter audit rows: ${deadLetters}`);
   lines.push(`  Audit capture failures: ${captureFailures}`);
+  lines.push(`  Health events waiting to upload: ${healthPending}`);
+  lines.push(`  Health reporting paused: ${healthPaused ? "yes" : "no"}`);
   lines.push(`  Coverage: ${COVERAGE_LINE}`);
   return lines.join("\n");
 }

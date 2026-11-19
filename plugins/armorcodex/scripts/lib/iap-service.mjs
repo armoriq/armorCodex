@@ -173,6 +173,11 @@ export function createIapService(config) {
       return { status: response.status, body: response.data, headers: response.headers };
     },
 
+    async shipHealthBatch(events) {
+      const response = await postJson(`${backendEndpoint}/iap/client-events`, { events }, headers, timeoutMs);
+      return { status: response.status, body: response.data, headers: response.headers };
+    },
+
     csrgProofsRequired() {
       return Boolean(config.requireCsrgProofs);
     },

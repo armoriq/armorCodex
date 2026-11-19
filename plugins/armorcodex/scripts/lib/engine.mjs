@@ -398,7 +398,8 @@ export async function handleUserPromptSubmit(input, config) {
   if (input.parent_session_id || input.is_subagent) return null;
   if (isStatusCommand(prompt)) {
     const status = await createAuditWal({ dataDir: config.dataDir, config }).status();
-    return blockPrompt(await formatArmorStatus(config, status));
+    const healthStatus = await createAuditWal({ dataDir: config.dataDir, config, stream: "health" }).status();
+    return blockPrompt(await formatArmorStatus(config, { ...status, healthPending: healthStatus.queuedRows, healthPaused: healthStatus.paused }));
   }
 
   if (isArmorPolicyCommand(prompt)) {
@@ -945,24 +946,35 @@ export async function auditFallbackStop(input, config, code, reason, envelope = 
   envelope.decisionRecorded = true;
 }
 
+// Audit rows are queued before the activity write, so a runtime lock failure cannot lose them.
+async function snapshotFromRuntime(input, config, envelope) {
+  const sessionId = typeof input.session_id === "string" ? input.session_id : "";
+  if (!sessionId) return;
+  const state = await loadRuntimeState(config.runtimeFile);
+  const session = syncSessionAuth(state, sessionId, config, { retireOnChange: false });
+  snapshotAuditContext(envelope, session ? structuredClone(session) : null);
+}
+
 export async function handlePostToolUse(input, config, envelope = createAuditEnvelope(input)) {
-  snapshotAuditContext(envelope, await recordHookActivity(input, config));
+  await snapshotFromRuntime(input, config, envelope);
   const hold = await settleHold(config, input);
   await auditToolCall(input, config, {
     status: "success",
     output: redactSecrets(sanitizeParams(input.tool_response, config.sanitize))
   }, 0, envelope, hold);
+  await recordHookActivity(input, config);
   return null;
 }
 
 export async function handlePostToolUseFailure(input, config, envelope = createAuditEnvelope(input)) {
-  snapshotAuditContext(envelope, await recordHookActivity(input, config));
+  await snapshotFromRuntime(input, config, envelope);
   const hold = await settleHold(config, input);
   await auditToolCall(input, config, {
     status: "failed",
     output: null,
     error_message: typeof input.error === "string" ? redactSecrets(input.error) : "Unknown error"
   }, 0, envelope, hold);
+  await recordHookActivity(input, config);
   return null;
 }
 

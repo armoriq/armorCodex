@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { tryFileLock } from "./live-usage.mjs";
+import { auditRowId, createAuditWal } from "./audit-wal.mjs";
+import { clientEvent } from "./client-events.mjs";
 
 export function canonicalJson(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
@@ -62,8 +64,8 @@ export function csrgIntentPolicy(policyHash) {
   return { allow: ["*"], deny: [], metadata: { source: "codex", policyHash: policyHash ?? "" } };
 }
 
-function unconfirmed(reason) {
-  return Object.assign(new Error(reason), { unconfirmed: true });
+function unconfirmed(reason, reasonCode = "timeout") {
+  return Object.assign(new Error(reason), { unconfirmed: true, reasonCode });
 }
 
 export async function withPlanRequest(runtimeFile, sessionId, task) {
@@ -82,9 +84,25 @@ export async function withPlanRequest(runtimeFile, sessionId, task) {
   }
 }
 
-export async function requestWithRetry(send, { now = Date.now, wait = sleep, timeoutMs = 30000, deadlineAt } = {}) {
+export async function requestWithRetry(send, options = {}) {
+  try {
+    return await retryRequest(send, options);
+  } catch (error) {
+    if (options.config?.apiKey && options.requestKey && (error.unconfirmed || error.retryable !== undefined)) {
+      const event = clientEvent("plan_request_failed", "health", 1,
+        error.reasonCode ?? (error.unconfirmed ? "timeout" : "rejected"), (options.now ?? Date.now)(), {
+          event_id: auditRowId("plan_request_failed", options.requestKey, "decision")
+        });
+      await createAuditWal({ dataDir: options.config.dataDir, config: options.config, stream: "health" }).appendLine(event);
+    }
+    throw error;
+  }
+}
+
+async function retryRequest(send, { now = Date.now, wait = sleep, timeoutMs = 30000, deadlineAt } = {}) {
   const deadline = deadlineAt ?? now() + 40000;
   let reason = "the request deadline expired";
+  let reasonCode = "timeout";
   let attempt = 0;
   while (now() < deadline) {
     const remaining = deadline - now();
@@ -97,6 +115,7 @@ export async function requestWithRetry(send, { now = Date.now, wait = sleep, tim
     } catch (error) {
       if (error.unconfirmed || !error.retryable) throw error;
       reason = error.message;
+      reasonCode = error.reasonCode ?? "network";
       const retryAfter = error.retryAfter;
       const delay = retryAfter !== undefined && /^\d+(\.\d+)?$/.test(String(retryAfter).trim())
         ? Number(retryAfter) * 1000
@@ -109,5 +128,5 @@ export async function requestWithRetry(send, { now = Date.now, wait = sleep, tim
       clearTimeout(timer);
     }
   }
-  throw unconfirmed(reason);
+  throw unconfirmed(reason, reasonCode);
 }

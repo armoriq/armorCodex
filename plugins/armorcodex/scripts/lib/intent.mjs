@@ -497,11 +497,18 @@ function isNetworkError(error) {
   return error instanceof TypeError;
 }
 
+function transportFailureCode(error) {
+  if (!isNetworkError(error)) return "rejected";
+  return /Timeout|Abort/.test(error.name) || /TIMEOUT|ETIMEDOUT|ECONNABORTED/.test(error.code ?? error.cause?.code ?? "") ? "timeout" : "network";
+}
+
 function requestError(response, fallback) {
   const data = response?.data;
   const reason = Array.isArray(data?.message) ? data.message.join("; ") : data?.message || data?.error || fallback;
   const status = response?.status;
   return Object.assign(new Error(String(reason)), {
+    reasonCode: status === 429 ? "rate_limited" : status >= 500 ? "server_error"
+      : status === 409 && data?.error === "request_in_progress" ? "request_in_progress" : "rejected",
     retryable: status === 429 || (status >= 500 && status < 600) || (status === 409 && data?.error === "request_in_progress"),
     retryAfter: response?.headers?.get?.("retry-after") ?? response?.headers?.["retry-after"]
   });
@@ -551,6 +558,7 @@ export async function requestIntent(config, payload, descriptor, { timeoutMs = c
       try { data = JSON.parse(text); } catch { data = { message: text }; }
     } catch (error) {
       error.retryable = isNetworkError(error);
+      error.reasonCode = transportFailureCode(error);
       throw error;
     } finally {
       clearTimeout(timer);
@@ -608,7 +616,10 @@ export async function requestIntent(config, payload, descriptor, { timeoutMs = c
     return tokenResult(token, JSON.stringify(token), plan, "armoriq-sdk");
   } catch (error) {
     if (outcome?.response) throw requestError(outcome.response, error.message);
-    if (outcome?.error) throw Object.assign(outcome.error, { retryable: isNetworkError(outcome.error) });
+    if (outcome?.error) throw Object.assign(outcome.error, {
+      retryable: isNetworkError(outcome.error),
+      reasonCode: transportFailureCode(outcome.error)
+    });
     throw error;
   } finally {
     client.httpClient.interceptors.response.eject(interceptor);

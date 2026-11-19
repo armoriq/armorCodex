@@ -188,7 +188,7 @@ async function registerPlan(currentConfig, sessionId, expected, plan, goal, dead
         if (descriptor.kind === "refresh" && !isPromptOpen(session)) throw new Error("the prompt closed while refreshing");
       });
       return requestIntent(config, { plan }, descriptor, { timeoutMs });
-    }, { timeoutMs: config.timeoutMs, deadlineAt });
+    }, { timeoutMs: config.timeoutMs, deadlineAt, config, requestKey: descriptor.key });
     if (!result?.tokenRaw || !result.planId || !Number.isFinite(result.expiresAt)) {
       throw new Error("the backend returned no token, plan id or expiry");
     }
