@@ -1,0 +1,567 @@
+{
+  "endReasons": [
+    "stop",
+    "next_prompt",
+    "session_end",
+    "recovered"
+  ],
+  "noPlanReasons": [
+    "monitor_mode",
+    "no_tool_use",
+    "read_only",
+    "backend_unreachable",
+    "request_failed",
+    "plan_rejected",
+    "not_registered"
+  ],
+  "limits": {
+    "maxBatchReports": 200,
+    "maxIdChars": 128,
+    "maxPlanIds": 20,
+    "maxBatchBytes": 8388608,
+    "maxInteger": 2147483647
+  },
+  "counting": {
+    "scope": "root_session",
+    "deduplicateBy": "host_tool_call_id",
+    "includeBlockedAndHeld": true,
+    "excludeSubagentHooks": true,
+    "excludedOwnToolPatterns": [
+      "^register_intent_plan$",
+      "^trust_.*$",
+      "^policy_read$"
+    ],
+    "ownToolsRequireTrustedServer": true,
+    "evaluateGatedBeforeMonitorOrEnforcementBypass": true
+  },
+  "toolMatching": {
+    "order": "first_matching_rule",
+    "patterns": "regular_expression",
+    "input": "adapter_normalized_tool_name",
+    "conditions": "A conditional rule applies only when its named host or policy fact matches. Other policy and protected path checks still apply to ungated tools."
+  },
+  "capabilities": {
+    "armorclaude": {
+      "normalization": "Trim and lowercase the host tool name.",
+      "sources": [
+        "scripts/lib/common.mjs",
+        "scripts/lib/backend-posture.mjs",
+        "scripts/lib/engine.mjs:handlePreToolUse"
+      ],
+      "rules": [
+        {
+          "patterns": [
+            "^(?:mcp__armorclaude-policy__|mcp__plugin_armorclaude_armorclaude-policy__)?(?:register_intent_plan|policy_read|trust_revoke|trust_reanchor|trust_delegate)$"
+          ],
+          "gated": false,
+          "counted": false
+        },
+        {
+          "patterns": [
+            "^skill$"
+          ],
+          "gated": false,
+          "counted": true,
+          "when": {
+            "managementSkill": "armor or armorclaude:armor or any skill ending in :armor"
+          }
+        },
+        {
+          "patterns": [
+            "^(?:toolsearch|todowrite|listmcpresourcestool|readmcpresourcetool|exitplanmode)$"
+          ],
+          "gated": false,
+          "counted": true
+        },
+        {
+          "patterns": [
+            "^(?:read|grep|glob|websearch|webfetch)$"
+          ],
+          "gated": true,
+          "counted": true,
+          "when": {
+            "policyV2Action": "hold"
+          }
+        },
+        {
+          "patterns": [
+            "^(?:read|grep|glob|websearch|webfetch)$"
+          ],
+          "gated": false,
+          "counted": true
+        },
+        {
+          "patterns": [
+            "^.*$"
+          ],
+          "gated": true,
+          "counted": true
+        }
+      ],
+      "notes": [
+        "Backend capability labels also call ls and notebookread read, but those names do not bypass the intent gate."
+      ]
+    },
+    "armorcodex": {
+      "normalization": "Trim, preserve MCP prefixes, remove the first double underscore from other names, lowercase, then resolve exec_command, shell, local_shell, unified_exec and container.exec to bash.",
+      "sources": [
+        "plugins/armorcodex/scripts/lib/common.mjs",
+        "plugins/armorcodex/scripts/lib/backend-posture.mjs",
+        "plugins/armorcodex/scripts/lib/engine.mjs:handlePreToolUse"
+      ],
+      "rules": [
+        {
+          "patterns": [
+            "^(?:register_intent_plan|policy_read|policy_update)$",
+            "^(?:.*mcp__armorcodex[-_]policy__|.*armorcodex[-_]policy[.]).*(?:register_intent_plan|policy_read|policy_update)$"
+          ],
+          "gated": false,
+          "counted": false
+        },
+        {
+          "patterns": [
+            "^(?:toolsearch|todowrite|listmcpresourcestool|readmcpresourcetool|read|grep|glob|websearch|webfetch)$"
+          ],
+          "gated": false,
+          "counted": true
+        },
+        {
+          "patterns": [
+            "^.*$"
+          ],
+          "gated": true,
+          "counted": true
+        }
+      ],
+      "notes": [
+        "The current own tool exemption includes policy_update and exposes no trust tools. Codex currently hooks Bash, apply_patch and MCP calls, so it sees no native read calls. Backend capability labels do not define plan exemptions."
+      ]
+    },
+    "armoropencode": {
+      "normalization": "Use the canonical OpenCode tool name. The V2 adapter resolves its host vocabulary before this table.",
+      "sources": [
+        "src/core/decide.ts",
+        "src/core/intent.ts:READ_ONLY_TOOLS",
+        "src/core/builtin-rules.ts",
+        "src/tools/intent.ts:OWN_TOOL_NAMES"
+      ],
+      "rules": [
+        {
+          "patterns": [
+            "^(?:register_intent_plan|policy_read|trust_reanchor|trust_revoke)$"
+          ],
+          "gated": false,
+          "counted": false
+        },
+        {
+          "patterns": [
+            "^(?:read|grep|glob|list|webfetch|websearch|todoread|todowrite)$"
+          ],
+          "gated": false,
+          "counted": true
+        },
+        {
+          "patterns": [
+            "^.*$"
+          ],
+          "gated": true,
+          "counted": true
+        }
+      ],
+      "notes": [
+        "A shadowed own tool name is denied by the builtin guard. Only the trusted plugin tool is excluded from counters."
+      ]
+    },
+    "armorantigravity": {
+      "normalization": "Use mapToolCall canonical names. read_file, Read and NotebookRead resolve to view_file; LS and list resolve to list_dir; Glob to find_by_name; Grep to grep_search. Trusted armoriq MCP own tools resolve to bare names.",
+      "sources": [
+        "packages/intent/src/directive.ts",
+        "packages/adapter/src/tools.ts",
+        "packages/adapter/src/product.ts:ANTIGRAVITY_TOOLS",
+        "packages/core/src/decide.ts",
+        "packages/intent/src/own-tools.ts"
+      ],
+      "rules": [
+        {
+          "patterns": [
+            "^(?:register_intent_plan|trust_reanchor|trust_revoke|trust_delegate|policy_read)$"
+          ],
+          "gated": false,
+          "counted": false
+        },
+        {
+          "patterns": [
+            "^(?:view_file|list_dir|find_by_name|grep_search)$"
+          ],
+          "gated": false,
+          "counted": true
+        },
+        {
+          "patterns": [
+            "^.*$"
+          ],
+          "gated": true,
+          "counted": true
+        }
+      ],
+      "notes": [
+        "search_web and read_url_content require a plan, including calls reached through WebSearch and WebFetch aliases. Browser actions, subagent tools, external MCP tools and unknown tools also require a plan."
+      ]
+    }
+  },
+  "adapterHooks": {
+    "armorclaude": {
+      "start": [
+        "UserPromptSubmit"
+      ],
+      "end": [
+        "Stop"
+      ],
+      "nextPrompt": [
+        "UserPromptSubmit"
+      ],
+      "sessionEnd": [
+        "SessionEnd"
+      ],
+      "cancel": [],
+      "error": [],
+      "recovery": [
+        "SessionStart"
+      ],
+      "toolAttempt": [
+        "PreToolUse"
+      ],
+      "toolError": [
+        "PostToolUseFailure"
+      ],
+      "notes": [
+        "No separate cancel or turn error hook is registered. SessionEnd or the next prompt or plugin start closes an abandoned run. UserPromptExpansion is not a second run."
+      ]
+    },
+    "armorcodex": {
+      "start": [
+        "UserPromptSubmit"
+      ],
+      "end": [
+        "Stop"
+      ],
+      "nextPrompt": [
+        "UserPromptSubmit"
+      ],
+      "sessionEnd": [
+        "SessionEnd"
+      ],
+      "cancel": [],
+      "error": [],
+      "recovery": [
+        "SessionStart"
+      ],
+      "toolAttempt": [
+        "PreToolUse"
+      ],
+      "toolError": [],
+      "notes": [
+        "PermissionRequest is not another tool attempt. No separate cancel or error hook is registered; use SessionEnd, the next prompt or recovery when Stop is absent."
+      ]
+    },
+    "armoropencode": {
+      "v1": {
+        "start": [
+          "chat.message"
+        ],
+        "end": [
+          "session.status:idle"
+        ],
+        "nextPrompt": [
+          "chat.message"
+        ],
+        "sessionEnd": [
+          "session.deleted"
+        ],
+        "cancel": [],
+        "error": [],
+        "recovery": [
+          "plugin_start"
+        ],
+        "toolAttempt": [
+          "tool.execute.before"
+        ],
+        "toolError": [
+          "message.part.updated:tool.state.status=error"
+        ],
+        "notes": [
+          "The current V1 adapter has no separate cancel or session error callback. Idle, the next prompt, session deletion or recovery closes an abandoned run."
+        ]
+      },
+      "v2": {
+        "start": [
+          "ctx.session.hook(\"prompt\")"
+        ],
+        "end": [
+          "session.execution.succeeded",
+          "session.execution.failed",
+          "session.execution.interrupted"
+        ],
+        "nextPrompt": [
+          "ctx.session.hook(\"prompt\")"
+        ],
+        "sessionEnd": [
+          "session.deleted"
+        ],
+        "cancel": [
+          "session.execution.interrupted"
+        ],
+        "error": [
+          "session.execution.failed"
+        ],
+        "recovery": [
+          "plugin_start"
+        ],
+        "toolAttempt": [
+          "ctx.tool.hook(\"execute.before\")"
+        ],
+        "toolError": [
+          "ctx.tool.hook(\"execute.after\"):status=error"
+        ],
+        "notes": [
+          "V2 does not emit session.idle or session.status."
+        ]
+      }
+    },
+    "armorantigravity": {
+      "start": [
+        "PreInvocation:invocationNum=0"
+      ],
+      "end": [
+        "Stop"
+      ],
+      "nextPrompt": [
+        "PreInvocation:invocationNum=0"
+      ],
+      "sessionEnd": [],
+      "cancel": [
+        "Stop:terminationReason"
+      ],
+      "error": [
+        "Stop:error"
+      ],
+      "recovery": [
+        "plugin_start"
+      ],
+      "toolAttempt": [
+        "PreToolUse"
+      ],
+      "toolError": [
+        "PostToolUse:error"
+      ],
+      "notes": [
+        "Ignore child invocations and parent invocations caused by a child send_message. PostInvocation is not a turn end. There is no session end hook; the next prompt or recovery closes a run without Stop. Stop carries terminationReason and error, with no separate cancel or error event."
+      ]
+    }
+  },
+  "adminResponse": {
+    "planMade": "True when stored plan evidence matches the run, even when every matching plan is hidden from this caller.",
+    "planIds": "Only matching plan ids visible through the plan row builder. This array can be empty when planMade is true."
+  },
+  "examples": [
+    {
+      "name": "end time requires an end reason",
+      "report": {
+        "run_id": "prompt-1",
+        "report_seq": 2,
+        "session_id": "session-1",
+        "started_at": "2026-11-14T12:00:00Z",
+        "ended_at": "2026-11-14T12:01:00Z",
+        "tool_calls": 0,
+        "gated_tool_calls": 0,
+        "plan_ids": []
+      },
+      "outcome": "rejected",
+      "error": "end_fields_required"
+    },
+    {
+      "name": "end reason requires an end time",
+      "report": {
+        "run_id": "prompt-1",
+        "report_seq": 2,
+        "session_id": "session-1",
+        "started_at": "2026-11-14T12:00:00Z",
+        "end_reason": "stop",
+        "tool_calls": 0,
+        "gated_tool_calls": 0,
+        "plan_ids": []
+      },
+      "outcome": "rejected",
+      "error": "end_fields_required"
+    },
+    {
+      "name": "open start report",
+      "report": {
+        "run_id": "prompt-1",
+        "report_seq": 1,
+        "session_id": "session-1",
+        "started_at": "2026-11-14T12:00:00Z",
+        "tool_calls": 0,
+        "gated_tool_calls": 0,
+        "plan_ids": []
+      },
+      "outcome": "accepted"
+    },
+    {
+      "name": "completed run with a confirmed plan",
+      "report": {
+        "run_id": "prompt-1",
+        "report_seq": 2,
+        "session_id": "session-1",
+        "started_at": "2026-11-14T12:00:00Z",
+        "tool_calls": 2,
+        "gated_tool_calls": 1,
+        "plan_ids": [
+          "11111111-1111-4111-8111-111111111111"
+        ],
+        "ended_at": "2026-11-14T12:01:00Z",
+        "end_reason": "stop"
+      },
+      "outcome": "accepted"
+    },
+    {
+      "name": "chat only run",
+      "report": {
+        "run_id": "prompt-1",
+        "report_seq": 2,
+        "session_id": "session-1",
+        "started_at": "2026-11-14T12:00:00Z",
+        "tool_calls": 0,
+        "gated_tool_calls": 0,
+        "plan_ids": [],
+        "ended_at": "2026-11-14T12:00:10Z",
+        "end_reason": "stop",
+        "no_plan_reason": "no_tool_use"
+      },
+      "outcome": "accepted"
+    },
+    {
+      "name": "future fields are ignored",
+      "report": {
+        "run_id": "prompt-1",
+        "report_seq": 1,
+        "session_id": "session-1",
+        "started_at": "2026-11-14T12:00:00Z",
+        "tool_calls": 0,
+        "gated_tool_calls": 0,
+        "plan_ids": [],
+        "unrecognized": "ignore"
+      },
+      "outcome": "accepted"
+    },
+    {
+      "name": "gated count exceeds total",
+      "report": {
+        "run_id": "prompt-1",
+        "report_seq": 1,
+        "session_id": "session-1",
+        "started_at": "2026-11-14T12:00:00Z",
+        "tool_calls": 0,
+        "gated_tool_calls": 1,
+        "plan_ids": []
+      },
+      "outcome": "rejected",
+      "error": "gated_exceeds_total"
+    },
+    {
+      "name": "end precedes start",
+      "report": {
+        "run_id": "prompt-1",
+        "report_seq": 1,
+        "session_id": "session-1",
+        "started_at": "2026-11-14T12:00:00Z",
+        "tool_calls": 0,
+        "gated_tool_calls": 0,
+        "plan_ids": [],
+        "ended_at": "2026-11-14T11:59:59Z"
+      },
+      "outcome": "rejected",
+      "error": "ended_before_started"
+    },
+    {
+      "name": "confirmed plan contradicts reason",
+      "report": {
+        "run_id": "prompt-1",
+        "report_seq": 1,
+        "session_id": "session-1",
+        "started_at": "2026-11-14T12:00:00Z",
+        "tool_calls": 0,
+        "gated_tool_calls": 0,
+        "plan_ids": [
+          "11111111-1111-4111-8111-111111111111"
+        ],
+        "no_plan_reason": "not_registered"
+      },
+      "outcome": "rejected",
+      "error": "plan_reason_conflict"
+    },
+    {
+      "name": "backend derived reason is not client input",
+      "report": {
+        "run_id": "prompt-1",
+        "report_seq": 1,
+        "session_id": "session-1",
+        "started_at": "2026-11-14T12:00:00Z",
+        "tool_calls": 0,
+        "gated_tool_calls": 0,
+        "plan_ids": [],
+        "no_plan_reason": "plan_missing"
+      },
+      "outcome": "rejected",
+      "error": "invalid_no_plan_reason"
+    },
+    {
+      "name": "malformed plan UUID",
+      "report": {
+        "run_id": "prompt-1",
+        "report_seq": 1,
+        "session_id": "session-1",
+        "started_at": "2026-11-14T12:00:00Z",
+        "tool_calls": 0,
+        "gated_tool_calls": 0,
+        "plan_ids": [
+          "not-a-uuid"
+        ]
+      },
+      "outcome": "rejected",
+      "error": "invalid_plan_ids"
+    },
+    {
+      "name": "invalid sequence",
+      "report": {
+        "run_id": "prompt-1",
+        "report_seq": 0,
+        "session_id": "session-1",
+        "started_at": "2026-11-14T12:00:00Z",
+        "tool_calls": 0,
+        "gated_tool_calls": 0,
+        "plan_ids": []
+      },
+      "outcome": "rejected",
+      "error": "invalid_report_seq"
+    }
+  ],
+  "labels": {
+    "endReasons": {
+      "stop": "Turn ended",
+      "next_prompt": "Next prompt started",
+      "session_end": "Session ended",
+      "recovered": "Recovered after a restart"
+    },
+    "noPlanReasons": {
+      "monitor_mode": "Monitor mode",
+      "no_tool_use": "No tool use",
+      "read_only": "Read only tools",
+      "backend_unreachable": "Backend unreachable",
+      "request_failed": "Plan request failed",
+      "plan_rejected": "Plan rejected",
+      "not_registered": "No plan registered",
+      "plan_missing": "Plan not stored"
+    }
+  }
+}

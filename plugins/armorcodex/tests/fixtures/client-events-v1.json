@@ -7,6 +7,13 @@
     "plan_request_failed": ["timeout", "network", "rate_limited", "server_error", "request_in_progress", "rejected"]
   },
   "limits": { "maxEventsPerRequest": 100, "maxCount": 1000000 },
+  "outcomes": {
+    "accepted": { "retry": false },
+    "duplicate": { "retry": false },
+    "rejected": { "retry": false },
+    "retryable": { "retry": true, "error": "database_unavailable" }
+  },
+  "requestErrors": { "403": { "error": "org_required" } },
   "examples": [
     {
       "name": "dead letter after exhausted delivery",
