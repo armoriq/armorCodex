@@ -393,12 +393,25 @@ for (const stream of ["health", "runs"]) {
     let sent = 0;
     await wal().drain(async ({ rows }) => { sent++; return reply(rows); });
     assert.equal(sent, 0);
-    h.advance(120_000);
-    await wal().drain(async () => { sent++; return { status: 403, body: { error: "org_required" } }; });
-    assert.equal(sent, 1);
-    h.advance(120_000);
+    for (const wait of [300_000, 600_000, 1_200_000, 2_400_000, 3_600_000, 3_600_000]) {
+      const before = sent;
+      h.advance(wait - 1);
+      await wal().drain(async ({ rows }) => { sent++; return reply(rows); });
+      assert.equal(sent, before);
+      h.advance(1);
+      await wal().drain(async () => { sent++; return { status: 403, body: { error: "org_required" } }; });
+      assert.equal(sent, before + 1);
+      assert.equal((await wal().status()).hold, "org_required");
+      assert.equal((await wal().readPending())[0].attempts, 0);
+      assert.deepEqual((await wal().readPending()).map(({ row }) => row), [sample]);
+    }
+    h.advance(3_600_000);
     await wal().drain(async ({ rows }) => { sent++; return reply(rows); });
-    assert.equal(sent, 1);
+    assert.equal(sent, 7);
+    assert.deepEqual(await wal().readPending(), []);
+    assert.equal((await wal().status()).hold, null);
+    await wal().appendLine({ ...sample, ...(stream === "runs" ? { report_seq: 2 } : { event_id: "22222222-2222-4222-8222-222222222222" }) });
+    await wal().drain(async () => ({ status: 403, body: { error: "org_required" } }));
     h.options.login = { ...h.options.login, credentialVersion: "restored" };
     await wal().drain(async ({ rows }) => { sent++; return reply(rows); });
     assert.deepEqual(await wal().readPending(), []);

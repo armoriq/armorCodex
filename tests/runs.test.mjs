@@ -3,15 +3,16 @@ import assert from "node:assert/strict";
 import { createHook } from "node:async_hooks";
 import { execFileSync, spawn } from "node:child_process";
 import { createRequire, syncBuiltinESMExports } from "node:module";
-import fsPromises, { access, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import fs from "node:fs";
+import fsPromises, { access, appendFile, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadSettings } from "../plugins/armorcodex/scripts/lib/config.mjs";
+import { loadConfig, loadSettings } from "../plugins/armorcodex/scripts/lib/config.mjs";
 import { createAuditWal } from "../plugins/armorcodex/scripts/lib/audit-wal.mjs";
-import { handleUserPromptSubmit } from "../plugins/armorcodex/scripts/lib/engine.mjs";
+import { handlePreToolUse, handleStop, handleUserPromptSubmit } from "../plugins/armorcodex/scripts/lib/engine.mjs";
 import { publishRunReports, withRunState } from "../plugins/armorcodex/scripts/lib/runs.mjs";
-import { signIn } from "./helpers/login.mjs";
+import { signIn, withHome } from "./helpers/login.mjs";
 
 const requirePlugin = createRequire(new URL("../plugins/armorcodex/package.json", import.meta.url));
 const { Client } = requirePlugin("@modelcontextprotocol/sdk/client/index.js");
@@ -549,6 +550,230 @@ test("corrupt run state is preserved and visible while new runs and enforcement 
   assert.equal((await h.reports()).at(-1).tool_calls, 1);
 });
 
+for (const ending of ["", "\n"]) {
+  // regression: #0013
+  test(`a torn tool journal is kept aside while both runs finish (${JSON.stringify(ending)})`, async (t) => {
+    const h = await setup(t);
+    await h.prompt("one");
+    const firstId = (await h.runtime()).sessions.root.runId;
+    await h.tool("Bash", "a");
+    const dir = path.join(h.dataDir, "run-tools-v1");
+    const [journal] = await readdir(dir);
+    const torn = '{"runId":"x","id":"b","ga';
+    await appendFile(path.join(dir, journal), torn + ending);
+    if (!ending) {
+      const before = await readFile(path.join(dir, journal), "utf8");
+      await writeFile(path.join(dir, "quarantine"), "unavailable");
+      const denied = await h.tool("Bash", "unreadable-tail");
+      assert.match(denied.hookSpecificOutput.permissionDecisionReason, /intent plan missing/);
+      assert.equal(await readFile(path.join(dir, journal), "utf8"), before);
+      await rm(path.join(dir, "quarantine"));
+    }
+    const denied = await h.tool("Bash", "c");
+    assert.match(denied.hookSpecificOutput.permissionDecisionReason, /intent plan missing/);
+    await h.hook("Stop");
+    h.advance(10_000);
+    await h.prompt("two");
+    const secondId = (await h.runtime()).sessions.root.runId;
+    await h.hook("Stop");
+    const reports = await h.reports();
+    assert.deepEqual(reports.filter(({ run_id }) => run_id === firstId).map(({ report_seq, tool_calls }) => [report_seq, tool_calls]), [[1, 0], [2, 2]]);
+    assert.deepEqual(reports.filter(({ run_id }) => run_id === secondId).map(({ report_seq }) => report_seq), [1, 2]);
+    const quarantine = path.join(dir, "quarantine");
+    const saved = await readdir(quarantine);
+    assert.equal(saved.length, 1);
+    assert.equal(await readFile(path.join(quarantine, saved[0]), "utf8"), torn);
+    assert.equal((await stat(path.join(quarantine, saved[0]))).mode & 0o777, 0o600);
+    assert.match(await readFile(path.join(dir, journal), "utf8"), /"id":"c"/);
+    assert.match((await h.prompt("/armor status")).reason, /Run journal lines set aside: 1/);
+    await h.hook("SessionStart", { session_id: "other" });
+    assert.equal((await readdir(quarantine)).length, 1);
+  });
+}
+
+// regression: #0013
+test("settled run starts leave the hot files and remain archived across later hooks", async (t) => {
+  const h = await setup(t);
+  const contexts = [];
+  for (let i = 0; i < 8; i++) {
+    await h.prompt(`prompt ${i}`);
+    contexts.push((await h.runtime()).sessions.root.runStarts.at(-1));
+    await h.tool("Read", `read-${i}`);
+    await h.hook("Stop");
+    h.advance(10_000);
+    if (i === 0) {
+      const state = await h.runState();
+      state.startedRuns[contexts[0].run_id] = true;
+      await writeFile(path.join(h.dataDir, "run-state-v1.json"), JSON.stringify(state));
+      await rm(path.join(h.dataDir, "run-starts-v1"), { recursive: true });
+      await publishRunReports(loadSettings(h.env));
+    }
+  }
+  assert.ok((await h.runtime()).sessions.root.runStarts.length <= 2);
+  assert.equal(Object.keys((await h.runState()).startedRuns ?? {}).length, 0);
+  const archive = path.join(h.dataDir, "run-starts-v1", "archive");
+  const archived = await Promise.all((await readdir(archive)).map(async (file) => JSON.parse(await readFile(path.join(archive, file), "utf8"))));
+  for (const context of contexts) {
+    const saved = archived.find(({ run_id }) => run_id === context.run_id);
+    assert.deepEqual(saved.context.login, context.login);
+    assert.equal(saved.context.started_at, context.started_at);
+    assert.equal((await h.reports()).filter(({ run_id }) => run_id === context.run_id).length, 2);
+  }
+  await h.tool("Read", "after-close");
+  assert.equal((await h.reports()).length, contexts.length * 2);
+});
+
+// regression: #0013
+test("an unreadable journal preserves its open run while other sessions report", async (t) => {
+  const h = await setup(t);
+  await h.prompt("first");
+  const firstId = (await h.runtime()).sessions.root.runId;
+  await h.tool("Read", "first-read");
+  const dir = path.join(h.dataDir, "run-tools-v1");
+  const [file] = await readdir(dir);
+  const journal = path.join(dir, file);
+  const saved = path.join(h.home, "saved-journal");
+  await rename(journal, saved);
+  await mkdir(journal);
+  await h.prompt("second", { session_id: "other" });
+  const secondId = (await h.runtime()).sessions.other.runId;
+  await h.hook("Stop", { session_id: "other" });
+  await h.hook("Stop");
+  const reports = await h.reports();
+  assert.deepEqual(reports.filter(({ run_id }) => run_id === secondId).map(({ report_seq }) => report_seq), [1, 2]);
+  assert.equal(reports.some(({ run_id, ended_at }) => run_id === firstId && ended_at), false);
+  await rm(journal, { recursive: true });
+  await rename(saved, journal);
+  await publishRunReports(loadSettings(h.env));
+  const final = (await h.reports()).find(({ run_id, ended_at }) => run_id === firstId && ended_at);
+  assert.equal(final.tool_calls, 1);
+  assert.equal(final.end_reason, "stop");
+});
+
+for (const unreachable of [false, true]) {
+  // regression: #0013
+  test(`a tool decision takes one run state lock and syncs counts only with metadata changes (${unreachable})`, async (t) => {
+    const h = await setup(t);
+    await h.prompt();
+    const config = { ...loadSettings(h.env), apiKey: "ak_test_runs_a", auditEnabled: false };
+    const lock = path.join(h.dataDir, "run-state-v1.json.lock");
+    const original = fsPromises.writeFile;
+    let locks = 0;
+    const counts = { opens: 0, reads: 0, writes: 0, fsyncs: 0, renames: 0 };
+    const costs = {};
+    const descriptors = new Map();
+    let journalSyncs = 0;
+    let implicitOpen = 0;
+    const watched = (file) => typeof file === "string" && (file === h.dataDir || file.startsWith(path.join(h.dataDir, "run-")));
+    const storageMocks = [];
+    for (const [name, counter] of [["openSync", "opens"], ["readFileSync", "reads"], ["writeFileSync", "writes"], ["fsyncSync", "fsyncs"], ["renameSync", "renames"], ["closeSync", null]]) {
+      const original = fs[name];
+      storageMocks.push(t.mock.method(fs, name, (file, ...args) => {
+        const target = descriptors.get(file) ?? file;
+        const measured = watched(target);
+        const started = performance.now();
+        const opensFile = (name === "readFileSync" || name === "writeFileSync") && typeof file === "string";
+        if (measured && counter && !(name === "openSync" && implicitOpen)) {
+          counts[counter]++;
+          if (opensFile) counts.opens++;
+          if (name === "fsyncSync" && target.includes("run-tools-v1")) journalSyncs++;
+        }
+        if (opensFile) implicitOpen++;
+        try {
+          const result = original(file, ...args);
+          if (name === "openSync") descriptors.set(result, file);
+          if (name === "closeSync") descriptors.delete(file);
+          return result;
+        } finally {
+          if (opensFile) implicitOpen--;
+          if (measured && counter) costs[counter] = (costs[counter] ?? 0) + performance.now() - started;
+        }
+      }));
+    }
+    const mocked = t.mock.method(fsPromises, "writeFile", async (file, ...args) => {
+      if (String(file) === lock) locks++;
+      if (watched(String(file))) { counts.opens++; counts.writes++; }
+      return original(file, ...args);
+    });
+    t.mock.method(globalThis, "fetch", async () => new Response("{}", { status: unreachable ? 503 : 200 }));
+    syncBuiltinESMExports();
+    const restore = () => { mocked.mock.restore(); for (const storage of storageMocks) storage.mock.restore(); syncBuiltinESMExports(); };
+    t.after(restore);
+    const decision = await handlePreToolUse({ session_id: "root", tool_name: "Bash", tool_use_id: "one-lock", tool_input: {} }, config);
+    restore();
+    t.diagnostic(`run storage per hook: ${JSON.stringify({ ...counts, locks, costsMs: costs })}`);
+    assert.equal(locks, 1);
+    assert.equal(journalSyncs, Number(unreachable), "tool counts defer durability unless the hook commits a replay offset");
+    assert.match(decision.hookSpecificOutput.permissionDecisionReason, unreachable ? /backend_unreachable/ : /intent plan missing/);
+    const run = Object.values((await h.runState()).runs)[0];
+    assert.equal(run.tool_calls, 1);
+    assert.equal(run.backendUnreachable, unreachable);
+  });
+}
+
+// regression: #0013
+test("a crash loses only counts after the last checkpoint and preserves start and final reports", async (t) => {
+  const h = await setup(t);
+  await h.prompt();
+  const firstId = (await h.runtime()).sessions.root.runId;
+  const config = { ...withHome(h.home, () => loadConfig(h.env)), auditEnabled: false };
+  const directory = path.join(h.dataDir, "run-tools-v1");
+  const [name] = await readdir(directory);
+  const journal = path.join(directory, name);
+  const descriptors = new Map();
+  let durable = "";
+  let unreachable = false;
+  const open = fs.openSync;
+  const close = fs.closeSync;
+  const sync = fs.fsyncSync;
+  const mocked = [
+    t.mock.method(fs, "openSync", (file, ...args) => { const fd = open(file, ...args); descriptors.set(fd, String(file)); return fd; }),
+    t.mock.method(fs, "closeSync", (fd) => { descriptors.delete(fd); return close(fd); }),
+    t.mock.method(fs, "fsyncSync", (fd) => {
+      sync(fd);
+      if (descriptors.get(fd) === journal) durable = fs.readFileSync(journal, "utf8");
+    })
+  ];
+  t.mock.method(globalThis, "fetch", async () => new Response("{}", { status: unreachable ? 503 : 200 }));
+  syncBuiltinESMExports();
+  const restore = () => { for (const method of mocked) method.mock.restore(); syncBuiltinESMExports(); };
+  t.after(restore);
+  const tool = (id) => handlePreToolUse({ session_id: "root", tool_name: "Read", tool_use_id: id, tool_input: {} }, config);
+  await tool("checkpointed");
+  assert.equal(durable, "", "a tool append does not wait for durable storage");
+  await publishRunReports(config);
+  assert.deepEqual(durable.trim().split("\n").map((line) => JSON.parse(line).id), ["checkpointed"]);
+  await handleUserPromptSubmit({ session_id: "other", prompt: "other run" }, config);
+  const otherId = (await h.runtime()).sessions.other.runId;
+  await tool("other-session-checkpoint");
+  unreachable = true;
+  const denied = await handlePreToolUse({ session_id: "other", tool_name: "Bash", tool_use_id: "metadata-change", tool_input: {} }, config);
+  assert.match(denied.hookSpecificOutput.permissionDecisionReason, /backend_unreachable/);
+  assert.deepEqual(durable.trim().split("\n").map((line) => JSON.parse(line).id), ["checkpointed", "other-session-checkpoint"]);
+  unreachable = false;
+  await tool("in-flight");
+  await writeFile(journal, durable);
+  restore();
+  await tool("checkpointed");
+  await handleUserPromptSubmit({ session_id: "root", prompt: "next prompt" }, config);
+  const secondId = (await h.runtime()).sessions.root.runId;
+  await tool("final-count");
+  await handleStop({ session_id: "root" }, config);
+  await handleStop({ session_id: "other" }, config);
+  await publishRunReports(config);
+  const reports = await h.reports();
+  assert.deepEqual(reports.filter(({ run_id }) => run_id === firstId).map(({ report_seq, tool_calls, end_reason }) =>
+    [report_seq, tool_calls, end_reason ?? null]), [[1, 0, null], [2, 2, "next_prompt"]]);
+  const second = reports.filter(({ run_id }) => run_id === secondId);
+  assert.deepEqual(second.map(({ report_seq, tool_calls, end_reason }) =>
+    [report_seq, tool_calls, end_reason ?? null]), [[1, 0, null], [2, 1, "stop"]]);
+  assert.deepEqual(reports.filter(({ run_id }) => run_id === otherId).map(({ report_seq, tool_calls, end_reason }) =>
+    [report_seq, tool_calls, end_reason ?? null]), [[1, 0, null], [2, 1, "stop"]]);
+  await writeFile(journal, "");
+  await publishRunReports(config);
+  assert.deepEqual(await h.reports(), reports);
+});
+
 // regression: #0013
 test("prompt identity commits before run storage is locked and a later hook repairs a missing run", async (t) => {
   const h = await setup(t);
@@ -582,10 +807,13 @@ test("prompt identity commits before run storage is locked and a later hook repa
   const session = (await h.runtime()).sessions.root;
   assert.equal(session.runId, session.promptId);
   await rm(path.join(h.dataDir, "run-state-v1.json"), { recursive: true });
-  await h.tool("Read", "repaired");
+  await h.tool("Read", undefined);
   const run = (await h.state()).runs[session.promptId];
   assert.equal(run.tool_calls, 1);
-  assert.equal((await h.reports()).some(({ run_id }) => run_id === session.promptId), true);
+  assert.equal((await h.runState()).runReports.some(({ report }) => report.run_id === session.promptId), true);
+  assert.equal((await h.reports()).some(({ run_id }) => run_id === session.promptId), false);
+  await h.hook("Stop");
+  assert.equal((await h.reports()).some(({ run_id, tool_calls }) => run_id === session.promptId && tool_calls === 1), true);
 });
 
 // regression: #0013
