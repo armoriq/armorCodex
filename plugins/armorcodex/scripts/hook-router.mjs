@@ -1,8 +1,11 @@
 import { emitJson } from "./lib/hook-stdout.mjs";
 import { cachedPosture, localOnly } from "./lib/backend-posture.mjs";
-import { loadConfig } from "./lib/config.mjs";
+import { dataDirectory, loadConfig, loadSettings } from "./lib/config.mjs";
+import { isPlainObject } from "./lib/common.mjs";
+import { createAuditEnvelope } from "./lib/audit-wal.mjs";
 import { denyPermissionRequest, denyPreTool } from "./lib/hook-output.mjs";
 import {
+  auditFallbackStop,
   handlePermissionRequest,
   handlePreToolUse,
   handlePostToolUse,
@@ -18,6 +21,9 @@ import { withReach } from "./lib/reach.mjs";
 import { launchLiveUsage, trackUsageSession } from "./lib/usage-sync-launch.mjs";
 
 let currentEvent = "";
+let currentConfig;
+let currentInput = {};
+let currentEnvelope = createAuditEnvelope({});
 
 async function readStdin() {
   const chunks = [];
@@ -35,27 +41,35 @@ function debugLog(config, message) {
 }
 
 async function main() {
-  let config = loadConfig();
-  config.readCurrentAuth = () => loadConfig();
-  await ensurePrivateDir(config.dataDir);
   const rawInput = await readStdin();
-  if (!rawInput.trim()) {
-    return;
-  }
   let input;
+  let invalidPayload = false;
   try {
     input = JSON.parse(rawInput);
+    if (!isPlainObject(input)) throw new Error("Hook payload must be an object");
+    currentInput = input;
+    currentEnvelope = createAuditEnvelope(input, currentEnvelope.toolCallId);
+    currentEvent = typeof input.hook_event_name === "string" ? input.hook_event_name : "";
   } catch {
+    invalidPayload = true;
+  }
+  let config = loadConfig();
+  currentConfig = config;
+  config.readCurrentAuth = () => loadConfig();
+  await ensurePrivateDir(config.dataDir);
+  if (invalidPayload) {
     // Fail closed: in enforce mode a malformed PreToolUse payload is denied, not silently allowed.
     if (config.mode === "enforce" && !config.orgMonitor) {
+      if ((await cachedPosture(config))?.state === "signed_out") config = localOnly(config);
+      await auditFallbackStop({}, config, "invalid_payload", "ArmorCodex hook payload invalid JSON or object", currentEnvelope);
       emitJson(denyPreTool("ArmorCodex hook payload invalid JSON"));
     }
     return;
   }
-  const event = typeof input.hook_event_name === "string" ? input.hook_event_name : "";
-  currentEvent = event;
+  const event = currentEvent;
   debugLog(config, `hook=${event}`);
   if ((await cachedPosture(config))?.state === "signed_out") config = localOnly(config);
+  currentConfig = config;
   await trackUsageSession(event, input, config);
 
   let output;
@@ -68,16 +82,16 @@ async function main() {
       output = await handleUserPromptSubmit(input, config);
       break;
     case "PreToolUse":
-      output = await handlePreToolUse(input, config);
+      output = await handlePreToolUse(input, config, currentEnvelope);
       break;
     case "PermissionRequest":
-      output = await handlePermissionRequest(input, config);
+      output = await handlePermissionRequest(input, config, currentEnvelope);
       break;
     case "PostToolUse":
-      output = await handlePostToolUse(input, config);
+      output = await handlePostToolUse(input, config, currentEnvelope);
       break;
     case "PostToolUseFailure":
-      output = await handlePostToolUseFailure(input, config);
+      output = await handlePostToolUseFailure(input, config, currentEnvelope);
       break;
     case "Stop":
       output = await handleStop(input, config);
@@ -99,12 +113,12 @@ async function main() {
   await observeHook(event, input, output, config);
 }
 
-main().catch((error) => {
+main().catch(async (error) => {
   const message = error instanceof Error ? error.message : String(error);
   let mode = "enforce";
   let debug = false;
   try {
-    const config = loadConfig();
+    const config = currentConfig || loadSettings();
     mode = config.orgMonitor ? "monitor" : config.mode;
     debug = config.debug;
   } catch {
@@ -115,6 +129,12 @@ main().catch((error) => {
     process.stderr.write(`[armorcodex] error=${message}\n`);
   }
   if (mode === "enforce") {
+    try {
+      const config = currentConfig || { dataDir: dataDirectory(), identityUnknown: true };
+      await auditFallbackStop(currentInput, config, "internal_error", "ArmorCodex internal hook error", currentEnvelope);
+    } catch {
+      process.stderr.write("[armorcodex] audit capture failed: internal_error\n");
+    }
     if (currentEvent === "PermissionRequest") {
       emitJson(denyPermissionRequest(`ArmorCodex internal error: ${message}`));
     } else {

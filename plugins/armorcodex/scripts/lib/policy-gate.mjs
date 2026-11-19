@@ -33,6 +33,7 @@ export function combinePolicyDecisions(v2, local) {
   return {
     verdict: localVerdict,
     reason: local.reason,
+    matchedAction: local.matchedRule?.action,
     record: {
       source: matched || local.effect !== "default" ? "local" : "default",
       ...(matched ? { policy_name: matched, rule_id: matched } : {}),

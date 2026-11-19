@@ -1,12 +1,53 @@
 import { appendFile, open, readFile, rename, stat, unlink } from "node:fs/promises";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { PRIVATE_FILE_MODE, ensurePrivateDir, tightenDirFilesOnce, writePrivateFile } from "./fs-store.mjs";
 
 const MAX_LINE_BYTES = 4000; // stay under PIPE_BUF (~4 KB) for atomic appends
 const DEFAULT_ROTATE_BYTES = 10 * 1024 * 1024;
 const DEFAULT_ROTATE_AGE_MS = 60 * 60 * 1000;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+// conmap-auto mirrors this namespace in docs/contracts/block-capture-v1.json.
+const ACTION_NAMESPACE = Buffer.from("38e3839fd44e5317b41fb2738b0a247a", "hex");
+
+export function auditRowId(rootSessionId, toolCallId, phase) {
+  const bytes = createHash("sha1").update(ACTION_NAMESPACE)
+    .update(`${rootSessionId}:${toolCallId}:${phase}`).digest().subarray(0, 16);
+  bytes[6] = (bytes[6] & 0x0f) | 0x50;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+export function createAuditEnvelope(input, allocatedToolCallId = randomUUID()) {
+  const sessionId = typeof input.session_id === "string" ? input.session_id : "";
+  const rootSessionId = typeof input.root_session_id === "string" && input.root_session_id
+    ? input.root_session_id : sessionId;
+  const toolCallId = typeof input.tool_use_id === "string" && input.tool_use_id
+    ? input.tool_use_id : allocatedToolCallId;
+  return {
+    sessionId,
+    toolCallId,
+    decisionId: auditRowId(rootSessionId, toolCallId, "decision"),
+    resultId: auditRowId(rootSessionId, toolCallId, "result"),
+    executedAt: new Date().toISOString(),
+    link: {},
+    plan: null
+  };
+}
+
+export function snapshotAuditContext(envelope, session) {
+  const planId = session?.countedPlanId || undefined;
+  const tokenPlanId = session?.tokenPlanId || undefined;
+  envelope.link = {
+    plan_id: planId,
+    context_plan_id: tokenPlanId !== planId ? tokenPlanId : undefined,
+    prompt_id: session?.promptId || undefined
+  };
+  envelope.plan = structuredClone(session?.plan || null);
+}
 
 const ROW_BUDGET_BYTES =
   MAX_LINE_BYTES -
@@ -68,7 +109,7 @@ export function createAuditWal(opts) {
     // Stamp _seq before any await: after an await, concurrent callers resume in nondeterministic order.
     const enriched = {
       ...row,
-      client_row_id: randomUUID(),
+      client_row_id: typeof row.client_row_id === "string" && UUID.test(row.client_row_id) ? row.client_row_id : randomUUID(),
       _seq: ++seqCounter,
       _enqueuedAt: Date.now(),
     };

@@ -1,13 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { handlePermissionRequest, handlePreToolUse } from "../plugins/armorcodex/scripts/lib/engine.mjs";
+import { handlePermissionRequest, handlePostToolUse, handlePostToolUseFailure, handlePreToolUse } from "../plugins/armorcodex/scripts/lib/engine.mjs";
+import { signIn } from "./helpers/login.mjs";
 
 const PLAN_ID = randomUUID();
 const SESSION = "sess-blocked";
+const PROMPT_ID = randomUUID();
+const TOKEN_PLAN_ID = randomUUID();
 const PLAN = { steps: [{ action: "Bash" }, { action: "Read" }], metadata: { goal: "inspect" } };
 
 async function setup({ mode = "enforce", withPlan = true, rules = [] } = {}) {
@@ -34,7 +38,10 @@ async function setup({ mode = "enforce", withPlan = true, rules = [] } = {}) {
     sanitize: { maxChars: 2000, maxDepth: 4, maxKeys: 50, maxItems: 50 }
   };
   const token = { planId: PLAN_ID, expiresAt: Math.floor(Date.now() / 1000) + 600, plan: PLAN };
-  const sessions = withPlan ? { [SESSION]: { intentTokenRaw: JSON.stringify(token), plan: PLAN } } : {};
+  const sessions = { [SESSION]: {
+    promptId: PROMPT_ID,
+    ...(withPlan ? { intentTokenRaw: JSON.stringify(token), plan: PLAN, countedPlanId: PLAN_ID, tokenPlanId: TOKEN_PLAN_ID } : {})
+  } };
   await writeFile(config.runtimeFile, JSON.stringify({ sessions }));
   if (rules.length) {
     await writeFile(config.policyFile, JSON.stringify({ version: 1, policy: { rules }, history: [] }));
@@ -55,38 +62,216 @@ async function walRows(config) {
 const preToolUse = (config, toolName, toolInput = {}) =>
   handlePreToolUse({ hook_event_name: "PreToolUse", session_id: SESSION, tool_name: toolName, tool_input: toolInput }, config);
 
-test("a tool outside the plan is denied and leaves one blocked row linked to the plan", async () => {
+async function patchSession(config, patch) {
+  const state = JSON.parse(await readFile(config.runtimeFile, "utf8"));
+  Object.assign(state.sessions[SESSION], patch);
+  await writeFile(config.runtimeFile, JSON.stringify(state));
+}
+
+for (const scenario of [
+  { name: "policy deny", code: "policy_denied", decisionCode: "policy_deny", rules: [{ id: "no-bash", action: "deny", tool: "Bash" }] },
+  { name: "missing plan", code: "intent_plan_missing", decisionCode: "missing_plan", withPlan: false, step: null, message: /register_intent_plan/ },
+  { name: "tool outside plan", code: "intent_drift", decisionCode: "out_of_scope", tool: "mcp__serena__get_current_config", step: null, message: /not in plan/ },
+  { name: "parameters outside plan", code: "intent_parameter_mismatch", decisionCode: "out_of_scope", plan: { steps: [{ action: "Bash", metadata: { inputs: { command: "pwd" } } }] } },
+  { name: "empty local plan", code: "intent_plan_empty", decisionCode: "out_of_scope", patch: { intentTokenRaw: "", plan: { steps: [] } }, step: null },
+  { name: "expired token", code: "intent_token_expired", decisionCode: "token_expired", expiresAt: 1 },
+  { name: "expired local plan", code: "intent_token_expired", decisionCode: "token_expired", patch: { intentTokenRaw: "", expiresAt: 1 } },
+  { name: "slow issuance", code: "intent_token_not_issued", decisionCode: "plan_request_failed", pending: true },
+  { name: "plan check deny", code: "plan_check_denied", decisionCode: "policy_deny", patch: { planCheck: { deniedTools: ["Bash"], deniedReasons: ["Bash: forbidden"] } } },
+  { name: "invalid proof", code: "csrg_proof_invalid", decisionCode: "integrity", input: { csrg_proof: "[invalid" } },
+  { name: "missing proof", code: "csrg_proof_missing", decisionCode: "integrity", config: { requireCsrgProofs: true, csrgVerifyEnabled: true, verifyStepEndpoint: "https://verify.test" } },
+  { name: "crypto policy mismatch", code: "crypto_policy_mismatch", decisionCode: "integrity", crypto: true, config: { cryptoPolicyEnabled: true } },
+  { name: "remote verify failure", code: "remote_verify_failed", decisionCode: "internal_error", verifyFailure: true, config: { csrgVerifyEnabled: true, verifyStepEndpoint: "https://verify.test", maxRetries: 0 } },
+  { name: "backend outage", code: "backend_unreachable", decisionCode: "outage", outage: true, config: { backendEndpoint: "https://offline.test", maxRetries: 0 } },
+  { name: "approval on PreToolUse", code: "require_approval", decisionCode: "approval_required", status: "held", rules: [{ id: "review", action: "require_approval", tool: "Bash" }] },
+  { name: "approval on PermissionRequest", event: "PermissionRequest", code: "require_approval", decisionCode: "approval_required", status: "held", rules: [{ id: "review", action: "require_approval", tool: "Bash" }] },
+  { name: "PermissionRequest deny", event: "PermissionRequest", code: "policy_denied", decisionCode: "policy_deny", rules: [{ id: "no-bash", action: "deny", tool: "Bash" }] },
+  { name: "missing tool name", code: "missing_tool_name", decisionCode: "internal_error", tool: "", step: null },
+  { name: "PermissionRequest missing tool", event: "PermissionRequest", code: "missing_tool_name", decisionCode: "internal_error", tool: "", step: null }
+]) {
+  test(`${scenario.name} writes one coded decision with the plan and prompt in force`, async (t) => {
+    const config = await setup(scenario);
+    t.after(() => rm(config.dataDir, { recursive: true, force: true }));
+    Object.assign(config, scenario.config);
+    if (scenario.patch) await patchSession(config, scenario.patch);
+    if (scenario.plan || scenario.expiresAt) await patchSession(config, { intentTokenRaw: JSON.stringify({ plan: scenario.plan || PLAN, expiresAt: scenario.expiresAt || Date.now() / 1000 + 600 }) });
+    if (scenario.pending) await writeFile(path.join(config.dataDir, `pending-plan.${SESSION}.json`), JSON.stringify({ status: "issuing", deadlineAt: 0 }));
+    if (scenario.crypto) await writeFile(path.join(config.dataDir, "crypto-policy-state.json"), JSON.stringify({ policyDigest: "wrong" }));
+    if (scenario.verifyFailure) t.mock.method(globalThis, "fetch", async () => { throw new Error("verification unavailable"); });
+    if (scenario.outage) t.mock.method(globalThis, "fetch", async () => {
+      await patchSession(config, { countedPlanId: "later-plan", tokenPlanId: "later-token", promptId: "later-prompt" });
+      return new Response("unavailable", { status: 503 });
+    });
+    const input = { hook_event_name: scenario.event || "PreToolUse", session_id: SESSION, tool_use_id: "stop-1", tool_name: scenario.tool ?? "Bash", tool_input: { command: "ls" }, ...scenario.input };
+    const decision = await (scenario.event === "PermissionRequest" ? handlePermissionRequest : handlePreToolUse)(input, config);
+    assert.equal(scenario.event === "PermissionRequest" ? decision?.hookSpecificOutput?.decision?.behavior : decision?.hookSpecificOutput?.permissionDecision, "deny");
+    const rows = await walRows(config);
+    assert.equal(rows.length, 1);
+    const [row] = rows;
+    assert.equal(row.status, scenario.status || "blocked");
+    assert.equal(row.decision_code, scenario.decisionCode);
+    assert.ok(row.error_message.startsWith(`${scenario.code}: `), row.error_message);
+    if (scenario.message) assert.match(row.error_message, scenario.message);
+    assert.equal(row.tool, input.tool_name || "unknown");
+    assert.equal(row.action, input.tool_name || "unknown");
+    assert.equal(row.plan_id, scenario.withPlan === false ? undefined : PLAN_ID);
+    assert.equal(row.context_plan_id, scenario.withPlan === false ? undefined : TOKEN_PLAN_ID);
+    assert.equal(row.prompt_id, PROMPT_ID);
+    assert.equal(row.session_id, SESSION);
+    assert.equal(row.step_index, scenario.step === null ? null : 0);
+    assert.equal(row.token, undefined);
+    if (scenario.tool === "") assert.deepEqual([row.tool, row.action, row.input], ["unknown", "unknown", {}]);
+  });
+}
+
+test("the contract pins decision and result ids and the exact ArmorCodex producer mappings", async () => {
+  const fixture = JSON.parse(await readFile(new URL("../plugins/armorcodex/tests/fixtures/block-capture-v1.json", import.meta.url), "utf8"));
+  const { auditRowId, createAuditEnvelope } = await import("../plugins/armorcodex/scripts/lib/audit-wal.mjs");
+  const { DECISION_CODES } = await import("../plugins/armorcodex/scripts/lib/decision-codes.mjs");
+  for (const vector of fixture.clientRowId.vectors) assert.equal(auditRowId(vector.rootSessionId, vector.toolCallId, vector.phase), vector.clientRowId);
+  assert.deepEqual(DECISION_CODES, Object.fromEntries(fixture.reasonCodes.flatMap(({ decisionCode, producers }) => producers.armorcodex.map((code) => [code, decisionCode]))));
+  const pending = fixture.pendingProducerCodes.armorcodex;
+  assert.deepEqual(Object.values(pending).flat().sort(), Object.keys(DECISION_CODES).filter((code) => !["require_approval", "backend_unreachable"].includes(code)).sort());
+  const envelope = createAuditEnvelope({ session_id: SESSION });
+  assert.ok(envelope.toolCallId);
+  assert.equal(auditRowId(SESSION, envelope.toolCallId, "decision"), envelope.decisionId);
+  const continued = createAuditEnvelope({ session_id: SESSION }, envelope.toolCallId);
+  assert.equal(continued.decisionId, envelope.decisionId);
+});
+
+test("a hold and later deny retain one decision identity and execution has a separate result identity", async (t) => {
+  const config = await setup({ rules: [{ id: "review", action: "require_approval", tool: "Bash" }] });
+  t.after(() => rm(config.dataDir, { recursive: true, force: true }));
+  const input = { session_id: SESSION, root_session_id: "root", tool_use_id: "held-action", tool_name: "Bash", tool_input: {} };
+  await handlePreToolUse(input, config);
+  await writeFile(config.policyFile, JSON.stringify({ policy: { rules: [{ id: "deny", action: "deny", tool: "Bash" }] } }));
+  await handlePermissionRequest(input, config);
+  const rows = await walRows(config);
+  assert.deepEqual(rows.map((row) => row.status), ["held", "blocked"]);
+  assert.equal(new Set(rows.map((row) => row.client_row_id)).size, 1);
+  const { auditRowId } = await import("../plugins/armorcodex/scripts/lib/audit-wal.mjs");
+  assert.equal(rows[0].client_row_id, auditRowId("root", "held-action", "decision"));
+  await handlePostToolUse({ ...input, tool_response: {} }, config);
+  const result = (await walRows(config)).at(-1);
+  assert.equal(result.client_row_id, auditRowId("root", "held-action", "result"));
+  assert.notEqual(result.client_row_id, rows[0].client_row_id);
+  assert.equal(result.prompt_id, PROMPT_ID);
+  await handlePostToolUseFailure({ ...input, error: "tool failed" }, config);
+  const failed = (await walRows(config)).at(-1);
+  assert.equal(failed.client_row_id, result.client_row_id);
+  assert.equal(failed.plan_id, PLAN_ID);
+  assert.equal(failed.context_plan_id, TOKEN_PLAN_ID);
+  assert.equal(failed.prompt_id, PROMPT_ID);
+});
+
+test("a decision snapshots session ids before an asynchronous verification changes them", async (t) => {
   const config = await setup();
-  const decision = await preToolUse(config, "mcp__serena__get_current_config");
-  assert.equal(decision?.hookSpecificOutput?.permissionDecision, "deny");
-  const rows = await walRows(config);
-  assert.equal(rows.length, 1);
-  assert.equal(rows[0].status, "blocked");
-  assert.equal(rows[0].tool, "mcp__serena__get_current_config");
-  assert.equal(rows[0].plan_id, PLAN_ID);
-  assert.equal(rows[0].session_id, SESSION);
-  assert.equal(rows[0].step_index, null);
-  assert.match(rows[0].error_message, /not in plan/);
-  assert.equal(rows[0].token, undefined);
+  t.after(() => rm(config.dataDir, { recursive: true, force: true }));
+  config.csrgVerifyEnabled = true;
+  config.verifyStepEndpoint = "https://verify.test";
+  t.mock.method(globalThis, "fetch", async () => {
+    await patchSession(config, { countedPlanId: "new-plan", tokenPlanId: "new-token", promptId: "new-prompt" });
+    return new Response(JSON.stringify({ allowed: false, reason: "denied" }), { status: 200 });
+  });
+  await preToolUse(config, "Bash");
+  const [row] = await walRows(config);
+  assert.deepEqual([row.plan_id, row.context_plan_id, row.prompt_id, row.decision_code], [PLAN_ID, TOKEN_PLAN_ID, PROMPT_ID, "integrity"]);
+  assert.match(row.error_message, /^remote_verify_denied: /);
 });
 
-test("a policy deny leaves a blocked row at the planned step", async () => {
-  const config = await setup({ rules: [{ id: "no-bash", action: "deny", tool: "Bash" }] });
-  const decision = await preToolUse(config, "Bash", { command: "ls" });
-  assert.equal(decision?.hookSpecificOutput?.permissionDecision, "deny");
-  const rows = await walRows(config);
-  assert.deepEqual(rows.map((row) => [row.status, row.step_index]), [["blocked", 0]]);
+test("result rows retain the plan and prompt that authorized the tool", async (t) => {
+  const config = await setup();
+  t.after(() => rm(config.dataDir, { recursive: true, force: true }));
+  const input = { session_id: SESSION, root_session_id: "root", tool_use_id: "call:with:colons", tool_name: "Bash", tool_input: {} };
+  assert.equal(await handlePreToolUse(input, config), null);
+  const state = JSON.parse(await readFile(config.runtimeFile, "utf8"));
+  state.sessions["other-session"] = { ...state.sessions[SESSION], countedPlanId: "other-plan" };
+  await writeFile(config.runtimeFile, JSON.stringify(state));
+  const other = { ...input, session_id: "other-session", root_session_id: "other-root" };
+  assert.equal(await handlePreToolUse(other, config), null);
+  await patchSession(config, { countedPlanId: "next-plan", tokenPlanId: "next-token", promptId: "next-prompt" });
+  await handlePostToolUse({ ...input, root_session_id: undefined, tool_response: {} }, config);
+  const [row] = await walRows(config);
+  assert.deepEqual([row.plan_id, row.context_plan_id, row.prompt_id], [PLAN_ID, TOKEN_PLAN_ID, PROMPT_ID]);
+  const { auditRowId } = await import("../plugins/armorcodex/scripts/lib/audit-wal.mjs");
+  assert.equal(row.client_row_id, auditRowId("root", "call:with:colons", "result"));
+  await handlePostToolUseFailure({ ...other, error: "failed" }, config);
+  const failed = (await walRows(config)).at(-1);
+  assert.equal(failed.plan_id, "other-plan");
+  assert.equal(failed.client_row_id, auditRowId("other-root", "call:with:colons", "result"));
 });
 
-test("a deny with no plan registered leaves a blocked row without a plan id", async () => {
-  const config = await setup({ withPlan: false });
-  await preToolUse(config, "Bash", { command: "ls" });
-  const rows = await walRows(config);
-  assert.equal(rows.length, 1);
-  assert.equal(rows[0].status, "blocked");
-  assert.equal(rows[0].plan_id, undefined);
-  assert.match(rows[0].error_message, /register_intent_plan/);
+test("a withheld counted plan keeps its token context without parsing an old token plan id", async (t) => {
+  const config = await setup();
+  t.after(() => rm(config.dataDir, { recursive: true, force: true }));
+  await patchSession(config, { countedPlanId: null });
+  await preToolUse(config, "mcp__serena__get_current_config");
+  const [row] = await walRows(config);
+  assert.equal(row.plan_id, undefined);
+  assert.equal(row.context_plan_id, TOKEN_PLAN_ID);
+  await patchSession(config, { countedPlanId: TOKEN_PLAN_ID });
+  await preToolUse(config, "mcp__serena__get_current_config");
+  const matching = (await walRows(config)).at(-1);
+  assert.equal(matching.plan_id, TOKEN_PLAN_ID);
+  assert.equal(matching.context_plan_id, undefined);
 });
+
+test("omitted plan and prompt links stay omitted after a tool runs", async (t) => {
+  const config = await setup();
+  t.after(() => rm(config.dataDir, { recursive: true, force: true }));
+  await patchSession(config, { countedPlanId: null, tokenPlanId: null, promptId: null });
+  const input = { session_id: SESSION, tool_use_id: "unlinked-tool", tool_name: "Bash", tool_input: {} };
+  assert.equal(await handlePreToolUse(input, config), null);
+  await patchSession(config, { countedPlanId: PLAN_ID, tokenPlanId: TOKEN_PLAN_ID, promptId: PROMPT_ID });
+  await handlePostToolUse(input, config);
+  const [row] = await walRows(config);
+  assert.deepEqual([row.plan_id, row.context_plan_id, row.prompt_id], [undefined, undefined, undefined]);
+});
+
+for (const scenario of [
+  { name: "invalid JSON", raw: "{invalid", code: "invalid_payload" },
+  { name: "empty input", raw: "", code: "invalid_payload" },
+  { name: "non object input", raw: "null", code: "invalid_payload" },
+  { name: "internal error", internal: true, code: "internal_error" },
+  { name: "PermissionRequest internal error", internal: true, event: "PermissionRequest", code: "internal_error" },
+  { name: "unknown login", unknownLogin: true, code: "internal_error" },
+  { name: "PermissionRequest unknown login", unknownLogin: true, event: "PermissionRequest", code: "internal_error" },
+  { name: "logged out", raw: "{invalid", loggedOut: true, code: "invalid_payload" }
+]) {
+  test(`router ${scenario.name} captures a sanitized fallback or a local capture failure`, async (t) => {
+    const home = await mkdtemp(path.join(os.tmpdir(), "armorcodex-fallback-"));
+    t.after(() => rm(home, { recursive: true, force: true }));
+    const backend = "https://fallback.test";
+    if (!scenario.loggedOut) signIn(home, { backend, apiKey: "ak_test_fallback" });
+    const dataDir = path.join(home, "data");
+    await mkdir(dataDir);
+    if (scenario.internal) await mkdir(path.join(dataDir, "runtime.json"));
+    const router = new URL("../plugins/armorcodex/scripts/hook-router.mjs", import.meta.url);
+    const result = spawnSync(process.execPath, [router.pathname], {
+      encoding: "utf8",
+      input: scenario.raw ?? JSON.stringify({ hook_event_name: scenario.event || "PreToolUse", session_id: SESSION, tool_name: "Bash", tool_use_id: "broken-call", tool_input: { apiKey: "never-capture-this" } }),
+      env: { PATH: process.env.PATH, HOME: home, ARMORCODEX_DATA_DIR: dataDir, BACKEND_ENDPOINT: backend, IAP_ENDPOINT: backend, PROXY_ENDPOINT: backend, ARMORCODEX_OBSERVABILITY_DISABLED: "true", ARMORIQ_ORG_MODE: "enforce", ARMORCODEX_USAGE_SYNC_DISABLED: "true", ...(scenario.unknownLogin ? { ARMORIQ_ENV: "invalid" } : {}) }
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const decision = JSON.parse(result.stdout);
+    assert.equal(scenario.event === "PermissionRequest" ? decision.hookSpecificOutput.decision.behavior : decision.hookSpecificOutput.permissionDecision, "deny");
+    const rows = await walRows({ dataDir });
+    if (scenario.loggedOut || scenario.unknownLogin) {
+      assert.deepEqual(rows, []);
+      if (scenario.unknownLogin) {
+        const failures = (await readFile(path.join(dataDir, "audit", "capture-failures.jsonl"), "utf8")).trim().split("\n").map(JSON.parse);
+        assert.equal(failures.length, 1);
+        assert.equal(failures[0].code, scenario.code);
+        assert.equal(failures[0].session_id, SESSION);
+      }
+    } else {
+      assert.equal(rows.length, 1);
+      assert.deepEqual([rows[0].tool, rows[0].action, rows[0].input, rows[0].status, rows[0].decision_code], ["unknown", "unknown", {}, "blocked", "internal_error"]);
+      assert.ok(rows[0].error_message.startsWith(`${scenario.code}: `));
+      assert.ok(!JSON.stringify(rows).includes("never-capture-this"));
+    }
+  });
+}
 
 test("monitor mode denies nothing and writes no blocked row", async () => {
   const config = await setup({ mode: "monitor" });
@@ -112,7 +297,7 @@ test("a PermissionRequest the policy denies leaves one blocked row, like a PreTo
   assert.equal(rows[0].tool, "Bash");
   assert.equal(rows[0].plan_id, PLAN_ID);
   assert.equal(rows[0].step_index, 0);
-  assert.equal(rows[0].error_message, decision.hookSpecificOutput.decision.message);
+  assert.equal(rows[0].error_message, `policy_denied: ${decision.hookSpecificOutput.decision.message}`);
   assert.equal(rows[0].input.command, "touch /etc/outside");
   assert.equal(rows[0].input.armoriq_policy.source, "local");
   assert.equal(rows[0].input.armoriq_policy.rule_id, "no-bash");
