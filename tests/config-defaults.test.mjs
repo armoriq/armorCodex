@@ -107,8 +107,8 @@ test("per-endpoint overrides still win over the staging table", () => {
   });
 });
 
-test("token validity is capped at the 3600 s CSRG accepts", () => {
-  assert.equal(loadConfig({ ARMORCODEX_VALIDITY_SECONDS: "7200" }).validitySeconds, 3600);
+test("token validity refuses a value above the 3600 s CSRG accepts", () => {
+  assert.throws(() => loadConfig({ ARMORCODEX_VALIDITY_SECONDS: "7200" }), /ARMORCODEX_VALIDITY_SECONDS/);
   assert.equal(loadConfig({ ARMORCODEX_VALIDITY_SECONDS: "600" }).validitySeconds, 600);
   assert.equal(loadConfig({}).validitySeconds, 3600);
 });

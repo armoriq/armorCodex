@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
-import { readFile, unlink, writeFile } from "node:fs/promises";
+import { readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -54,6 +54,12 @@ export async function tryFileLock(lockPath) {
       if (err?.code !== "EEXIST") throw err;
       const owner = Number((await readFile(lockPath, "utf8").catch(() => "")).trim());
       if (owner && isAlive(owner)) return null;
+      // A new owner's file can be empty until writeFile finishes. Removing it
+      // in that window lets two writers hold the lock and lose state updates.
+      if (!owner) {
+        const modified = (await stat(lockPath).catch(() => null))?.mtimeMs;
+        if (modified !== undefined && Date.now() - modified < LOCK_WAIT_MS) return null;
+      }
       await unlink(lockPath).catch(() => {});
     }
   }

@@ -664,6 +664,7 @@ finish_update_banner() {
   fi
   info "SDK:    @armoriq/sdk-dev (latest)"
   info "Hooks:  ${GLOBAL_HOOKS} (verified)"
+  info "Restart open Codex sessions to load the updated ArmorCodex server."
   echo
 }
 
@@ -788,6 +789,9 @@ EOF
 finale() {
   echo
   printf "${G}${B}ArmorCodex is installed.${N}\n"
+  if [[ "${HAD_INSTALL}" -eq 1 ]]; then
+    printf "  Restart open Codex sessions to load the updated ArmorCodex server.\n"
+  fi
 
   node --input-type=module - "$(plugin_backend)" 2>/dev/null <<'NODE' || true
 import { closeSync, mkdirSync, openSync, readFileSync } from "node:fs";
