@@ -6,6 +6,7 @@ import { withFileLock } from "./live-usage.mjs";
 const MAX_SESSION_AGE_SECONDS = 60 * 60 * 24;
 
 const SESSION_DEFAULTS = {
+  runId: null,
   promptId: null,
   promptGeneration: 0,
   retirementEpoch: 0,

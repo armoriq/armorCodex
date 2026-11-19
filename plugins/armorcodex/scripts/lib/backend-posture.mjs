@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { buildAuthHeaders, normalizeToolName, postJson } from "./common.mjs";
 import { readJson, writeJson } from "./fs-store.mjs";
-import { auditLogin, createAuditWal } from "./audit-wal.mjs";
+import { revalidateOutboxLogin } from "./audit-wal.mjs";
 
 export const BACKEND_UNREACHABLE = "backend_unreachable";
 export const POSTURE_TIMEOUT_MS = 2000;
@@ -76,7 +76,7 @@ export async function probeBackend(config) {
     );
     state = classifyStatus(response.status);
     if (response.status >= 200 && response.status < 300) {
-      await createAuditWal({ dataDir: config.dataDir, config }).authenticationSucceeded(auditLogin(config));
+      await revalidateOutboxLogin(config);
     }
   } catch {
     state = "unreachable";
@@ -122,7 +122,7 @@ const POSTURE_LINES = {
   signed_out: "rejected the stored key (401): running in local only mode until you sign in again"
 };
 
-export async function formatArmorStatus(config, { queuedRows, undeliverable = 0, deadLetters = 0, captureFailures = 0, healthPending = 0, healthPaused = false }) {
+export async function formatArmorStatus(config, { queuedRows, undeliverable = 0, deadLetters = 0, captureFailures = 0, healthPending = 0, healthPaused = false, runsPending = 0, runsPaused = false, healthHold, runsHold, healthDeadLetters = 0, runsDeadLetters = 0, runStateWarnings = 0 }) {
   const lines = ["ArmorCodex status"];
   if (!config.apiKey) {
     lines.push(`  Signed in: no (local only mode, ${config.backendEndpoint})`);
@@ -137,7 +137,16 @@ export async function formatArmorStatus(config, { queuedRows, undeliverable = 0,
   lines.push(`  Dead letter audit rows: ${deadLetters}`);
   lines.push(`  Audit capture failures: ${captureFailures}`);
   lines.push(`  Health events waiting to upload: ${healthPending}`);
+  lines.push(`  Dead letter health events: ${healthDeadLetters}`);
   lines.push(`  Health reporting paused: ${healthPaused ? "yes" : "no"}`);
+  if (healthHold) lines.push(`  Health reporting held: ${healthHold}`);
+  if (config.runReportingEnabled) {
+    lines.push(`  Run reports waiting to upload: ${runsPending}`);
+    lines.push(`  Dead letter run reports: ${runsDeadLetters}`);
+    if (runStateWarnings) lines.push(`  Run state files set aside: ${runStateWarnings}`);
+    lines.push(`  Run reporting paused: ${runsPaused ? "yes" : "no"}`);
+    if (runsHold) lines.push(`  Run reporting held: ${runsHold}`);
+  }
   lines.push(`  Coverage: ${COVERAGE_LINE}`);
   return lines.join("\n");
 }

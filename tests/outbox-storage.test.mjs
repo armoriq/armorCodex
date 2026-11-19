@@ -199,21 +199,20 @@ test("the production ship path probes a paused key and a successful authenticate
   const paths = [];
   let first = true;
   t.mock.method(globalThis, "fetch", async (url, init) => {
-    if (new URL(url).pathname === "/iap/client-events") {
-      const { events } = JSON.parse(init.body);
-      return new Response(JSON.stringify({ results: events.map(({ event_id }) => ({ event_id, outcome: "accepted" })) }), { status: 200 });
-    }
     paths.push(new URL(url).pathname);
+    if (new URL(url).pathname === "/iap/client-events") {
+      return new Response("{}", { status: 404 });
+    }
     if (first) { first = false; return new Response("{}", { status: 401 }); }
     return new Response(JSON.stringify({ failures: [] }), { status: 200 });
   });
   await shipQueuedAudit(config);
   assert.equal((await wal.status()).undeliverable, 1);
   await shipQueuedAudit(config);
-  assert.deepEqual(paths, ["/iap/audit/batch"]);
+  assert.deepEqual(paths, ["/iap/audit/batch", "/iap/client-events"]);
   t.mock.timers.tick(120_000);
   await shipQueuedAudit(config);
-  assert.deepEqual(paths, ["/iap/audit/batch", "/iap/validate-key", "/iap/audit/batch"]);
+  assert.deepEqual(paths, ["/iap/audit/batch", "/iap/client-events", "/iap/validate-key", "/iap/audit/batch", "/iap/client-events"]);
   assert.deepEqual(await wal.readPending(), []);
   await wal.appendLine(row(2));
   await wal.drain(async () => ({ status: 401, body: {} }));

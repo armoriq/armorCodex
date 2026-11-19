@@ -20,7 +20,8 @@ import { createAuditFlusher } from "./lib/audit-flusher.mjs";
 import { shipQueuedAudit } from "./lib/audit-delivery.mjs";
 import { createPlanRefresher } from "./lib/plan-refresh.mjs";
 import { cachedPosture } from "./lib/backend-posture.mjs";
-import { getSession, isPromptOpen, matchesSessionGeneration, retireSessionPlan, syncSessionAuth, withRuntimeState } from "./lib/runtime-state.mjs";
+import { accountForRun, publishRunReports, recordRunRegistration, startRun } from "./lib/runs.mjs";
+import { getSession, isPromptOpen, loadRuntimeState, matchesSessionGeneration, retireSessionPlan, syncSessionAuth, withRuntimeState } from "./lib/runtime-state.mjs";
 import { createPlanRequest, planHash, requestWithRetry, withPlanRequest } from "./lib/plan-request.mjs";
 
 const MATCHER_OPERATORS = z
@@ -131,18 +132,27 @@ function registrationFailure(error, config) {
   return { ...reply, isError: true };
 }
 
-async function registerPlan(currentConfig, sessionId, expected, plan, goal, deadlineAt) {
+async function registerPlan(currentConfig, sessionId, expected, plan, goal, deadlineAt, callKey) {
+  const reply = await registerPlanRequest(currentConfig, sessionId, expected, plan, goal, deadlineAt, callKey);
+  await publishRunReports(currentConfig());
+  return reply;
+}
+
+const registerRunOutcome = (config, runId, key, status, details) =>
+  accountForRun(config, (state) => recordRunRegistration(state, runId, key, status, details));
+
+async function registerPlanRequest(currentConfig, sessionId, expected, plan, goal, deadlineAt, callKey) {
   let config = currentConfig();
   const pendingPath = path.join(config.dataDir, `pending-plan.${sessionId}.json`);
   const update = (change) => withRuntimeState(config.runtimeFile, async (state) => {
     if (!matchesSessionGeneration(getSession(state, sessionId), expected)) throw new Error("the prompt or login changed while the plan was registering");
     const session = syncSessionAuth(state, sessionId, currentConfig(), { retireOnChange: false });
     if (!matchesSessionGeneration(session, expected)) throw new Error("the prompt or login changed while the plan was registering");
-    return change(session);
+    return change(session, state);
   });
   let descriptor;
   try {
-    const prepared = await update(async (session) => {
+    const prepared = await update(async (session, state) => {
       config = { ...config, mode: session.mode ?? config.mode };
       if (session.backendEndpoint && session.backendEndpoint !== config.backendEndpoint) {
         throw new Error("the MCP backend differs from the hook backend; restart Codex with matching settings");
@@ -166,7 +176,7 @@ async function registerPlan(currentConfig, sessionId, expected, plan, goal, dead
       if (!session.promptId) throw new Error("no current prompt id; submit a prompt before registering a plan");
       const hash = planHash(plan);
       if (!session.pendingRequest && session.countedPlanId && session.planHash === hash && session.intentTokenRaw && Date.parse(session.tokenExpiresAt) > Date.now()) {
-        return { reply: registeredResult(session) };
+        return { reply: registeredResult(session), confirmedPlan: { id: session.countedPlanId, kind: session.kind } };
       }
       if (session.pendingRequest) {
         if (session.pendingRequest.planHash !== hash) throw new Error("Register the same plan again to retry it, or start a new prompt");
@@ -180,6 +190,16 @@ async function registerPlan(currentConfig, sessionId, expected, plan, goal, dead
       }, session);
       return { descriptor: structuredClone(session.pendingRequest) };
     });
+    if (prepared.confirmedPlan) {
+      await accountForRun(config, (runs) => {
+        const key = Object.entries(runs.runs[expected.runId]?.registrations ?? {})
+          .find(([, attempt]) => attempt.status === "confirmed" && attempt.planId === prepared.confirmedPlan.id)?.[0] ?? callKey;
+        recordRunRegistration(runs, expected.runId, key, "confirmed", {
+          previousKey: callKey, planId: prepared.confirmedPlan.id, kind: prepared.confirmedPlan.kind
+        });
+      });
+    } else await registerRunOutcome(config, expected.runId, prepared.descriptor?.key ?? callKey,
+      prepared.descriptor ? "pending" : "rejected", { previousKey: callKey, deadlineAt });
     if (prepared.reply) return prepared.reply;
     descriptor = prepared.descriptor;
     await update(async () => writeJson(pendingPath, { ...expected, status: "issuing", startedAt: Date.now(), deadlineAt }));
@@ -192,6 +212,9 @@ async function registerPlan(currentConfig, sessionId, expected, plan, goal, dead
     if (!result?.tokenRaw || !result.planId || !Number.isFinite(result.expiresAt)) {
       throw new Error("the backend returned no token, plan id or expiry");
     }
+    await registerRunOutcome(config, expected.runId, descriptor.key, "confirmed", {
+      planId: result.planId, kind: descriptor.kind
+    });
     return await update(async (session) => {
       if (session.pendingRequest?.key !== descriptor.key) throw new Error("the pending plan changed while the plan was registering");
       if (descriptor.kind === "refresh" && !isPromptOpen(session)) throw new Error("the prompt closed while refreshing");
@@ -208,6 +231,11 @@ async function registerPlan(currentConfig, sessionId, expected, plan, goal, dead
       return registeredResult(session);
     });
   } catch (error) {
+    await registerRunOutcome(config, expected.runId, descriptor?.key ?? callKey,
+      descriptor || error.unconfirmed ? "failed" : "rejected", {
+        previousKey: callKey,
+        backendUnreachable: ["network", "timeout", "server_error"].includes(error.reasonCode)
+      });
     if (descriptor) {
       await update(async (session) => {
         if (session.pendingRequest?.key !== descriptor.key) return;
@@ -223,6 +251,7 @@ async function registerPlan(currentConfig, sessionId, expected, plan, goal, dead
 async function run() {
   let stopping;
   const settings = loadSettings();
+  const planArgument = (schema) => settings.runReportingEnabled ? z.union([schema, z.unknown()]) : schema;
   const currentConfig = () => withLogin(settings);
   const loadStateAndConfig = async () => {
     const config = currentConfig();
@@ -360,15 +389,16 @@ async function run() {
         "Declare the tools you intend to use for this task. " +
         "Register before the first tool that needs a plan in this prompt. " +
         "Chat only prompts need no plan.",
+      // MCP validates before the handler; retain invalid input so local refusals reach run accounting.
       inputSchema: {
-        goal: z.string().min(1).optional()
+        goal: planArgument(z.string().min(1)).optional()
           .describe("One-line summary of what the plan accomplishes"),
-        steps: z.union([
+        steps: planArgument(z.union([
           z.array(PLAN_STEP_SCHEMA).min(1),
           z.string().min(1)
-        ]).optional()
+        ])).optional()
           .describe("Ordered list of tool calls (array, or JSON-stringified array)"),
-        plan: z.union([INTENT_PLAN_ZOD, z.string().min(1)]).optional()
+        plan: planArgument(z.union([INTENT_PLAN_ZOD, z.string().min(1)])).optional()
           .describe("Alternative: pass the whole plan as an object or JSON string")
       },
       annotations: {
@@ -380,35 +410,63 @@ async function run() {
     },
     async (args, extra) => {
       if (stopping) return { ...toTextResult("Plan not registered: ArmorCodex is shutting down."), isError: true };
-      const coerced = coercePlanArgs(args);
-      const parsed = INTENT_PLAN_ZOD.safeParse(coerced);
+      const sessionId = codexSessionId(extra);
+      const config = currentConfig();
+      const callKey = `call:${extra.requestId}`;
+      const parsed = INTENT_PLAN_ZOD.safeParse(coercePlanArgs(args));
       if (!parsed.success) {
+        if (config.runReportingEnabled && sessionId) {
+          try {
+            const session = getSession(await loadRuntimeState(config.runtimeFile), sessionId);
+            await accountForRun(config, (state) => {
+              if (session) startRun(state, sessionId, session, config);
+              recordRunRegistration(state, session?.runId, callKey, "rejected");
+            });
+            await publishRunReports(config);
+          } catch { process.stderr.write("[armorcodex] registration refusal not counted\n"); }
+        }
         return { ...toTextResult(`Plan not registered: ${parsed.error.message}.`), isError: true };
       }
-      const sessionId = codexSessionId(extra);
-      if (!sessionId) {
-        return { ...toTextResult("Plan not registered: this Codex version sends no session id with MCP calls. Update Codex to 0.162 or later."), isError: true };
-      }
-
-      const config = currentConfig();
-      const plan = normalizeIntentPlan(parsed.data);
-      const expected = withRuntimeState(config.runtimeFile, (state) => {
+      const registration = sessionId ? withRuntimeState(config.runtimeFile, (state) => {
         const previous = getSession(state, sessionId);
         if (previous?.backendEndpoint && previous.backendEndpoint !== config.backendEndpoint) {
           throw new Error("the MCP backend differs from the hook backend; restart Codex with matching settings");
         }
         const session = syncSessionAuth(state, sessionId, config);
-        return { promptId: session.promptId, promptGeneration: session.promptGeneration, authGeneration: session.authGeneration };
+        return structuredClone(session);
+      }).then(async (session) => {
+        await accountForRun(config, (state) => {
+          startRun(state, sessionId, session, config);
+          recordRunRegistration(state, session.runId, callKey, "pending");
+        });
+        return { runId: session.runId, promptId: session.promptId, promptGeneration: session.promptGeneration, authGeneration: session.authGeneration };
+      }) : null;
+      // The queue awaits this later; until then a failed write must not count as an unhandled rejection.
+      registration?.catch(() => {});
+      // Queue before awaiting the state write, or lock contention can reverse registration order.
+      return serializeRegistration(sessionId, async () => {
+        let expected = null;
+        try {
+          expected = await registration;
+          if (!sessionId) {
+            return { ...toTextResult("Plan not registered: this Codex version sends no session id with MCP calls. Update Codex to 0.162 or later."), isError: true };
+          }
+          const plan = normalizeIntentPlan(parsed.data);
+          return await withPlanRequest(config.runtimeFile, sessionId,
+            async (deadlineAt) => registerPlan(currentConfig, sessionId, expected, plan, parsed.data.goal, deadlineAt, callKey));
+        } catch (error) {
+          if (expected) {
+            await registerRunOutcome(config, expected.runId, callKey, "failed");
+            await publishRunReports(config).catch(() => {});
+          }
+          return registrationFailure(error, currentConfig());
+        }
       });
-      expected.catch(() => {});
-      return serializeRegistration(sessionId, async () => withPlanRequest(config.runtimeFile, sessionId,
-        async (deadlineAt) => registerPlan(currentConfig, sessionId, await expected, plan, parsed.data.goal, deadlineAt))
-        .catch((error) => registrationFailure(error, currentConfig())));
     }
   );
 
   const flusher = createAuditFlusher({
-    ship: () => shipQueuedAudit(currentConfig()),
+    ship: () => shipQueuedAudit(currentConfig(), currentConfig),
     onError: (err) => {
       process.stderr.write(`[armorcodex-policy] flusher: ${err instanceof Error ? err.message : err}\n`);
     },

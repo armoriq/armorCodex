@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { handlePermissionRequest, handlePostToolUse, handlePostToolUseFailure, handlePreToolUse } from "../plugins/armorcodex/scripts/lib/engine.mjs";
@@ -416,4 +416,13 @@ test("a marketplace copy runs bootstrap router without tests and captures a norm
   assert.equal(decision.permissionDecision, "deny");
   assert.doesNotMatch(decision.permissionDecisionReason, /internal error|ENOENT/);
   assert.equal((await walRows({ dataDir }))[0]?.decision_code, "policy_deny");
+});
+
+// regression: #0013
+test("shipped scripts never load the excluded tests directory", async () => {
+  const scripts = new URL("../plugins/armorcodex/scripts/", import.meta.url);
+  for (const file of await readdir(scripts, { recursive: true })) {
+    if (!file.endsWith(".mjs")) continue;
+    assert.doesNotMatch(await readFile(new URL(file, scripts), "utf8"), /(?:\.\.\/)+tests\//, file);
+  }
 });

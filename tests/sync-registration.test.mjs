@@ -18,13 +18,33 @@ const SERVER = fileURLToPath(new URL("../plugins/armorcodex/scripts/policy-mcp.m
 const SANDBOX = fileURLToPath(new URL("./helpers/mcp-sandbox.mjs", import.meta.url));
 const SESSION = "sess-sync";
 
-async function withServer(replies, fn) {
+async function withServer(replies, fn, { delayFirstWrite = false } = {}) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "armorcodex-sync-reg-"));
   const dataDir = path.join(home, "data");
   const requestsPath = path.join(home, "intents.json");
   const preload = path.join(home, "intent.mjs");
   fs.writeFileSync(preload, `
 import fs from "node:fs";
+import fsPromises from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
+if (${JSON.stringify(delayFirstWrite)}) {
+  const unlink = fsPromises.unlink;
+  let writes = 0;
+  let release;
+  const held = new Promise((resolve) => { release = resolve; });
+  fsPromises.unlink = async (file) => {
+    const result = await unlink(file);
+    if (file === ${JSON.stringify(path.join(dataDir, "runtime.json.lock"))}) {
+      writes += 1;
+      if (writes === 1) {
+        process.stderr.write("sync-state-write-delayed\\n");
+        await held;
+      } else if (writes === 2) setImmediate(release);
+    }
+    return result;
+  };
+  syncBuiltinESMExports();
+}
 const originalFetch = globalThis.fetch;
 const requests = [];
 const replies = ${JSON.stringify(replies)};
@@ -68,7 +88,14 @@ globalThis.fetch = async (url, init) => {
   });
   let requested;
   const tokenRequested = new Promise((resolve) => { requested = resolve; });
-  transport.stderr.on("data", (chunk) => { if (String(chunk).includes("sync-request")) requested(); });
+  let delayed;
+  const stateWriteDelayed = new Promise((resolve) => { delayed = resolve; });
+  let stderr = "";
+  transport.stderr.on("data", (chunk) => {
+    stderr += chunk;
+    if (stderr.includes("sync-request")) requested();
+    if (stderr.includes("sync-state-write-delayed")) delayed();
+  });
   const client = new Client({ name: "sync-registration-test", version: "0.0.0" });
   await client.connect(transport);
   const registerArgs = async (args) => {
@@ -83,7 +110,7 @@ globalThis.fetch = async (url, init) => {
   const pending = () => (fs.existsSync(pendingPath) ? JSON.parse(fs.readFileSync(pendingPath, "utf8")) : null);
   const backend = { get requests() { return fs.existsSync(requestsPath) ? JSON.parse(fs.readFileSync(requestsPath, "utf8")) : []; } };
   try {
-    await fn({ register, registerArgs, preToolUse, pending, backend, config, tokenRequested, release: () => client.callTool({ name: "policy_read", arguments: {} }) });
+    await fn({ register, registerArgs, preToolUse, pending, backend, config, tokenRequested, stateWriteDelayed, release: () => client.callTool({ name: "policy_read", arguments: {} }) });
   } finally {
     await client.close();
     fs.rmSync(home, { recursive: true, force: true });
@@ -127,13 +154,16 @@ test("when issuance is refused, nothing is stored and PreToolUse denies without 
   });
 });
 
+// regression: #0013
 test("two registrations in one session end with the newer plan on disk", async () => {
-  await withServer([{}], async ({ register, pending }) => {
-    const [first, second] = await Promise.all([register("first", "Read"), register("second", "Bash")]);
+  await withServer([{}], async ({ register, pending, stateWriteDelayed }) => {
+    const registering = register("first", "Read");
+    await stateWriteDelayed;
+    const [first, second] = await Promise.all([registering, register("second", "Bash")]);
     assert.match(first, /\(new\), 1 steps/);
     assert.match(second, /\(revision\), 1 steps/);
     assert.deepEqual(pending().plan.steps.map((step) => step.action), ["Bash"]);
-  });
+  }, { delayFirstWrite: true });
 });
 
 test("PreToolUse never asks the backend for a token, even close to expiry", async () => {
