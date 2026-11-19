@@ -5,7 +5,7 @@ import { spawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { appendNdjsonLine, writeJson, writePrivateFile } from "../plugins/armorcodex/scripts/lib/fs-store.mjs";
+import { appendNdjsonLine, tightenDirFilesOnce, writeJson, writePrivateFile } from "../plugins/armorcodex/scripts/lib/fs-store.mjs";
 import { createAuditWal } from "../plugins/armorcodex/scripts/lib/audit-wal.mjs";
 import { handleUserPromptSubmit } from "../plugins/armorcodex/scripts/lib/engine.mjs";
 
@@ -84,17 +84,21 @@ test("the audit WAL holding tool inputs is owner-only", async () => {
   const dataDir = await openDataDir();
   const wal = createAuditWal({ dataDir, login: { backend: "https://audit.invalid", keyId: "mode-test" } });
   await wal.appendLine({ tool: "Bash", input: { command: "curl -H 'Authorization: Bearer abc123'" } });
-  const { currentPath, statePath, archiveDir } = wal._paths;
+  const store = path.join(dataDir, "audit", "outbox-v1");
+  const segment = (await readdir(store)).find((name) => name.startsWith("queue."));
+  const currentPath = path.join(store, segment, "rows.jsonl");
+  const archiveDir = path.join(store, "archive");
   assert.match(await readFile(currentPath, "utf8"), /Bearer abc123/);
   assert.equal(await modeOf(currentPath), 0o600);
   assert.equal(await modeOf(path.dirname(currentPath)), 0o700);
   assert.equal(await modeOf(archiveDir), 0o700);
 
   await wal.drain(async ({ rows }) => ({ status: 200, body: { results: rows.map(({ client_row_id }) => ({ client_row_id, outcome: "accepted" })) } }));
-  assert.equal(await modeOf(statePath), 0o600);
+  assert.equal(await modeOf(path.join(archiveDir, segment, "state.json")), 0o600);
 });
 
-test("the audit WAL closes an existing 0644 log in a 0755 dir", async () => {
+// regression: #0010
+test("the audit WAL leaves released files and their modes untouched", async () => {
   const dataDir = await openDataDir();
   const auditDir = path.join(dataDir, "audit");
   await mkdir(path.join(auditDir, "archive"), { recursive: true, mode: 0o755 });
@@ -106,9 +110,9 @@ test("the audit WAL closes an existing 0644 log in a 0755 dir", async () => {
 
   const wal = createAuditWal({ dataDir, login: { backend: "https://audit.invalid", keyId: "mode-test" } });
   await wal.appendLine({ tool: "Read" });
-  assert.equal(await modeOf(currentPath), 0o600);
+  assert.equal(await modeOf(currentPath), 0o644);
   assert.equal(await modeOf(auditDir), 0o700);
-  assert.equal(await modeOf(path.join(auditDir, "archive")), 0o700);
+  assert.equal(await modeOf(path.join(auditDir, "archive")), 0o755);
   assert.equal((await readFile(currentPath, "utf8")).trim().split("\n").length, 1);
   assert.equal((await wal.readPending()).length, 2);
   assert.equal((await wal.status()).undeliverable, 1);
@@ -134,7 +138,7 @@ test("tightening keeps owner-only bits and concurrent writes never share a temp 
   const shared = path.join(archiveDir, "older.jsonl");
   await writeFile(shared, "{}\n");
   await chmod(shared, 0o644);
-  await createAuditWal({ dataDir }).appendLine({ tool: "Read" });
+  await tightenDirFilesOnce(archiveDir);
   assert.equal(await modeOf(readOnly), 0o400);
   assert.equal(await modeOf(shared), 0o600);
 

@@ -65,7 +65,10 @@
           "mcp_server_denied",
           "plan_check_denied"
         ],
-        "armorcodex": ["policy_denied", "plan_check_denied"],
+        "armorcodex": [
+          "policy_denied",
+          "plan_check_denied"
+        ],
         "armoropencode": [
           "policy_forbid",
           "backend_denied_tool"
@@ -98,11 +101,16 @@
     {
       "decisionCode": "missing_plan",
       "producers": {
-        "backend": ["intent_token_required", "intent_plan_not_found"],
+        "backend": [
+          "intent_token_required",
+          "intent_plan_not_found"
+        ],
         "armorclaude": [
           "intent_plan_missing"
         ],
-        "armorcodex": ["intent_plan_missing"],
+        "armorcodex": [
+          "intent_plan_missing"
+        ],
         "armoropencode": [
           "intent_plan_missing"
         ],
@@ -114,12 +122,18 @@
     {
       "decisionCode": "out_of_scope",
       "producers": {
-        "backend": ["tool_not_in_plan"],
+        "backend": [
+          "tool_not_in_plan"
+        ],
         "armorclaude": [
           "intent_drift",
           "intent_token_blocked"
         ],
-        "armorcodex": ["intent_drift", "intent_parameter_mismatch", "intent_plan_empty"],
+        "armorcodex": [
+          "intent_drift",
+          "intent_parameter_mismatch",
+          "intent_plan_empty"
+        ],
         "armoropencode": [
           "intent_drift"
         ],
@@ -131,11 +145,15 @@
     {
       "decisionCode": "token_expired",
       "producers": {
-        "backend": ["intent_plan_expired"],
+        "backend": [
+          "intent_plan_expired"
+        ],
         "armorclaude": [
           "intent_token_expired"
         ],
-        "armorcodex": ["intent_token_expired"],
+        "armorcodex": [
+          "intent_token_expired"
+        ],
         "armoropencode": [
           "intent_token_expired"
         ],
@@ -150,7 +168,9 @@
         "armorclaude": [
           "intent_planning_failed"
         ],
-        "armorcodex": ["intent_token_not_issued"],
+        "armorcodex": [
+          "intent_token_not_issued"
+        ],
         "armoropencode": [],
         "armorantigravity": []
       }
@@ -172,7 +192,12 @@
           "crypto_policy_mismatch",
           "remote_verify_denied"
         ],
-        "armorcodex": ["crypto_policy_mismatch", "csrg_proof_invalid", "csrg_proof_missing", "remote_verify_denied"],
+        "armorcodex": [
+          "crypto_policy_mismatch",
+          "csrg_proof_invalid",
+          "csrg_proof_missing",
+          "remote_verify_denied"
+        ],
         "armoropencode": [],
         "armorantigravity": []
       }
@@ -180,7 +205,9 @@
     {
       "decisionCode": "account",
       "producers": {
-        "backend": ["agent_inactive"],
+        "backend": [
+          "agent_inactive"
+        ],
         "armorclaude": [],
         "armorcodex": [],
         "armoropencode": [
@@ -196,7 +223,9 @@
     {
       "decisionCode": "approval_required",
       "producers": {
-        "backend": ["hold"],
+        "backend": [
+          "hold"
+        ],
         "armorclaude": [
           "policy_requires_approval",
           "policy_v2_hold",
@@ -216,7 +245,9 @@
     {
       "decisionCode": "outage",
       "producers": {
-        "backend": ["step_verification_unavailable"],
+        "backend": [
+          "step_verification_unavailable"
+        ],
         "armorclaude": [
           "backend_unreachable"
         ],
@@ -234,14 +265,21 @@
     {
       "decisionCode": "internal_error",
       "producers": {
-        "backend": ["agent_unresolved"],
+        "backend": [
+          "agent_unresolved"
+        ],
         "armorclaude": [
           "internal_error",
           "invalid_payload",
           "missing_tool_name",
           "remote_verify_failed"
         ],
-        "armorcodex": ["remote_verify_failed", "invalid_payload", "missing_tool_name", "internal_error"],
+        "armorcodex": [
+          "remote_verify_failed",
+          "invalid_payload",
+          "missing_tool_name",
+          "internal_error"
+        ],
         "armoropencode": [
           "internal_error"
         ],
@@ -261,21 +299,6 @@
       }
     }
   ],
-  "pendingProducerCodes": {
-    "armorcodex": {
-      "policyDenyAndPlanCheckCodes": ["policy_denied", "plan_check_denied"],
-      "missingPlanCodes": ["intent_plan_missing"],
-      "driftAndParameterCodes": ["intent_drift", "intent_parameter_mismatch", "intent_plan_empty"],
-      "expiryCodes": ["intent_token_expired"],
-      "slowIssuanceCodes": ["intent_token_not_issued"],
-      "csrgAndVerifyCodes": ["crypto_policy_mismatch", "csrg_proof_invalid", "csrg_proof_missing", "remote_verify_denied", "remote_verify_failed"],
-      "invalidInputInternalErrorAndMissingToolNameCodes": ["invalid_payload", "missing_tool_name", "internal_error"]
-    },
-    "armorantigravity": {
-      "mcpServerNotApprovedCodes": [],
-      "protocolAndCrashFallbackCodes": []
-    }
-  },
   "prefixRule": {
     "bracket": "^\\[([a-z][a-z0-9_]*)\\]",
     "token": "^([a-z][a-z0-9_]*)(?=$|:|\\s)",

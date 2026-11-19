@@ -8,6 +8,7 @@ import path from "node:path";
 import { handlePostToolUse, handlePreToolUse } from "../plugins/armorcodex/scripts/lib/engine.mjs";
 import { requestIntent } from "../plugins/armorcodex/scripts/lib/intent.mjs";
 import { recordBackendOutcome } from "../plugins/armorcodex/scripts/lib/backend-posture.mjs";
+import { auditRows } from "./helpers/audit-rows.mjs";
 
 const { ArmorIQClient } = createRequire(new URL("../plugins/armorcodex/package.json", import.meta.url))(
   "@armoriq/sdk-dev"
@@ -51,13 +52,7 @@ async function setup({ mode = "enforce", planCheck }) {
 }
 
 async function walRows(config) {
-  try {
-    const raw = await readFile(path.join(config.dataDir, "audit", "current.jsonl"), "utf8");
-    return raw.split("\n").filter(Boolean).map((line) => JSON.parse(line));
-  } catch (error) {
-    if (error.code === "ENOENT") return [];
-    throw error;
-  }
+  return auditRows(config.dataDir);
 }
 
 const preToolUse = (config, toolName, toolInput = {}) =>

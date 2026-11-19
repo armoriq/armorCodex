@@ -11,6 +11,8 @@ import {
 import { CLIENT } from "./client-identity.mjs";
 import { requireEndpoint } from "./config.mjs";
 import { sdkModule } from "./sdk.mjs";
+import { auditLogin, createAuditWal } from "./audit-wal.mjs";
+import { recordBackendOutcome } from "./backend-posture.mjs";
 
 const sdkClientCache = new Map();
 
@@ -190,7 +192,7 @@ export function checkIntentTokenPlan({ intentTokenRaw, toolName, toolParams }) {
       matched: true,
       code: "intent_token_expired",
       blockReason:
-        "ArmorIQ intent token expired — call register_intent_plan to refresh, then retry",
+        "ArmorIQ intent token expired, call register_intent_plan to refresh, then retry",
       plan: parsed.plan
     };
   }
@@ -507,6 +509,14 @@ function requestError(response, fallback) {
 
 let legacyBackendLogged = false;
 
+async function authenticated(config, endpoint = config.backendEndpoint) {
+  const backend = config.backendEndpoint?.replace(/\/+$/, "");
+  if (config.dataDir && backend && (endpoint === backend || endpoint?.startsWith(backend + "/"))) {
+    await createAuditWal({ dataDir: config.dataDir, config }).authenticationSucceeded(auditLogin(config));
+    await recordBackendOutcome(config, "ok");
+  }
+}
+
 function tokenResult(data, tokenRaw, plan, source) {
   if (data.kind === undefined && !legacyBackendLogged) {
     legacyBackendLogged = true;
@@ -546,6 +556,7 @@ export async function requestIntent(config, payload, descriptor, { timeoutMs = c
       clearTimeout(timer);
     }
     if (!response.ok) throw requestError({ status: response.status, data, headers: response.headers }, `Intent request failed: ${response.status}`);
+    await authenticated(config, config.intentEndpoint);
     const tokenRaw =
       typeof data.intentTokenRaw === "string"
         ? data.intentTokenRaw
@@ -593,6 +604,7 @@ export async function requestIntent(config, payload, descriptor, { timeoutMs = c
       promptId: descriptor?.headers["X-ArmorIQ-Prompt-Id"],
       timeoutMs
     });
+    await authenticated(config);
     return tokenResult(token, JSON.stringify(token), plan, "armoriq-sdk");
   } catch (error) {
     if (outcome?.response) throw requestError(outcome.response, error.message);

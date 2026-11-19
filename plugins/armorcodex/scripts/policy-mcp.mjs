@@ -17,16 +17,11 @@ import {
 } from "./lib/policy.mjs";
 import { handleArmorPolicyCommand, stageAndFormat } from "./lib/armor-policy-commands.mjs";
 import { createAuditFlusher } from "./lib/audit-flusher.mjs";
+import { shipQueuedAudit } from "./lib/audit-delivery.mjs";
 import { createPlanRefresher } from "./lib/plan-refresh.mjs";
-import { createAuditWal } from "./lib/audit-wal.mjs";
-import { createIapService } from "./lib/iap-service.mjs";
+import { cachedPosture } from "./lib/backend-posture.mjs";
 import { getSession, isPromptOpen, matchesSessionGeneration, retireSessionPlan, syncSessionAuth, withRuntimeState } from "./lib/runtime-state.mjs";
 import { createPlanRequest, planHash, requestWithRetry, withPlanRequest } from "./lib/plan-request.mjs";
-import {
-  cachedPosture,
-  classifyStatus,
-  recordBackendOutcome
-} from "./lib/backend-posture.mjs";
 
 const MATCHER_OPERATORS = z
   .object({
@@ -223,25 +218,6 @@ async function registerPlan(currentConfig, sessionId, expected, plan, goal, dead
     }
     return registrationFailure(error, config);
   }
-}
-
-async function shipQueuedAudit(config) {
-  if (!config.apiKey) return;
-  const posture = await cachedPosture(config);
-  if (posture && posture.state !== "ok") return;
-  const wal = createAuditWal({ dataDir: config.dataDir, config });
-  const iapService = createIapService(config);
-  await wal.drain(async ({ rows }) => {
-    const started = Date.now();
-    try {
-      const response = await iapService.shipAuditBatch(rows);
-      await recordBackendOutcome(config, classifyStatus(response.status), started);
-      return response;
-    } catch (error) {
-      await recordBackendOutcome(config, typeof error?.status === "number" ? classifyStatus(error.status) : "unreachable", started);
-      throw error;
-    }
-  });
 }
 
 async function run() {

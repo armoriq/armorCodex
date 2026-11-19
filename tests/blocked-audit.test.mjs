@@ -2,12 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { handlePermissionRequest, handlePostToolUse, handlePostToolUseFailure, handlePreToolUse } from "../plugins/armorcodex/scripts/lib/engine.mjs";
 import { signIn } from "./helpers/login.mjs";
 import { recordBackendOutcome } from "../plugins/armorcodex/scripts/lib/backend-posture.mjs";
+import { auditRows } from "./helpers/audit-rows.mjs";
 
 const PLAN_ID = randomUUID();
 const SESSION = "sess-blocked";
@@ -53,13 +54,7 @@ async function setup({ mode = "enforce", withPlan = true, rules = [] } = {}) {
 }
 
 async function walRows(config) {
-  try {
-    const raw = await readFile(path.join(config.dataDir, "audit", "current.jsonl"), "utf8");
-    return raw.split("\n").filter(Boolean).map((line) => JSON.parse(line));
-  } catch (error) {
-    if (error.code === "ENOENT") return [];
-    throw error;
-  }
+  return auditRows(config.dataDir);
 }
 
 const preToolUse = (config, toolName, toolInput = {}) =>
@@ -89,8 +84,7 @@ for (const scenario of [
   { name: "approval on PreToolUse", code: "require_approval", decisionCode: "approval_required", status: "held", rules: [{ id: "review", action: "require_approval", tool: "Bash" }] },
   { name: "approval on PermissionRequest", event: "PermissionRequest", code: "require_approval", decisionCode: "approval_required", status: "held", rules: [{ id: "review", action: "require_approval", tool: "Bash" }] },
   { name: "PermissionRequest deny", event: "PermissionRequest", code: "policy_denied", decisionCode: "policy_deny", rules: [{ id: "no-bash", action: "deny", tool: "Bash" }] },
-  { name: "missing tool name", code: "missing_tool_name", decisionCode: "internal_error", tool: "", step: null },
-  { name: "PermissionRequest missing tool", event: "PermissionRequest", code: "missing_tool_name", decisionCode: "internal_error", tool: "", step: null }
+  { name: "missing tool name", code: "missing_tool_name", decisionCode: "internal_error", tool: "", step: null }
 ]) {
   test(`${scenario.name} writes one coded decision with the plan and prompt in force`, async (t) => {
     const config = await setup(scenario);
@@ -135,10 +129,10 @@ test("the contract pins decision and result ids and the exact ArmorCodex produce
   const fixture = JSON.parse(await readFile(new URL("../plugins/armorcodex/tests/fixtures/block-capture-v1.json", import.meta.url), "utf8"));
   const { auditRowId, createAuditEnvelope } = await import("../plugins/armorcodex/scripts/lib/audit-wal.mjs");
   const { DECISION_CODES } = await import("../plugins/armorcodex/scripts/lib/decision-codes.mjs");
+  const { SIZE_LIMITS } = await import("../plugins/armorcodex/scripts/lib/audit-contract.mjs");
+  assert.deepEqual(SIZE_LIMITS, fixture.sizeLimits);
   for (const vector of fixture.clientRowId.vectors) assert.equal(auditRowId(vector.rootSessionId, vector.toolCallId, vector.phase), vector.clientRowId);
   assert.deepEqual(DECISION_CODES, Object.fromEntries(fixture.reasonCodes.flatMap(({ decisionCode, producers }) => producers.armorcodex.map((code) => [code, decisionCode]))));
-  const pending = fixture.pendingProducerCodes.armorcodex;
-  assert.deepEqual(Object.values(pending).flat().sort(), Object.keys(DECISION_CODES).filter((code) => !["require_approval", "backend_unreachable"].includes(code)).sort());
   const envelope = createAuditEnvelope({ session_id: SESSION });
   assert.ok(envelope.toolCallId);
   assert.equal(auditRowId(SESSION, envelope.toolCallId, "decision"), envelope.decisionId);
@@ -235,17 +229,68 @@ test("omitted plan and prompt links stay omitted after a tool runs", async (t) =
   assert.deepEqual([row.plan_id, row.context_plan_id, row.prompt_id], [undefined, undefined, undefined]);
 });
 
+// regression: #0010
+test("a session from the released version retains its token plan as context", async (t) => {
+  const config = await setup();
+  t.after(() => rm(config.dataDir, { recursive: true, force: true }));
+  const state = JSON.parse(await readFile(config.runtimeFile, "utf8"));
+  delete state.sessions[SESSION].countedPlanId;
+  delete state.sessions[SESSION].tokenPlanId;
+  await writeFile(config.runtimeFile, JSON.stringify(state));
+  await handlePostToolUse({ session_id: SESSION, tool_name: "Bash", tool_input: {} }, config);
+  const [row] = await walRows(config);
+  assert.equal(row.plan_id, undefined);
+  assert.equal(row.context_plan_id, PLAN_ID);
+});
+
+// regression: #0010
+test("a failed result append retains its start snapshot and a damaged start does not break capture", async (t) => {
+  const config = await setup();
+  t.after(() => rm(config.dataDir, { recursive: true, force: true }));
+  const input = { session_id: SESSION, tool_use_id: "retry-result", tool_name: "Bash", tool_input: {} };
+  await handlePreToolUse(input, config);
+  await writeFile(path.join(config.dataDir, "audit"), "not a directory");
+  await assert.rejects(() => handlePostToolUse(input, config), /EEXIST|ENOTDIR/);
+  await rm(path.join(config.dataDir, "audit"));
+  await patchSession(config, { countedPlanId: "later-plan" });
+  await handlePostToolUse(input, config);
+  assert.equal((await walRows(config))[0].plan_id, PLAN_ID);
+  const { auditRowId } = await import("../plugins/armorcodex/scripts/lib/audit-wal.mjs");
+  await writeFile(path.join(config.dataDir, "tool-starts-v1", auditRowId(SESSION, input.tool_use_id, "result")), "{broken");
+  await handlePostToolUse({ ...input, tool_use_id: input.tool_use_id, tool_response: {} }, config);
+});
+
+// regression: #0010
+test("released tool start times are read without changing the released file", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  const config = await setup();
+  t.after(() => rm(config.dataDir, { recursive: true, force: true }));
+  const old = path.join(config.dataDir, "tool-starts", "legacy-call");
+  await mkdir(path.dirname(old));
+  const started = String(Date.now());
+  await writeFile(old, started);
+  t.mock.timers.tick(150);
+  await handlePostToolUse({ session_id: SESSION, tool_use_id: "legacy-call", tool_name: "Bash", tool_input: {} }, config);
+  assert.equal((await walRows(config))[0].duration_ms, 150);
+  assert.equal(await readFile(old, "utf8"), started);
+});
+
 for (const scenario of [
   { name: "invalid JSON", raw: "{invalid", code: "invalid_payload" },
   { name: "empty input", raw: "", code: "invalid_payload" },
   { name: "non object input", raw: "null", code: "invalid_payload" },
   { name: "internal error", internal: true, code: "internal_error" },
-  { name: "PermissionRequest internal error", internal: true, event: "PermissionRequest", code: "internal_error" },
+  { name: "PermissionRequest internal error", internal: true, event: "PermissionRequest", noRow: true, code: "internal_error" },
+  { name: "PostToolUse internal error", internal: true, event: "PostToolUse", noRow: true },
+  { name: "PostToolUseFailure internal error", internal: true, event: "PostToolUseFailure", noRow: true },
+  { name: "Stop internal error", internal: true, event: "Stop", noRow: true },
+  { name: "UserPromptSubmit internal error", internal: true, event: "UserPromptSubmit", noRow: true },
   { name: "unknown login", unknownLogin: true, code: "internal_error" },
-  { name: "PermissionRequest unknown login", unknownLogin: true, event: "PermissionRequest", code: "internal_error" },
+  { name: "PermissionRequest unknown login", unknownLogin: true, event: "PermissionRequest", noRow: true, code: "internal_error" },
   { name: "logged out", raw: "{invalid", loggedOut: true, code: "invalid_payload" }
 ]) {
-  test(`router ${scenario.name} captures a sanitized fallback or a local capture failure`, async (t) => {
+  // regression: #0010
+  test(`router ${scenario.name} captures only a stopped PreToolUse`, async (t) => {
     const home = await mkdtemp(path.join(os.tmpdir(), "armorcodex-fallback-"));
     t.after(() => rm(home, { recursive: true, force: true }));
     const backend = "https://fallback.test";
@@ -260,13 +305,15 @@ for (const scenario of [
       env: { PATH: process.env.PATH, HOME: home, ARMORCODEX_DATA_DIR: dataDir, BACKEND_ENDPOINT: backend, IAP_ENDPOINT: backend, PROXY_ENDPOINT: backend, ARMORCODEX_OBSERVABILITY_DISABLED: "true", ARMORIQ_ORG_MODE: "enforce", ARMORCODEX_USAGE_SYNC_DISABLED: "true", ...(scenario.unknownLogin ? { ARMORIQ_ENV: "invalid" } : {}) }
     });
     assert.equal(result.status, 0, result.stderr);
-    const decision = JSON.parse(result.stdout);
-    assert.equal(scenario.event === "PermissionRequest" ? decision.hookSpecificOutput.decision.behavior : decision.hookSpecificOutput.permissionDecision, "deny");
+    const decision = result.stdout.trim() ? JSON.parse(result.stdout) : null;
+    if (!["PostToolUse", "PostToolUseFailure", "Stop", "UserPromptSubmit"].includes(scenario.event)) {
+      assert.equal(scenario.event === "PermissionRequest" ? decision.hookSpecificOutput.decision.behavior : decision.hookSpecificOutput.permissionDecision, "deny");
+    } else assert.equal(decision, null);
     const rows = await walRows({ dataDir });
-    if (scenario.loggedOut || scenario.unknownLogin) {
+    if (scenario.loggedOut || scenario.unknownLogin || scenario.noRow) {
       assert.deepEqual(rows, []);
-      if (scenario.unknownLogin) {
-        const failures = (await readFile(path.join(dataDir, "audit", "capture-failures.jsonl"), "utf8")).trim().split("\n").map(JSON.parse);
+      if (scenario.unknownLogin && !scenario.noRow) {
+        const failures = (await readFile(path.join(dataDir, "audit", "outbox-v1", "capture-failures.jsonl"), "utf8")).trim().split("\n").map(JSON.parse);
         assert.equal(failures.length, 1);
         assert.equal(failures[0].code, scenario.code);
         assert.equal(failures[0].session_id, SESSION);
@@ -321,4 +368,52 @@ test("a PermissionRequest the policy allows writes no row", async () => {
   );
   assert.equal(decision, null);
   assert.deepEqual(await walRows(config), []);
+});
+
+// regression: #0010
+test("a PermissionRequest without a tool keeps the released allow decision", async (t) => {
+  const config = await setup();
+  t.after(() => rm(config.dataDir, { recursive: true, force: true }));
+  assert.equal(await handlePermissionRequest({ session_id: SESSION }, config), null);
+  assert.deepEqual(await walRows(config), []);
+});
+
+// regression: #0010
+test("monitor mode preserves a policy deny when its audit capture fails", async (t) => {
+  const config = await setup({ mode: "monitor", rules: [{ id: "no-bash", action: "deny", tool: "Bash" }] });
+  t.after(() => rm(config.dataDir, { recursive: true, force: true }));
+  await writeFile(path.join(config.dataDir, "audit"), "not a directory");
+  const decision = await preToolUse(config, "Bash");
+  assert.equal(decision.hookSpecificOutput.permissionDecision, "deny");
+});
+
+// regression: #0010
+test("a marketplace copy runs bootstrap router without tests and captures a normal deny", async (t) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "armorcodex-packaged-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const source = new URL("../plugins/armorcodex/", import.meta.url).pathname;
+  const plugin = path.join(home, "plugin");
+  await cp(source, plugin, { recursive: true, filter: (file) => !["tests", "node_modules", ".git"].includes(path.basename(file)) && !/\.(test|spec)\.(mjs|js)$/.test(file) });
+  await mkdir(path.join(plugin, "node_modules"));
+  for (const name of ["@armoriq", "@modelcontextprotocol", "zod"]) {
+    await symlink(path.join(source, "node_modules", name), path.join(plugin, "node_modules", name));
+  }
+  const { version } = JSON.parse(await readFile(path.join(plugin, "package.json"), "utf8"));
+  await writeFile(path.join(plugin, "node_modules", ".armorcodex-installed"), version);
+  const backend = "https://packaging.invalid";
+  const dataDir = path.join(home, "data");
+  signIn(home, { backend, apiKey: "ak_test_packaging" });
+  await mkdir(dataDir);
+  await writeFile(path.join(dataDir, "policy.json"), JSON.stringify({ version: 1, policy: { rules: [{ id: "no-shell", action: "deny", tool: "Bash" }] }, history: [] }));
+  await recordBackendOutcome({ dataDir, backendEndpoint: backend, apiKey: "ak_test_packaging" }, "ok");
+  const result = spawnSync(process.execPath, [path.join(plugin, "scripts", "bootstrap.mjs"), "router"], {
+    encoding: "utf8",
+    input: JSON.stringify({ hook_event_name: "PreToolUse", session_id: SESSION, tool_use_id: "packaged-call", tool_name: "Bash", tool_input: {} }),
+    env: { PATH: process.env.PATH, HOME: home, ARMORCODEX_DATA_DIR: dataDir, BACKEND_ENDPOINT: backend, IAP_ENDPOINT: backend, PROXY_ENDPOINT: backend, ARMORCODEX_OBSERVABILITY_DISABLED: "true", ARMORIQ_ORG_MODE: "enforce", ARMORCODEX_USAGE_SYNC_DISABLED: "true" }
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const decision = JSON.parse(result.stdout).hookSpecificOutput;
+  assert.equal(decision.permissionDecision, "deny");
+  assert.doesNotMatch(decision.permissionDecisionReason, /internal error|ENOENT/);
+  assert.equal((await walRows({ dataDir }))[0]?.decision_code, "policy_deny");
 });

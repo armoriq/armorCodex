@@ -8,9 +8,10 @@ import path from "node:path";
 import { handlePostToolUse, handlePostToolUseFailure, handlePreToolUse } from "../plugins/armorcodex/scripts/lib/engine.mjs";
 import { createAuditWal } from "../plugins/armorcodex/scripts/lib/audit-wal.mjs";
 import { recordBackendOutcome } from "../plugins/armorcodex/scripts/lib/backend-posture.mjs";
+import { auditRows } from "./helpers/audit-rows.mjs";
 
 const { sizeLimits } = JSON.parse(await readFile(new URL("../plugins/armorcodex/tests/fixtures/block-capture-v1.json", import.meta.url), "utf8"));
-const WAL_LINE_CAP = sizeLimits.maxRowBytes;
+const WAL_LINE_CAP = 4000;
 const PLAN_ID = randomUUID();
 const SESSION = "sess-audit";
 const PLAN = { steps: [{ action: "Bash" }, { action: "Read" }], metadata: { goal: "inspect" } };
@@ -58,13 +59,7 @@ async function setup() {
 }
 
 async function walRows(config) {
-  try {
-    const raw = await readFile(path.join(config.dataDir, "audit", "current.jsonl"), "utf8");
-    return raw.split("\n").filter(Boolean).map((line) => JSON.parse(line));
-  } catch (error) {
-    if (error.code === "ENOENT") return [];
-    throw error;
-  }
+  return auditRows(config.dataDir);
 }
 
 const post = (config, extra) =>
@@ -115,14 +110,23 @@ test("audit rows reference the plan by id and carry no token, so a 16 KB token s
   }
 });
 
-test("an oversized tool output is cut to fit and marked truncated", async () => {
+// regression: #0010
+test("an oversized tool output is cut to the released content limit and marked truncated", async () => {
   const config = await setup();
-  config.sanitize.maxChars = 20_000;
-  const big = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`k${i}`, "x".repeat(15_000)]));
+  const big = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`k${i}`, "x".repeat(1500)]));
   await post(config, { tool_response: big });
   const [row] = await walRows(config);
   assert.ok(row, "expected one audit row");
   assert.deepEqual(row.output, sizeLimits.truncationMarker);
+  assert.ok(Buffer.byteLength(JSON.stringify(row)) <= WAL_LINE_CAP);
+});
+
+// regression: #0010
+test("long tool errors use a marker within the released content limit", async () => {
+  const config = await setup();
+  await handlePostToolUseFailure({ session_id: SESSION, tool_name: "Bash", tool_input: {}, error: "x".repeat(60_000) }, config);
+  const [row] = await walRows(config);
+  assert.equal(row.error_message, JSON.stringify(sizeLimits.truncationMarker));
   assert.ok(Buffer.byteLength(JSON.stringify(row)) <= WAL_LINE_CAP);
 });
 

@@ -5,17 +5,27 @@ import {
   postJson,
   readString
 } from "./common.mjs";
-import { createAuditWal } from "./audit-wal.mjs";
+import { auditLogin, createAuditWal } from "./audit-wal.mjs";
+import { CAPTURE_ROW_BYTES } from "./audit-contract.mjs";
+import { recordBackendOutcome } from "./backend-posture.mjs";
 import { requireEndpoint } from "./config.mjs";
 
 function getAuditWal(config) {
-  return createAuditWal({ dataDir: config.dataDir, config });
+  return createAuditWal({ dataDir: config.dataDir, config, contentLimitBytes: CAPTURE_ROW_BYTES });
 }
 
 export function createIapService(config) {
   const backendEndpoint = config.backendEndpoint || config.verifyStepEndpoint?.replace(/\/iap\/verify-step$/, "") || "";
   const timeoutMs = config.timeoutMs || 8000;
   const headers = buildAuthHeaders(config);
+  const authenticated = async (response, endpoint = backendEndpoint) => {
+    const backend = backendEndpoint.replace(/\/+$/, "");
+    if (response.ok && config.dataDir && config.apiKey && backend &&
+      (endpoint === backend || endpoint.startsWith(backend + "/"))) {
+      await getAuditWal(config).authenticationSucceeded(auditLogin(config));
+      await recordBackendOutcome(config, "ok");
+    }
+  };
 
   return {
     async verifyStep(intentTokenRaw, csrgProofs, toolName) {
@@ -51,6 +61,7 @@ export function createIapService(config) {
       }
 
       const response = await postJson(endpoint, payload, headers, timeoutMs);
+      await authenticated(response, endpoint);
       if (!response.ok && !isPlainObject(response.data)) {
         throw new Error(
           response.text || `IAP verify-step failed with status ${response.status}`
@@ -138,6 +149,7 @@ export function createIapService(config) {
         throw new Error(message);
       }
 
+      await authenticated(response);
       return response.data;
     },
 
@@ -157,6 +169,7 @@ export function createIapService(config) {
         headers,
         timeoutMs
       );
+      await authenticated(response);
       return { status: response.status, body: response.data, headers: response.headers };
     },
 

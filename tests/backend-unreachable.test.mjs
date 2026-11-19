@@ -8,6 +8,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { signIn } from "./helpers/login.mjs";
 import { toolCapability } from "../plugins/armorcodex/scripts/lib/backend-posture.mjs";
+import { auditRows } from "./helpers/audit-rows.mjs";
 
 const HOOK_ROUTER = fileURLToPath(new URL("../plugins/armorcodex/scripts/hook-router.mjs", import.meta.url));
 const SERVER = fileURLToPath(new URL("../plugins/armorcodex/scripts/policy-mcp.mjs", import.meta.url));
@@ -74,9 +75,7 @@ async function hook(env, payload) {
 const preTool = (env, tool_name, tool_input = {}) => hook(env, { hook_event_name: "PreToolUse", tool_name, tool_input });
 
 function walRows(dataDir) {
-  const file = path.join(dataDir, "audit", "current.jsonl");
-  if (!fs.existsSync(file)) return [];
-  return fs.readFileSync(file, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  return auditRows(dataDir);
 }
 
 const posture = (dataDir) => JSON.parse(fs.readFileSync(path.join(dataDir, "backend-posture.json"), "utf8"));
