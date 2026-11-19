@@ -36,6 +36,7 @@ function debugLog(config, message) {
 
 async function main() {
   let config = loadConfig();
+  config.readCurrentAuth = () => loadConfig();
   await ensurePrivateDir(config.dataDir);
   const rawInput = await readStdin();
   if (!rawInput.trim()) {

@@ -4,7 +4,7 @@ import { unlink } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import { loadSettings, withLogin } from "./lib/config.mjs";
-import { ensurePrivateDir, writeJson } from "./lib/fs-store.mjs";
+import { ensurePrivateDir, readJson, writeJson } from "./lib/fs-store.mjs";
 import { extractAllowedActions, requestIntent } from "./lib/intent.mjs";
 import { INTENT_PLAN_ZOD, PLAN_STEP_SCHEMA, normalizeIntentPlan } from "./lib/intent-schema.mjs";
 import {
@@ -17,12 +17,12 @@ import {
 } from "./lib/policy.mjs";
 import { handleArmorPolicyCommand, stageAndFormat } from "./lib/armor-policy-commands.mjs";
 import { createAuditFlusher } from "./lib/audit-flusher.mjs";
+import { createPlanRefresher } from "./lib/plan-refresh.mjs";
 import { createAuditWal } from "./lib/audit-wal.mjs";
 import { createIapService } from "./lib/iap-service.mjs";
+import { getSession, isPromptOpen, matchesSessionGeneration, retireSessionPlan, syncSessionAuth, withRuntimeState } from "./lib/runtime-state.mjs";
+import { createPlanRequest, planHash, requestWithRetry, withPlanRequest } from "./lib/plan-request.mjs";
 import {
-  BACKEND_UNREACHABLE,
-  STATUS_COMMAND,
-  backendPosture,
   cachedPosture,
   classifyStatus,
   recordBackendOutcome
@@ -113,7 +113,6 @@ function codexSessionId(extra) {
   return typeof id === "string" && /^[A-Za-z0-9_-]+$/.test(id) ? id : "";
 }
 
-const INTENT_DEADLINE_MS = 30_000;
 const registrations = new Map();
 
 function serializeRegistration(sessionId, task) {
@@ -122,43 +121,107 @@ function serializeRegistration(sessionId, task) {
   return run;
 }
 
-function withDeadline(promise, ms) {
-  let timer;
-  const deadline = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`no token within ${ms / 1000} s`)), ms);
-  });
-  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+function registeredResult(session) {
+  return toTextResult(
+    `Intent registered: plan ${session.countedPlanId} (${session.kind}), ${session.plan.steps.length} steps. Token valid until ${session.tokenExpiresAt}.`,
+    { planId: session.countedPlanId, kind: session.kind, steps: session.plan.steps.length, expiresAt: session.tokenExpiresAt }
+  );
 }
 
-function storeLocalPlan(pendingPath, plan) {
-  return writeJson(pendingPath, {
-    plan,
-    tokenRaw: "",
-    allowedActions: Array.from(extractAllowedActions(plan)),
-    registeredAt: Date.now()
-  });
+function registrationFailure(error, config) {
+  const reason = (error instanceof Error ? error.message : String(error)).split(config.apiKey || "\0").join("[redacted]").replace(/[.\s]+$/, "");
+  const reply = toTextResult(error.unconfirmed
+    ? `Plan registration not confirmed: ${reason}. Register the same plan again to retry it with the same request id, or start a new prompt.`
+    : `Plan not registered: ${reason}.`);
+  return { ...reply, isError: true };
 }
 
-async function issueAndStore(config, pendingPath, request) {
-  const startedAt = Date.now();
-  await writeJson(pendingPath, { status: "issuing", startedAt, deadlineAt: startedAt + INTENT_DEADLINE_MS });
+async function registerPlan(currentConfig, sessionId, expected, plan, goal, deadlineAt) {
+  let config = currentConfig();
+  const pendingPath = path.join(config.dataDir, `pending-plan.${sessionId}.json`);
+  const update = (change) => withRuntimeState(config.runtimeFile, async (state) => {
+    if (!matchesSessionGeneration(getSession(state, sessionId), expected)) throw new Error("the prompt or login changed while the plan was registering");
+    const session = syncSessionAuth(state, sessionId, currentConfig(), { retireOnChange: false });
+    if (!matchesSessionGeneration(session, expected)) throw new Error("the prompt or login changed while the plan was registering");
+    return change(session);
+  });
+  let descriptor;
   try {
-    const result = await withDeadline(requestIntent(config, request), INTENT_DEADLINE_MS);
-    if (!result?.tokenRaw) {
-      throw new Error("the backend returned no token");
-    }
-    const plan = result.plan || request.plan;
-    await writeJson(pendingPath, {
-      plan,
-      tokenRaw: result.tokenRaw,
-      allowedActions: Array.from(extractAllowedActions(plan)),
-      expiresAt: result.expiresAt,
-      planCheck: result.planCheck ?? null,
-      registeredAt: Date.now()
+    const prepared = await update(async (session) => {
+      config = { ...config, mode: session.mode ?? config.mode };
+      if (session.backendEndpoint && session.backendEndpoint !== config.backendEndpoint) {
+        throw new Error("the MCP backend differs from the hook backend; restart Codex with matching settings");
+      }
+      const posture = await cachedPosture(config);
+      const reason = !config.apiKey || posture?.state === "signed_out" ? "logged_out"
+        : config.mode === "monitor" ? "monitor_mode"
+        : !config.useSdkIntent && !config.intentEndpoint ? "no_transport" : null;
+      if (reason) {
+        if (session.countedPlanId || session.pendingRequest) retireSessionPlan(session);
+        Object.assign(session, {
+          unregisteredLocalPlan: { reason, plan, recordedAt: Date.now() }, pendingRequest: null,
+          countedPlanId: null, tokenPlanId: null, tokenExpiresAt: null, kind: null, planHash: null,
+          intentTokenRaw: "", plan, allowedActions: Array.from(extractAllowedActions(plan)),
+          expiresAt: null, planCheck: null, intentExecution: null
+        });
+        await unlink(pendingPath).catch((error) => { if (error.code !== "ENOENT") throw error; });
+        return { reply: toTextResult(`Plan recorded locally, not registered (${reason}).`) };
+      }
+      if (posture?.state === "unreachable") throw new Error("backend_unreachable; the cached backend check failed, try again after it recovers");
+      if (!session.promptId) throw new Error("no current prompt id; submit a prompt before registering a plan");
+      const hash = planHash(plan);
+      if (!session.pendingRequest && session.countedPlanId && session.planHash === hash && session.intentTokenRaw && Date.parse(session.tokenExpiresAt) > Date.now()) {
+        return { reply: registeredResult(session) };
+      }
+      if (session.pendingRequest) {
+        if (session.pendingRequest.planHash !== hash) throw new Error("Register the same plan again to retry it, or start a new prompt");
+        return { descriptor: structuredClone(session.pendingRequest) };
+      }
+      const policyState = await loadPolicyState(config.policyFile);
+      session.pendingRequest = createPlanRequest(config, {
+        prompt: goal, plan, session_id: sessionId, policy_hash: computePolicyHash(policyState.document),
+        policy: policyState.policy, validitySeconds: config.validitySeconds,
+        metadata: { source: "codex", planning: "codex-registered" }
+      }, session);
+      return { descriptor: structuredClone(session.pendingRequest) };
     });
-  } catch (err) {
-    await unlink(pendingPath).catch(() => {});
-    throw err;
+    if (prepared.reply) return prepared.reply;
+    descriptor = prepared.descriptor;
+    await update(async () => writeJson(pendingPath, { ...expected, status: "issuing", startedAt: Date.now(), deadlineAt }));
+    const result = await requestWithRetry(async (timeoutMs) => {
+      await update((session) => {
+        if (descriptor.kind === "refresh" && !isPromptOpen(session)) throw new Error("the prompt closed while refreshing");
+      });
+      return requestIntent(config, { plan }, descriptor, { timeoutMs });
+    }, { timeoutMs: config.timeoutMs, deadlineAt });
+    if (!result?.tokenRaw || !result.planId || !Number.isFinite(result.expiresAt)) {
+      throw new Error("the backend returned no token, plan id or expiry");
+    }
+    return await update(async (session) => {
+      if (session.pendingRequest?.key !== descriptor.key) throw new Error("the pending plan changed while the plan was registering");
+      if (descriptor.kind === "refresh" && !isPromptOpen(session)) throw new Error("the prompt closed while refreshing");
+      const installed = {
+        plan: descriptor.body.plan, tokenRaw: result.tokenRaw,
+        allowedActions: Array.from(extractAllowedActions(descriptor.body.plan)),
+        expiresAt: result.expiresAt, tokenExpiresAt: new Date(result.expiresAt * 1000).toISOString(),
+        countedPlanId: descriptor.kind === "refresh" ? session.countedPlanId : result.planId,
+        tokenPlanId: result.planId, kind: descriptor.kind === "refresh" ? session.kind : result.kind ?? descriptor.kind,
+        planHash: descriptor.planHash, planCheck: result.planCheck ?? null, registeredAt: Date.now()
+      };
+      await writeJson(pendingPath, { ...expected, ...installed });
+      Object.assign(session, installed, { intentTokenRaw: result.tokenRaw, pendingRequest: null, unregisteredLocalPlan: null, intentExecution: null, refreshFailures: 0, refreshRetryAt: null });
+      return registeredResult(session);
+    });
+  } catch (error) {
+    if (descriptor) {
+      await update(async (session) => {
+        if (session.pendingRequest?.key !== descriptor.key) return;
+        if (!error.unconfirmed) session.pendingRequest = null;
+        const pending = await readJson(pendingPath, null);
+        if (matchesSessionGeneration(session, pending)) await unlink(pendingPath);
+      }).catch(() => {});
+    }
+    return registrationFailure(error, config);
   }
 }
 
@@ -185,6 +248,7 @@ async function shipQueuedAudit(config) {
 }
 
 async function run() {
+  let stopping;
   const settings = loadSettings();
   const currentConfig = () => withLogin(settings);
   const loadStateAndConfig = async () => {
@@ -321,8 +385,8 @@ async function run() {
       title: "Register Intent Plan",
       description:
         "Declare the tools you intend to use for this task. " +
-        "Required by ArmorCodex before any other tool call. " +
-        "Without a registered plan, all tool calls will be blocked.",
+        "Register before the first tool that needs a plan in this prompt. " +
+        "Chat only prompts need no plan.",
       inputSchema: {
         goal: z.string().min(1).optional()
           .describe("One-line summary of what the plan accomplishes"),
@@ -342,66 +406,31 @@ async function run() {
       }
     },
     async (args, extra) => {
+      if (stopping) return { ...toTextResult("Plan not registered: ArmorCodex is shutting down."), isError: true };
       const coerced = coercePlanArgs(args);
       const parsed = INTENT_PLAN_ZOD.safeParse(coerced);
       if (!parsed.success) {
-        return toTextResult(`Plan rejected: ${parsed.error.message}`);
+        return { ...toTextResult(`Plan not registered: ${parsed.error.message}.`), isError: true };
       }
       const sessionId = codexSessionId(extra);
       if (!sessionId) {
-        return toTextResult(
-          "Plan rejected: this Codex version sends no session id with MCP calls. Update Codex to 0.162 or later."
-        );
+        return { ...toTextResult("Plan not registered: this Codex version sends no session id with MCP calls. Update Codex to 0.162 or later."), isError: true };
       }
 
       const config = currentConfig();
       const plan = normalizeIntentPlan(parsed.data);
-      const pendingPath = path.join(config.dataDir, `pending-plan.${sessionId}.json`);
-      const summary = { steps: plan.steps.length, goal: parsed.data.goal };
-
-      if (!config.intentEndpoint && !(config.useSdkIntent && config.apiKey)) {
-        await storeLocalPlan(pendingPath, plan);
-        return toTextResult(
-          `Intent registered: ${plan.steps.length} steps. Plan stored locally (no ArmorIQ backend configured).`,
-          summary
-        );
-      }
-
-      const posture = await backendPosture(config);
-      if (posture === "unreachable") {
-        return toTextResult(
-          `Plan rejected (${BACKEND_UNREACHABLE}): the ArmorIQ backend did not answer, so no token was issued. ` +
-            `Run ${STATUS_COMMAND} for details.`
-        );
-      }
-      if (posture === "signed_out") {
-        await storeLocalPlan(pendingPath, plan);
-        return toTextResult(
-          `Intent registered: ${plan.steps.length} steps. Plan stored locally (the ArmorIQ backend rejected the stored key, local only mode).`,
-          summary
-        );
-      }
-
-      try {
-        await serializeRegistration(sessionId, async () => {
-          const policyState = await loadPolicyState(config.policyFile);
-          await issueAndStore(config, pendingPath, {
-            prompt: parsed.data.goal,
-            plan,
-            session_id: sessionId,
-            policy_hash: computePolicyHash(policyState.document),
-            policy: policyState.policy,
-            validitySeconds: config.validitySeconds,
-            metadata: { source: "codex", planning: "codex-registered" }
-          });
-        });
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return toTextResult(
-          `Plan rejected: the ArmorIQ token request failed (${msg}). Nothing was stored; register the plan again.`
-        );
-      }
-      return toTextResult(`Intent registered: ${plan.steps.length} steps. ArmorIQ token issued.`, summary);
+      const expected = withRuntimeState(config.runtimeFile, (state) => {
+        const previous = getSession(state, sessionId);
+        if (previous?.backendEndpoint && previous.backendEndpoint !== config.backendEndpoint) {
+          throw new Error("the MCP backend differs from the hook backend; restart Codex with matching settings");
+        }
+        const session = syncSessionAuth(state, sessionId, config);
+        return { promptId: session.promptId, promptGeneration: session.promptGeneration, authGeneration: session.authGeneration };
+      });
+      expected.catch(() => {});
+      return serializeRegistration(sessionId, async () => withPlanRequest(config.runtimeFile, sessionId,
+        async (deadlineAt) => registerPlan(currentConfig, sessionId, await expected, plan, parsed.data.goal, deadlineAt))
+        .catch((error) => registrationFailure(error, currentConfig())));
     }
   );
 
@@ -412,10 +441,23 @@ async function run() {
     },
     intervalMs: 5000
   });
+  const refresher = createPlanRefresher({
+    currentConfig,
+    onError: (error) => {
+      const config = currentConfig();
+      const reason = String(error instanceof Error ? error.message : error).split(config.apiKey || "\0").join("[redacted]");
+      process.stderr.write(`[armorcodex-policy] refresh: ${reason}\n`);
+    }
+  });
 
-  let stopping;
   const shutdown = () => {
-    stopping ??= flusher.stop().then(() => process.exit(0));
+    stopping ??= Promise.allSettled([
+      flusher.stop(), refresher.stop(), ...registrations.values()
+    ]).then(async () => {
+      await new Promise(setImmediate);
+      await server.close();
+      process.exit(0);
+    });
   };
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);

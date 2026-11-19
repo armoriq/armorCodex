@@ -12,6 +12,7 @@ import {
   validateCsrgProofHeaders
 } from "./intent.mjs";
 import { createIapService } from "./iap-service.mjs";
+import { refreshSession } from "./plan-refresh.mjs";
 import {
   applyPolicyCommand,
   computePolicyHash,
@@ -50,16 +51,35 @@ import {
 } from "./policy-gate.mjs";
 import path from "node:path";
 import {
+  beginPrompt,
   getSession,
+  isPromptOpen,
   loadRuntimeState,
-  saveRuntimeState,
+  matchesSessionGeneration,
+  retireSessionPlan,
+  syncSessionAuth,
   upsertDiscoveredTool,
-  upsertSession
+  withRuntimeState
 } from "./runtime-state.mjs";
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+async function recordHookActivity(input, config, update = () => {}) {
+  const sessionId = typeof input.session_id === "string" ? input.session_id : "";
+  if (!sessionId) return null;
+  return withRuntimeState(config.runtimeFile, (state) => {
+    const session = syncSessionAuth(state, sessionId, config);
+    if ((session.mode && session.mode !== config.mode) ||
+        (session.backendEndpoint && session.backendEndpoint !== config.backendEndpoint)) {
+      retireSessionPlan(session);
+      session.authGeneration += 1;
+    }
+    session.mode = config.mode;
+    session.backendEndpoint = config.backendEndpoint;
+    if (session.promptOpenSince !== null && !isPromptOpen(session)) session.promptOpenSince = null;
+    session.lastActivityAt = Date.now() / 1000;
+    update(session);
+    return structuredClone(session);
+  });
+}
 
 function shouldDeny(config) {
   return config.mode === "enforce";
@@ -198,6 +218,7 @@ function mergeIntentIntoSession(session, intentResponse) {
 }
 
 function readIntentTokenRaw(input, session) {
+  if (session.promptGeneration > 0 || session.authGeneration > 0) return session.intentTokenRaw || "";
   const candidates = [
     input.intentTokenRaw,
     input.intent_token_raw,
@@ -334,12 +355,10 @@ export async function handleSessionStart(input, config, updateOptions = {}) {
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   if (!sessionId) return null;
 
-  const runtimeState = await loadRuntimeState(config.runtimeFile);
-  upsertSession(runtimeState, sessionId, {
-    startedAt: nowEpochSeconds(),
-    discoveredTools: []
+  await recordHookActivity(input, config, (session) => {
+    session.startedAt = nowEpochSeconds();
+    session.discoveredTools = [];
   });
-  await saveRuntimeState(config.runtimeFile, runtimeState);
 
   debugLog(config, `session started: ${sessionId}, mode=${config.mode}`);
 
@@ -361,23 +380,18 @@ export async function handleSessionStart(input, config, updateOptions = {}) {
   );
 }
 
-// ---------------------------------------------------------------------------
-// UserPromptSubmit
-// ---------------------------------------------------------------------------
-
 export async function handleUserPromptSubmit(input, config) {
   const prompt = typeof input.prompt === "string" ? input.prompt : "";
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   if (!prompt || !sessionId) {
     return null;
   }
-
+  if (input.parent_session_id || input.is_subagent) return null;
   if (isStatusCommand(prompt)) {
     const { rows } = await createAuditWal({ dataDir: config.dataDir }).readBatch(Number.MAX_SAFE_INTEGER);
     return blockPrompt(await formatArmorStatus(config, { queuedRows: rows.length }));
   }
 
-  // --- Structured /armor policy commands (staged proposal -> confirm) ---
   if (isArmorPolicyCommand(prompt)) {
     const allowed = isPolicyUpdateAllowed(config, input);
     if (!allowed.allowed) {
@@ -390,7 +404,6 @@ export async function handleUserPromptSubmit(input, config) {
     }
   }
 
-  // --- Natural-language `Policy ...` commands (immediate; back-compat) ---
   if (policyCommandLooksLikePrompt(prompt)) {
     const allowed = isPolicyUpdateAllowed(config, input);
     if (!allowed.allowed) {
@@ -408,23 +421,18 @@ export async function handleUserPromptSubmit(input, config) {
     return blockPrompt(result.message);
   }
 
-  // --- Store prompt in session ---
-  const runtimeState = await loadRuntimeState(config.runtimeFile);
-  upsertSession(runtimeState, sessionId, {
-    lastPrompt: prompt,
-    lastPromptAt: nowEpochSeconds()
+  await recordHookActivity(input, config, (session) => {
+    beginPrompt(session, prompt);
+    session.lastPrompt = prompt;
+    session.lastPromptAt = nowEpochSeconds();
   });
-  await saveRuntimeState(config.runtimeFile, runtimeState);
 
-  // --- Inject directive: tell Codex to register its intent plan ---
-  // Codex will call the `register_intent_plan` MCP tool as its first action.
-  // The MCP tool's inputSchema already describes the JSON shape, so we don't
-  // duplicate it here — keeps the visible prompt context short.
   const parts = [];
   if (config.planningEnabled) {
     parts.push(
-      "ArmorCodex active. Before using any tool, call `register_intent_plan` once, " +
-        "listing every tool you expect to use as a step (register them all up front). " +
+      "ArmorCodex active. For this prompt, call `register_intent_plan` before the first tool that needs a plan, " +
+        "so chat only prompts need no plan. " +
+        "List every tool you expect to use as a step (register them all up front). " +
         "For each step set `action` to the canonical tool name: use `Bash` for shell / " +
         "command execution (not `exec_command`), `apply_patch` for file edits, and the " +
         "exact MCP tool name for MCP calls. Set `metadata.inputs` to `{}` to match by " +
@@ -440,33 +448,33 @@ export async function handleUserPromptSubmit(input, config) {
   return null;
 }
 
-// ---------------------------------------------------------------------------
-// PreToolUse
-// ---------------------------------------------------------------------------
-
-async function readIssuedPlan(pendingPath) {
+async function readIssuedPlan(pendingPath, config, sessionId, expected) {
   for (;;) {
     const pending = await readJson(pendingPath, null);
+    const session = getSession(await loadRuntimeState(config.runtimeFile), sessionId);
+    if (!matchesSessionGeneration(session, expected) || !pendingMatchesSession(pending, session)) return null;
     if (pending?.status !== "issuing" || !(Date.now() < pending.deadlineAt)) return pending;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
 }
 
+function pendingMatchesSession(pending, session) {
+  if (!pending || !session) return false;
+  if (pending.promptGeneration === undefined && pending.authGeneration === undefined) {
+    return session.promptGeneration === 0 && session.authGeneration === 0;
+  }
+  return matchesSessionGeneration(session, pending);
+}
+
 export async function handlePreToolUse(input, config) {
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
+  const expected = await recordHookActivity(input, config);
   const toolName = typeof input.tool_name === "string" ? input.tool_name : "";
   const toolInput = sanitizeParams(input.tool_input, config.sanitize);
   if (!toolName) {
-    // Missing tool_name on a PreToolUse event means the payload shape is
-    // unexpected. Fail-closed in enforce mode instead of silently allowing.
     return denyOrAllow(input, config, "ArmorCodex: missing tool_name on PreToolUse");
   }
 
-  // --- Whitelist: ArmorCodex's own MCP tools must never be blocked,
-  //     otherwise the agent can't register a plan or read/update policy.
-  //     Match the exact MCP prefix from .mcp.json (armorcodex-policy),
-  //     not any suffix — an evil server called evil__policy_update would
-  //     previously have been whitelisted. ---
   const norm = normalizeToolName(toolName);
   const armorTools = ["register_intent_plan", "policy_read", "policy_update", "policy_command"];
   // Codex MCP namespace is `mcp__<server>__` and the underlying MCP server name
@@ -505,10 +513,6 @@ export async function handlePreToolUse(input, config) {
     }
   }
 
-  // --- Whitelist: Codex introspection / coordination tools that have
-  //     no side effects on user files or systems. Blocking these makes the
-  //     agent fight itself (e.g. ToolSearch is needed to fetch deferred MCP
-  //     tool schemas before they can be called). ---
   const safeInternalTools = new Set([
     "toolsearch",
     "todowrite",
@@ -525,17 +529,10 @@ export async function handlePreToolUse(input, config) {
     return null;
   }
 
-  // --- Consume pending plan from register_intent_plan MCP tool ---
-  // Always consume if a pending file exists — the MCP handler only writes
-  // it when Codex has registered a NEW plan, and stale plans must be
-  // overwritten so each prompt gets its own plan boundary.
-  // This load is reused for the rest of the PreToolUse handler instead of
-  // reloading from disk below (fewer disk reads on the hot path).
-  const runtimeState = await loadRuntimeState(config.runtimeFile);
   const pendingPath = sessionId
     ? path.join(config.dataDir, `pending-plan.${sessionId}.json`)
     : null;
-  const pending = pendingPath ? await readIssuedPlan(pendingPath) : null;
+  const pending = pendingPath ? await readIssuedPlan(pendingPath, config, sessionId, expected) : null;
   if (pending?.status === "issuing") {
     const deny = await denyOrAllow(
       input,
@@ -546,20 +543,40 @@ export async function handlePreToolUse(input, config) {
       return deny;
     }
   }
-  if (pending && (pending.tokenRaw || pending.plan)) {
-    upsertSession(runtimeState, sessionId, {
-      intentTokenRaw: pending.tokenRaw || "",
-      plan: pending.plan,
-      allowedActions: Array.isArray(pending.allowedActions) ? pending.allowedActions : [],
-      expiresAt: pending.expiresAt,
-      planCheck: pending.planCheck,
-      // Reset per-token execution tracking when a new plan replaces the old.
-      intentExecution: undefined
-    });
-    await saveRuntimeState(config.runtimeFile, runtimeState);
-    await unlink(pendingPath).catch(() => {});
-    debugLog(config, "consumed pending plan from register_intent_plan");
+  let session = await withRuntimeState(config.runtimeFile, async (state) => {
+    const current = getSession(state, sessionId);
+    if (sessionId && !matchesSessionGeneration(current, expected)) return null;
+    const issued = pendingPath ? await readJson(pendingPath, null) : null;
+    if (pendingMatchesSession(issued, current) && (issued.tokenRaw || issued.plan)) {
+      Object.assign(current, {
+        intentTokenRaw: issued.tokenRaw || "",
+        plan: issued.plan,
+        allowedActions: Array.isArray(issued.allowedActions) ? issued.allowedActions : [],
+        expiresAt: issued.expiresAt,
+        tokenExpiresAt: issued.tokenExpiresAt ?? (Number.isFinite(issued.expiresAt) ? new Date(issued.expiresAt * 1000).toISOString() : null),
+        countedPlanId: issued.countedPlanId ?? null,
+        tokenPlanId: issued.tokenPlanId ?? null,
+        planHash: issued.planHash ?? null,
+        kind: issued.kind ?? null,
+        planCheck: issued.planCheck,
+        intentExecution: null
+      });
+      await unlink(pendingPath);
+    }
+    return structuredClone(current || {});
+  });
+  if (!session) return denyOrAllow(input, config, "ArmorCodex intent plan missing for this session: call register_intent_plan first, then retry the tool");
+  if (config.apiKey && config.mode !== "monitor" && isPromptOpen(session) && Date.parse(session.tokenExpiresAt) <= Date.now()) {
+    try {
+      const refreshed = await refreshSession(() => config.readCurrentAuth ? config.readCurrentAuth() : config, sessionId, { expiredOnly: true, expected: session });
+      if (refreshed) session = refreshed;
+    } catch (error) {
+      const reason = String(error instanceof Error ? error.message : error).split(config.apiKey || "\0").join("[redacted]");
+      debugLog(config, `intent refresh failed: ${reason}`);
+    }
   }
+  const previousToken = session.intentTokenRaw;
+  const previousPlan = JSON.stringify(session.plan);
 
   // --- Policy: org v2 bundle and local armor.policy.v1, strictest wins ---
   const { policyState, decision } = await decidePolicy(input, config, toolName, toolInput);
@@ -578,7 +595,6 @@ export async function handlePreToolUse(input, config) {
     if (deny) return deny;
   }
 
-  // Crypto policy digest check (Phase 4 integration point)
   if (config.cryptoPolicyEnabled) {
     try {
       const { createCryptoPolicyService } = await import("./crypto-policy.mjs");
@@ -607,9 +623,6 @@ export async function handlePreToolUse(input, config) {
     process.stderr.write(`[armorcodex] monitor mode: ${reason}; allowing it\n`);
     policyRecord = await recordUnenforced(input, config, policyRecord, "block", reason);
   }
-  // --- Intent token verification ---
-  // Reuse the runtimeState loaded above instead of re-reading from disk.
-  const session = getSession(runtimeState, sessionId) || {};
   const intentTokenRaw = readIntentTokenRaw(input, session);
 
   if (decision.verdict === "hold" && config.orgMonitor) {
@@ -641,7 +654,6 @@ export async function handlePreToolUse(input, config) {
       ? getSessionTokenUsedStepIndices(session, intentTokenRaw)
       : undefined;
 
-  // Validate tool against intent token plan
   if (intentTokenRaw) {
     const tokenCheck = checkIntentTokenPlan({
       intentTokenRaw,
@@ -658,7 +670,6 @@ export async function handlePreToolUse(input, config) {
     }
   }
 
-  // --- CSRG proof handling ---
   const parsedProofs = parseCsrgProofHeaders(input);
   if (parsedProofs.error) {
     return denyOrAllow(input, config, parsedProofs.error);
@@ -687,7 +698,6 @@ export async function handlePreToolUse(input, config) {
     return denyOrAllow(input, config, proofError);
   }
 
-  // --- Remote step verification ---
   if (intentTokenRaw && config.verifyStepEndpoint && config.csrgVerifyEnabled) {
     try {
       const iapService = createIapService(config);
@@ -703,15 +713,15 @@ export async function handlePreToolUse(input, config) {
         );
       }
       const merged = mergeIntentIntoSession(session, verifyResult);
-      upsertSession(runtimeState, sessionId, merged);
+      Object.assign(session, merged);
       localPlan = merged.plan || localPlan;
       localExpiresAt = merged.expiresAt || localExpiresAt;
       if (typeof verifyResult.stepIndex === "number") {
         const indices = usedStepIndices || new Set();
         indices.add(verifyResult.stepIndex);
-        recordSessionTokenUsedStepIndices(merged, intentTokenRaw, indices);
+        recordSessionTokenUsedStepIndices(session, intentTokenRaw, indices);
       } else if (usedStepIndices && intentTokenRaw) {
-        recordSessionTokenUsedStepIndices(merged, intentTokenRaw, usedStepIndices);
+        recordSessionTokenUsedStepIndices(session, intentTokenRaw, usedStepIndices);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -722,22 +732,17 @@ export async function handlePreToolUse(input, config) {
     }
   }
 
-  // --- Expiry check ---
   if (Number.isFinite(localExpiresAt) && nowEpochSeconds() > localExpiresAt) {
     const deny = await denyOrAllow(
       input,
       config,
-      "ArmorCodex intent token expired — call register_intent_plan with your current plan to refresh, then retry the tool"
+      "ArmorCodex intent token expired. Call register_intent_plan with your current plan to register a revision, then retry the tool"
     );
     if (deny) {
       return deny;
     }
   }
 
-  // --- Local plan enforcement (no backend / no token) ---
-  // When a plan was registered via register_intent_plan but ArmorIQ is not
-  // configured, enforce the plan locally: tool must be in plan, and params
-  // (if declared in step.metadata.inputs) must match.
   let localPlanMatched = false;
   if (!intentTokenRaw && localPlan && typeof localPlan === "object") {
     const localCheck = checkToolAgainstPlan({
@@ -755,7 +760,6 @@ export async function handlePreToolUse(input, config) {
     }
   }
 
-  // --- Enforce intent requirement ---
   if (config.intentRequired && !remoteAllowed && !tokenCheckMatched && !localPlanMatched) {
     const deny = await denyOrAllow(
       input,
@@ -767,18 +771,34 @@ export async function handlePreToolUse(input, config) {
     }
   }
 
-  // --- Record tool for discovery ---
-  upsertDiscoveredTool(runtimeState, toolName);
-  await saveRuntimeState(config.runtimeFile, runtimeState);
+  const current = await withRuntimeState(config.runtimeFile, (state) => {
+    let latest = getSession(state, sessionId);
+    if (sessionId && !matchesSessionGeneration(latest, session)) return false;
+    if (latest && config.readCurrentAuth) latest = syncSessionAuth(state, sessionId, config.readCurrentAuth());
+    if (sessionId && !matchesSessionGeneration(latest, session)) return false;
+    if (latest) {
+      if (latest.countedPlanId !== session.countedPlanId || latest.planHash !== session.planHash ||
+          JSON.stringify(latest.plan) !== previousPlan) return false;
+      if (latest.intentTokenRaw === previousToken) {
+        Object.assign(latest, {
+          intentTokenRaw: session.intentTokenRaw,
+          plan: session.plan,
+          allowedActions: session.allowedActions,
+          expiresAt: session.expiresAt,
+          intentExecution: session.intentExecution
+        });
+      }
+    }
+    upsertDiscoveredTool(state, toolName);
+    return true;
+  });
+  if (!current) return denyOrAllow(input, config, "ArmorCodex intent plan missing for this session: call register_intent_plan first, then retry the tool");
   await recordToolStart(config, input.tool_use_id);
   return null;
 }
 
-// ---------------------------------------------------------------------------
-// PermissionRequest
-// ---------------------------------------------------------------------------
-
 export async function handlePermissionRequest(input, config) {
+  await recordHookActivity(input, config);
   const toolName = typeof input.tool_name === "string" ? input.tool_name : "";
   const toolInput = sanitizeParams(input.tool_input, config.sanitize);
   if (!toolName || config.orgMonitor) {
@@ -804,10 +824,6 @@ export async function handlePermissionRequest(input, config) {
 
   return null;
 }
-
-// ---------------------------------------------------------------------------
-// PostToolUse — audit logging
-// ---------------------------------------------------------------------------
 
 function auditLink(config, sessionId, intentTokenRaw) {
   let planId;
@@ -887,12 +903,9 @@ export async function handlePostToolUse(input, config) {
     0,
     hold
   );
+  await recordHookActivity(input, config);
   return null;
 }
-
-// ---------------------------------------------------------------------------
-// PostToolUseFailure — audit logging for failed tool calls
-// ---------------------------------------------------------------------------
 
 export async function handlePostToolUseFailure(input, config) {
   const hold = await settleHold(config, input);
@@ -907,45 +920,28 @@ export async function handlePostToolUseFailure(input, config) {
     0,
     hold
   );
+  await recordHookActivity(input, config);
   return null;
 }
-
-// ---------------------------------------------------------------------------
-// Stop — end of turn
-// ---------------------------------------------------------------------------
 
 export async function handleStop(input, config) {
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   if (!sessionId) return null;
 
-  const runtimeState = await loadRuntimeState(config.runtimeFile);
-  const session = getSession(runtimeState, sessionId);
-  if (!session) return null;
-
-  // Check if token expired mid-turn
-  if (Number.isFinite(session.expiresAt) && nowEpochSeconds() > session.expiresAt) {
-    debugLog(config, "intent token expired during turn");
-  }
-
-  upsertSession(runtimeState, sessionId, { lastStopAt: nowEpochSeconds() });
-  await saveRuntimeState(config.runtimeFile, runtimeState);
+  await recordHookActivity(input, config, (session) => {
+    session.promptOpenSince = null;
+    session.lastStopAt = nowEpochSeconds();
+  });
   return null;
 }
-
-// ---------------------------------------------------------------------------
-// SessionEnd — cleanup
-// ---------------------------------------------------------------------------
 
 export async function handleSessionEnd(input, config) {
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   if (!sessionId) return null;
 
-  const runtimeState = await loadRuntimeState(config.runtimeFile);
-  // Remove the session entirely
-  if (runtimeState.sessions && runtimeState.sessions[sessionId]) {
-    delete runtimeState.sessions[sessionId];
-  }
-  await saveRuntimeState(config.runtimeFile, runtimeState);
+  await withRuntimeState(config.runtimeFile, (state) => {
+    delete state.sessions[sessionId];
+  });
 
   debugLog(config, `session ended: ${sessionId}`);
   return null;
