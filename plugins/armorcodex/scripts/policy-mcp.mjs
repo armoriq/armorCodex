@@ -377,7 +377,7 @@ async function run() {
             prompt: parsed.data.goal,
             plan,
             session_id: sessionId,
-            policy_hash: computePolicyHash(policyState.policy),
+            policy_hash: computePolicyHash(policyState.document),
             policy: policyState.policy,
             validitySeconds: config.validitySeconds,
             metadata: { source: "codex", planning: "codex-registered" }

@@ -397,7 +397,7 @@ export async function handlePreToolUse(input, config) {
     try {
       const { createCryptoPolicyService } = await import("./crypto-policy.mjs");
       const cryptoService = createCryptoPolicyService(config);
-      const currentDigest = computePolicyHash(policyState.policy);
+      const currentDigest = computePolicyHash(policyState.document);
       const cachedState = await cryptoService.loadCachedState();
       if (cachedState?.policyDigest) {
         const check = cryptoService.verifyPolicyDigest(currentDigest, cachedState.policyDigest);
@@ -411,7 +411,7 @@ export async function handlePreToolUse(input, config) {
   }
 
   const policyDecision = evaluatePolicy({
-    policy: policyState.policy,
+    policy: policyState.document,
     toolName,
     toolParams: toolInput
   });
@@ -580,7 +580,7 @@ export async function handlePermissionRequest(input, config) {
 
   const policyState = await loadPolicyState(config.policyFile);
   const policyDecision = evaluatePolicy({
-    policy: policyState.policy,
+    policy: policyState.document,
     toolName,
     toolParams: toolInput
   });
