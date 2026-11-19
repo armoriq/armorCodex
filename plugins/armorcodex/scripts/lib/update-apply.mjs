@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseBoolean } from "./common.mjs";
+import { scheduleHookSync } from "./hook-sync.mjs";
 import { UPDATE_COMMAND, checkForUpdate, isNewerVersion, runningVersion, updateNotice } from "./update-check.mjs";
 
 export const STAGE_MARKER = ".armorcodex-staged.json";
@@ -382,6 +383,9 @@ export async function autoUpdate(config, options = {}) {
     }
 
     const swap = swapStagedUpdate({ installHome, running, env });
+    if (!autoUpdateDisabled(env)) {
+      (options.scheduleHookSync ?? scheduleHookSync)({ installHome, dataDir: config.dataDir, env });
+    }
     if (swap.swapped) return { notice: swapNotice(swap), swapped: true, version: swap.version };
 
     const latest = check?.status === "update-available" ? check.latestVersion : "";
