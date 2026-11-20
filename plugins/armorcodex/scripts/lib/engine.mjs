@@ -88,6 +88,24 @@ function isPolicyUpdateAllowed(config, input) {
       };
 }
 
+const MCP_TOOL_RE = /^mcp__(.+?)__(.+)$/i;
+
+function ruleNamesTool(ruleTool, toolName) {
+  const rule = normalizeToolName(ruleTool);
+  const tool = normalizeToolName(toolName);
+  if (rule.length > 1 && rule.endsWith("*")) return tool.startsWith(rule.slice(0, -1));
+  return rule === tool;
+}
+
+function unapprovedMcpServer(toolName, rules) {
+  const match = MCP_TOOL_RE.exec(toolName);
+  if (!match) return "";
+  const approved = rules.some(
+    (rule) => rule.action === "allow" && rule.tool !== "*" && ruleNamesTool(rule.tool, toolName)
+  );
+  return approved ? "" : match[1];
+}
+
 function mergeIntentIntoSession(session, intentResponse) {
   if (!intentResponse || intentResponse.skipped) {
     return session;
@@ -123,7 +141,7 @@ function readIntentTokenRaw(input, session) {
 }
 
 async function denyAndAudit(input, config, reason, errorMessage = reason) {
-  await auditToolCall(input, config, { status: "blocked", output: null, error_message: errorMessage }, null);
+  await auditToolCall(input, config, { status: "blocked", output: null, error_message: redactSecrets(errorMessage) }, null);
   return denyPreTool(reason);
 }
 
@@ -391,6 +409,16 @@ export async function handlePreToolUse(input, config) {
 
   // --- Static policy evaluation ---
   const policyState = await loadPolicyState(config.policyFile);
+
+  const mcpServer = config.mcpDenyByDefault ? unapprovedMcpServer(toolName, policyState.policy.rules) : "";
+  if (mcpServer) {
+    const deny = await denyOrAllow(
+      input,
+      config,
+      `ArmorCodex: MCP server "${mcpServer}" is not approved. The user can approve it by typing \`armor mcp approve ${mcpServer}\`, then \`armor yes\``
+    );
+    if (deny) return deny;
+  }
 
   // Crypto policy digest check (Phase 4 integration point)
   if (config.cryptoPolicyEnabled) {
