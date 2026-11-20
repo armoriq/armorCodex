@@ -51,7 +51,7 @@ function shouldDeny(config) {
 }
 
 function buildPolicyContextHints() {
-  return "For policy changes call `policy_update` (mode: replace rewrites the full ruleset; empty rules clears policy).";
+  return "For policy changes call `policy_update` or `policy_command`: they only stage a change, which the user reviews and applies with `armor policy confirm <id>`.";
 }
 
 function actorCandidates(input) {
@@ -86,6 +86,31 @@ function isPolicyUpdateAllowed(config, input) {
         reason: "ArmorCodex policy update denied",
         candidates
       };
+}
+
+const MCP_TOOL_RE = /^mcp__(.+?)__(.+)$/i;
+
+function ruleNamesTool(ruleTool, toolName) {
+  const rule = normalizeToolName(ruleTool);
+  const tool = normalizeToolName(toolName);
+  if (rule.length > 1 && rule.endsWith("*")) return tool.startsWith(rule.slice(0, -1));
+  return rule === tool;
+}
+
+function unapprovedMcpServer(toolName, rules) {
+  const match = MCP_TOOL_RE.exec(toolName);
+  if (!match) return "";
+  const approved = rules.some(
+    (rule) =>
+      rule.action === "allow" &&
+      rule.tool !== "*" &&
+      !rule.params &&
+      !rule.anyParam &&
+      !rule.dataClass &&
+      !rule.conditions?.length &&
+      ruleNamesTool(rule.tool, toolName)
+  );
+  return approved ? "" : match[1];
 }
 
 function mergeIntentIntoSession(session, intentResponse) {
@@ -123,7 +148,7 @@ function readIntentTokenRaw(input, session) {
 }
 
 async function denyAndAudit(input, config, reason, errorMessage = reason) {
-  await auditToolCall(input, config, { status: "blocked", output: null, error_message: errorMessage }, null);
+  await auditToolCall(input, config, { status: "blocked", output: null, error_message: redactSecrets(errorMessage) }, null);
   return denyPreTool(reason);
 }
 
@@ -302,7 +327,7 @@ export async function handlePreToolUse(input, config) {
   //     not any suffix — an evil server called evil__policy_update would
   //     previously have been whitelisted. ---
   const norm = normalizeToolName(toolName);
-  const armorTools = ["register_intent_plan", "policy_read", "policy_update"];
+  const armorTools = ["register_intent_plan", "policy_read", "policy_update", "policy_command"];
   // Codex MCP namespace is `mcp__<server>__` and the underlying MCP server name
   // can carry hyphens (`armorcodex-policy`) or be sanitized to underscores
   // (`armorcodex_policy`). Codex's TUI display also surfaces `<server>.<tool>`
@@ -391,6 +416,16 @@ export async function handlePreToolUse(input, config) {
 
   // --- Static policy evaluation ---
   const policyState = await loadPolicyState(config.policyFile);
+
+  const mcpServer = config.mcpDenyByDefault ? unapprovedMcpServer(toolName, policyState.policy.rules) : "";
+  if (mcpServer) {
+    const deny = await denyOrAllow(
+      input,
+      config,
+      `ArmorCodex: MCP server "${mcpServer}" is not approved. The user can approve it by typing \`armor mcp approve ${mcpServer}\`, then \`armor yes\``
+    );
+    if (deny) return deny;
+  }
 
   // Crypto policy digest check (Phase 4 integration point)
   if (config.cryptoPolicyEnabled) {

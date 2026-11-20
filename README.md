@@ -75,7 +75,7 @@ ArmorCodex ships a Codex plugin manifest at `.codex-plugin/plugin.json` and an M
 
 - `register_intent_plan`
 - `policy_read`
-- `policy_update`
+- `policy_update` (stages a rule change; the user applies it with `armor policy confirm <id>`)
 
 ## Configuration
 

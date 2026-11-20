@@ -229,6 +229,7 @@ export function loadSettings(env = process.env) {
       env.ARMORCODEX_POLICY_UPDATE_ENABLED,
       true,
     ),
+    mcpDenyByDefault: parseBoolean(env.ARMORCODEX_MCP_DENY_BY_DEFAULT, true),
     policyUpdateAllowList: parseList(
       env.ARMORCODEX_POLICY_UPDATE_ALLOWLIST || "*",
     ),

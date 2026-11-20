@@ -448,7 +448,7 @@ export function parsePolicyTextCommand(text, state) {
   return { kind: "help" };
 }
 
-function mergeRules(existing, updates) {
+export function mergeRules(existing, updates) {
   const byId = new Map();
   for (const rule of existing) {
     byId.set(rule.id, rule);
