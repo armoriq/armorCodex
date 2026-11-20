@@ -29,6 +29,7 @@ test("a tool from an MCP server the user never approved is denied by default", a
   assert.equal(decision?.hookSpecificOutput?.permissionDecision, "deny");
   assert.match(decision.hookSpecificOutput.permissionDecisionReason, /MCP server "echo" is not approved.*armor mcp approve echo/);
   assert.equal(await preToolUse(config, "mcp__armorcodex-policy__register_intent_plan"), null);
+  assert.equal(await preToolUse(config, "mcp__armorcodex_policy__policy_command"), null);
 });
 
 test("an MCP server approved through armor mcp approve is allowed, a catch-all allow is not approval", async () => {
@@ -42,6 +43,13 @@ test("an MCP server approved through armor mcp approve is allowed, a catch-all a
   await handleArmorPolicyCommand("/armor yes", config, "sess-user");
   assert.equal(await preToolUse(config, "mcp__echo__echo"), null);
   assert.equal((await preToolUse(config, "mcp__other__run"))?.hookSpecificOutput?.permissionDecision, "deny");
+});
+
+test("an allow rule limited by parameters does not approve the whole server", async () => {
+  const config = await hookConfig();
+  const rules = [{ id: "gh-safe", action: "allow", tool: "mcp__gh__create_issue", params: { repo: "safe" } }];
+  await writeFile(config.policyFile, JSON.stringify({ version: 1, policy: { rules }, history: [] }));
+  assert.equal((await preToolUse(config, "mcp__gh__create_issue"))?.hookSpecificOutput?.permissionDecision, "deny");
 });
 
 test("ARMORCODEX_MCP_DENY_BY_DEFAULT=false turns the MCP gate off", async () => {

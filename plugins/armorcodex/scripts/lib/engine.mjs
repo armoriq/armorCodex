@@ -101,7 +101,14 @@ function unapprovedMcpServer(toolName, rules) {
   const match = MCP_TOOL_RE.exec(toolName);
   if (!match) return "";
   const approved = rules.some(
-    (rule) => rule.action === "allow" && rule.tool !== "*" && ruleNamesTool(rule.tool, toolName)
+    (rule) =>
+      rule.action === "allow" &&
+      rule.tool !== "*" &&
+      !rule.params &&
+      !rule.anyParam &&
+      !rule.dataClass &&
+      !rule.conditions?.length &&
+      ruleNamesTool(rule.tool, toolName)
   );
   return approved ? "" : match[1];
 }
@@ -320,7 +327,7 @@ export async function handlePreToolUse(input, config) {
   //     not any suffix — an evil server called evil__policy_update would
   //     previously have been whitelisted. ---
   const norm = normalizeToolName(toolName);
-  const armorTools = ["register_intent_plan", "policy_read", "policy_update"];
+  const armorTools = ["register_intent_plan", "policy_read", "policy_update", "policy_command"];
   // Codex MCP namespace is `mcp__<server>__` and the underlying MCP server name
   // can carry hyphens (`armorcodex-policy`) or be sanitized to underscores
   // (`armorcodex_policy`). Codex's TUI display also surfaces `<server>.<tool>`

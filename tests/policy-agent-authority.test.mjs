@@ -90,3 +90,13 @@ test("the agent cannot replace a change the user staged and has not confirmed", 
     assert.ok(rules.some((rule) => rule.tool === "webfetch" && rule.action === "deny"));
   });
 });
+
+test("the agent cannot save over or delete a policy profile", async () => {
+  await withPolicyServer(async ({ call, config }) => {
+    await handleArmorPolicyCommand("/armor profile save strict", config, "sess-user");
+    for (const command of ["profile save strict", "profile delete strict"]) {
+      assert.match(await call("policy_command", { command }), /human-only/);
+    }
+    assert.match(await handleArmorPolicyCommand("/armor profile list", config, "sess-user"), /strict \(2 rules\)/);
+  });
+});

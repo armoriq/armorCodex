@@ -333,6 +333,9 @@ export async function handleArmorPolicyCommand(prompt, config, actor = "unknown"
   if (!allowConfirm && (parsed.cmd === "confirm" || parsed.cmd === "cancel")) {
     return "Applying policy changes is human-only. Confirm from the terminal with `armor yes` (or `armor policy confirm <id>`).";
   }
+  if (!allowConfirm && (parsed.cmd === "profile-save" || parsed.cmd === "profile-delete")) {
+    return "Saving or deleting a policy profile is human-only. Run it from the terminal with `armor profile save|delete <name>`.";
+  }
 
   switch (parsed.cmd) {
     case "help":
