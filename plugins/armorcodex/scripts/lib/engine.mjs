@@ -17,7 +17,8 @@ import {
   computePolicyHash,
   evaluatePolicy,
   loadPolicyState,
-  parsePolicyTextCommand
+  parsePolicyTextCommand,
+  POLICY_UNREADABLE_NOTICE
 } from "./policy.mjs";
 import { handleArmorPolicyCommand, isArmorPolicyCommand } from "./armor-policy-commands.mjs";
 import { createAuditWal, fitAuditRow } from "./audit-wal.mjs";
@@ -220,9 +221,11 @@ export async function handleSessionStart(input, config, updateOptions = {}) {
   // The update notice is for the person, not the model: handed to the model it
   // reads as an instruction to run the install command mid-session.
   const update = await autoUpdate(config, updateOptions);
+  const { unreadable } = config.policyFile ? await loadPolicyState(config.policyFile) : {};
+  const banner = `ArmorCodex active (${modeLabel}, intent=${intentLabel})`;
   return withSystemMessage(
-    addPromptContext(`ArmorCodex active (${modeLabel}, intent=${intentLabel})`, "SessionStart"),
-    update.notice
+    addPromptContext(unreadable ? `${banner}. ${POLICY_UNREADABLE_NOTICE}.` : banner, "SessionStart"),
+    [unreadable && POLICY_UNREADABLE_NOTICE, update.notice].filter(Boolean).join("\n") || undefined
   );
 }
 
@@ -446,7 +449,8 @@ export async function handlePreToolUse(input, config) {
 
   if (decision.verdict === "block") {
     if (decision.record.source !== "v2") {
-      return denyAndAudit(input, config, decision.reason || "ArmorCodex policy denied");
+      const reason = policyState.unreadable ? POLICY_UNREADABLE_NOTICE : decision.reason;
+      return denyAndAudit(input, config, reason || "ArmorCodex policy denied");
     }
     const reason = v2BlockReason(toolName, decision);
     // The local file has always blocked in monitor mode too; v2 sharing the verdict does not change that.
