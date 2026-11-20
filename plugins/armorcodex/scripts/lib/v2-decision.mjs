@@ -79,7 +79,7 @@ export function bundleEntries(agent) {
   return agent?.policy ? [{ ...agent.policy, targetType: "agent", status: "active" }] : [];
 }
 
-function mcpCall(toolName) {
+export function mcpCall(toolName) {
   const match = /^mcp__(.+?)__(.+)$/i.exec(toolName.trim());
   return match ? { tool: match[2], mcpServer: match[1] } : { tool: toolName, mcpServer: undefined };
 }
@@ -179,7 +179,9 @@ export async function decideV2(config, toolName, toolArgs) {
     return agent.inactive ? { verdict: "block", reason: "agent_inactive", shadow } : { verdict: null, shadow };
   }
   const evaluation = evaluateLayers(evaluate, inputs, boundOf(active));
-  const entry = decidingEntry(evaluation, active);
+  // A tools.default allow is no policy's decision, so it is not credited to one.
+  const entry =
+    evaluation.verdict === "allow" && !evaluation.provenance?.statementId ? undefined : decidingEntry(evaluation, active);
   return {
     verdict: evaluation.verdict,
     reason: `${evaluation.verdict}:${ruleOf(evaluation)}`,
