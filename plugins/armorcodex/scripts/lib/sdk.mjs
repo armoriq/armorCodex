@@ -22,3 +22,13 @@ export function sdkModule(name) {
   if (!loaded.has(name)) loaded.set(name, load(name));
   return loaded.get(name);
 }
+
+/** A package the SDK itself depends on, resolved from the SDK so both share one copy. */
+export function sdkPeer(name) {
+  const key = `peer:${name}`;
+  if (!loaded.has(key)) {
+    const fromSdk = createRequire(require.resolve("@armoriq/sdk-dev"));
+    loaded.set(key, fromSdk(name));
+  }
+  return loaded.get(key);
+}
