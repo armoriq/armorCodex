@@ -51,7 +51,7 @@ function shouldDeny(config) {
 }
 
 function buildPolicyContextHints() {
-  return "For policy changes call `policy_update` (mode: replace rewrites the full ruleset; empty rules clears policy).";
+  return "For policy changes call `policy_update` or `policy_command`: they only stage a change, which the user reviews and applies with `armor policy confirm <id>`.";
 }
 
 function actorCandidates(input) {

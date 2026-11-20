@@ -56,6 +56,8 @@ async function saveProfiles(config, data) {
   await writeJson(profilesPath(config), data);
 }
 
+const AGENT_ACTOR = "mcp";
+
 export function isArmorPolicyCommand(prompt) {
   return Boolean(canonicalCommandText(prompt));
 }
@@ -292,7 +294,9 @@ function formatProposal(pending, currentPolicy) {
     riskWarnings(pending.proposedPolicy).map((w) => `- ${w}`).join("\n") || "(none)",
     "",
     "Next:",
-    `  armor yes        apply ${pending.proposalId}`,
+    ...(pending.stagedBy === AGENT_ACTOR
+      ? []
+      : [`  armor yes        apply ${pending.proposalId}`]),
     `  armor no         discard ${pending.proposalId}`,
     `  armor policy confirm ${pending.proposalId}`,
     `  armor policy cancel ${pending.proposalId}`
@@ -438,9 +442,13 @@ export async function handleArmorPolicyCommand(prompt, config, actor = "unknown"
   }
 }
 
-async function stageAndFormat(config, state, proposedPolicy, reason, actor) {
+export async function stageAndFormat(config, state, proposedPolicy, reason, actor) {
   if (computePolicyHash(proposedPolicy) === computePolicyHash(state.policy)) {
     return "No changes: the proposed policy is identical to the active policy.";
+  }
+  const existing = actor === AGENT_ACTOR ? await loadPending(config) : null;
+  if (existing && existing.stagedBy !== AGENT_ACTOR && Date.now() <= Date.parse(existing.expiresAt)) {
+    return `The user's staged proposal ${existing.proposalId} is waiting for confirmation, so the agent cannot replace it.`;
   }
   const pending = await stagePending(config, state, proposedPolicy, reason, actor);
   return formatProposal(pending, state.policy);
@@ -451,6 +459,9 @@ async function confirmPending(config, state, id, actor) {
   if (!pending) return "No staged policy change to confirm. Stage one with armor policy add|remove|reset.";
   if (id && id !== pending.proposalId) {
     return `Staged proposal is ${pending.proposalId}, not ${id}. Use armor policy list to review.`;
+  }
+  if (pending.stagedBy === AGENT_ACTOR && !id) {
+    return `The agent staged this change. Review it, then apply it with \`armor policy confirm ${pending.proposalId}\`.\n\n${formatProposal(pending, state.policy)}`;
   }
   if (Date.now() > Date.parse(pending.expiresAt)) {
     await clearPending(config);
