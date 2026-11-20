@@ -1,7 +1,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { isMatcherSpec, isPlainObject } from "./common.mjs";
-import { PRIVATE_FILE_MODE, readJson, writeJson } from "./fs-store.mjs";
+import { PRIVATE_FILE_MODE, writeJson } from "./fs-store.mjs";
 import {
   POLICY_IR_VERSION,
   canonicalPolicyHash,
@@ -60,10 +60,6 @@ function legacyRules(policyLike) {
 export function toPolicyDocument(policyLike, base) {
   if (isPolicyDocument(policyLike)) return normalizePolicyDocument(policyLike);
   return rulesToDocument(legacyRules(policyLike), base);
-}
-
-function emptyDocument() {
-  return rulesToDocument([]);
 }
 
 function stateFrom(raw, document) {
@@ -126,9 +122,33 @@ async function migrateLegacyPolicy(policyFilePath, raw) {
   return migrated;
 }
 
+export const POLICY_UNREADABLE_NOTICE =
+  "ArmorCodex could not parse its policy file, so it denies tool calls until the file is fixed or replaced with `armor policy reset` then `armor yes`";
+
+async function readStoredPolicy(policyFilePath) {
+  let text;
+  try {
+    text = await readFile(policyFilePath, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") return {};
+    throw error;
+  }
+  try {
+    const raw = JSON.parse(text);
+    const policy = raw?.policy ?? raw;
+    const known = isPolicyDocument(policy) || Array.isArray(policy?.rules) || !Object.keys(raw).length;
+    if (isPlainObject(raw) && known) return raw;
+  } catch {}
+  return null;
+}
+
 export async function loadPolicyState(policyFilePath) {
-  const raw = await readJson(policyFilePath, null);
-  if (!isPlainObject(raw)) return stateFrom({}, emptyDocument());
+  const raw = await readStoredPolicy(policyFilePath);
+  if (raw === null) {
+    process.stderr.write(`[armorcodex] ERROR ${policyFilePath}: ${POLICY_UNREADABLE_NOTICE}\n`);
+    const denyAll = rulesToDocument([{ id: "deny-all", action: "deny", tool: "*" }]);
+    return { ...stateFrom({}, denyAll), unreadable: true };
+  }
   if (isLegacyStoredPolicy(raw)) {
     const migrated = await migrateLegacyPolicy(policyFilePath, raw);
     return stateFrom(migrated, migrated.policy);
