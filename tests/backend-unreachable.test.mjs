@@ -202,3 +202,14 @@ test("a slow call that finishes late does not replace a newer verdict", async (t
   await recordBackendOutcome(config, "unreachable", now + 1);
   assert.equal((await cachedPosture(config)).state, "unreachable");
 });
+
+test("a saved verdict that claims to last past the posture window is ignored", async (t) => {
+  const { recordBackendOutcome, cachedPosture } = await import("../plugins/armorcodex/scripts/lib/backend-posture.mjs");
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "armorcodex-posture-until-"));
+  t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
+  const config = { dataDir, apiKey: KEY, backendEndpoint: "https://backend.example" };
+  await recordBackendOutcome(config, "ok", Date.now());
+  const file = path.join(dataDir, "backend-posture.json");
+  fs.writeFileSync(file, JSON.stringify({ ...posture(dataDir), state: "signed_out", until: Date.now() + 365 * 86_400_000 }));
+  assert.equal(await cachedPosture(config), null);
+});

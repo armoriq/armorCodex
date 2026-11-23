@@ -33,7 +33,9 @@ import {
 } from "./backend-posture.mjs";
 import { appendNdjsonLine, readJson, writePrivateFile } from "./fs-store.mjs";
 import { readFile, unlink } from "node:fs/promises";
+import { homedir } from "node:os";
 import { autoUpdate } from "./update-apply.mjs";
+import { invokesPolicyAdmin, isProtectedPath, writesProtectedPath } from "./shell-guard.mjs";
 import { VERDICT_RANK, decideV2, logShadow } from "./v2-decision.mjs";
 import {
   approvedHold,
@@ -109,9 +111,20 @@ function ruleNamesTool(ruleTool, toolName) {
   return rule === tool;
 }
 
-function unapprovedMcpServer(toolName, rules) {
+const MCP_RESOURCE_TOOLS = new Set(["list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"]);
+
+function mcpServerCall(toolName, toolInput) {
   const match = MCP_TOOL_RE.exec(toolName);
-  if (!match) return "";
+  if (match) return { server: match[1], tool: toolName };
+  if (!MCP_RESOURCE_TOOLS.has(normalizeToolName(toolName))) return null;
+  const server = typeof toolInput?.server === "string" ? toolInput.server.trim() : "";
+  return { server: server || "*", tool: server ? `mcp__${server}__*` : "" };
+}
+
+function unapprovedMcpServer(toolName, toolInput, rules) {
+  const call = mcpServerCall(toolName, toolInput);
+  if (!call) return "";
+  if (!call.tool) return call.server;
   const approved = rules.some(
     (rule) =>
       rule.action === "allow" &&
@@ -120,9 +133,49 @@ function unapprovedMcpServer(toolName, rules) {
       !rule.anyParam &&
       !rule.dataClass &&
       !rule.conditions?.length &&
-      ruleNamesTool(rule.tool, toolName)
+      ruleNamesTool(rule.tool, call.tool)
   );
-  return approved ? "" : match[1];
+  return approved ? "" : call.server;
+}
+
+const PATCH_TARGET_RE = /^[ \t]*\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$/gm;
+
+function patchTargets(toolInput) {
+  const text = isPlainObject(toolInput)
+    ? [toolInput.command, toolInput.input, toolInput.patch].find((value) => typeof value === "string") ?? ""
+    : typeof toolInput === "string"
+      ? toolInput
+      : "";
+  return [...text.matchAll(PATCH_TARGET_RE)].map((match) => match[1].trim());
+}
+
+function protectedWriteReason(norm, toolInput, cwd, config) {
+  const protectedPaths = [
+    config.dataDir,
+    config.policyFile,
+    config.runtimeFile,
+    path.join(homedir(), ".armoriq", "credentials.json")
+  ].filter((entry) => typeof entry === "string" && entry);
+  if (norm === "bash") {
+    const command = typeof toolInput?.command === "string" ? toolInput.command : "";
+    if (invokesPolicyAdmin(command)) {
+      return "ArmorCodex: policy management is human-only. Type `armor policy` at the Codex prompt.";
+    }
+    if (writesProtectedPath(command, cwd, protectedPaths)) {
+      return "ArmorCodex: shell commands that write, move or delete ArmorCodex policy, state or credential files are blocked. Use policy_update, which stages a change for the user to confirm.";
+    }
+  }
+  if (norm === "apply_patch") {
+    const names = new Set(protectedPaths.map((entry) => path.basename(entry)));
+    const hit = patchTargets(toolInput).some((target) => {
+      if (path.isAbsolute(target)) return isProtectedPath(target, protectedPaths);
+      return cwd ? isProtectedPath(path.resolve(cwd, target), protectedPaths) : names.has(path.basename(target));
+    });
+    if (hit) {
+      return "ArmorCodex: apply_patch cannot change ArmorCodex policy, state or credential files. Use policy_update, which stages a change for the user to confirm.";
+    }
+  }
+  return "";
 }
 
 function mergeIntentIntoSession(session, intentResponse) {
@@ -421,6 +474,10 @@ export async function handlePreToolUse(input, config) {
     return null;
   }
 
+  const cwd = typeof input.cwd === "string" && input.cwd ? input.cwd : null;
+  const protectedWrite = protectedWriteReason(norm, input.tool_input, cwd, config);
+  if (protectedWrite) return denyAndAudit(input, config, protectedWrite);
+
   // Reads run while the backend is down; every other capability, the web tools
   // whitelisted below included, waits on the backend posture first.
   const capability = toolCapability(toolName);
@@ -496,12 +553,14 @@ export async function handlePreToolUse(input, config) {
   let policyRecord = decision.record;
   await savePolicyRecord(config, input.tool_use_id, policyRecord);
 
-  const mcpServer = config.mcpDenyByDefault ? unapprovedMcpServer(toolName, policyState.policy.rules) : "";
+  const mcpServer = config.mcpDenyByDefault ? unapprovedMcpServer(toolName, input.tool_input, policyState.policy.rules) : "";
   if (mcpServer) {
     const deny = await denyOrAllow(
       input,
       config,
-      `ArmorCodex: MCP server "${mcpServer}" is not approved. The user can approve it by typing \`armor mcp approve ${mcpServer}\`, then \`armor yes\``
+      mcpServer === "*"
+        ? "ArmorCodex: listing MCP resources across every server is blocked while unapproved MCP servers are gated. Name an approved server."
+        : `ArmorCodex: MCP server "${mcpServer}" is not approved. The user can approve it by typing \`armor mcp approve ${mcpServer}\`, then \`armor yes\``
     );
     if (deny) return deny;
   }

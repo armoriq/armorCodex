@@ -56,7 +56,7 @@ export async function cachedPosture(config, now = Date.now()) {
     !saved ||
     saved.backend !== config.backendEndpoint ||
     saved.key !== keyFingerprint(config.apiKey) ||
-    !(now < saved.until)
+    !(now < saved.until && saved.until <= now + 2 * POSTURE_TTL_MS)
   ) {
     return null;
   }
