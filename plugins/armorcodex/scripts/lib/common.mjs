@@ -375,7 +375,8 @@ export async function postJson(url, payload, headers, timeoutMs) {
 }
 
 export function buildAuthHeaders(config) {
-  const headers = { "Content-Type": "application/json", ...CLIENT_HEADERS };
+  // Monitor-Aware: conmap sends the real policy and mode, and keeps the would_be this build records.
+  const headers = { "Content-Type": "application/json", ...CLIENT_HEADERS, "X-ArmorIQ-Monitor-Aware": "1" };
   if (config.apiKey) {
     headers.Authorization = `Bearer ${config.apiKey}`;
     headers["X-API-Key"] = config.apiKey;

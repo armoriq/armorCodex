@@ -2,6 +2,7 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import path from "node:path";
 import { parseBoolean, parseInteger, parseList } from "./common.mjs";
+import { orgMonitorFor, orgMonitorNoticesFor } from "./org-mode.mjs";
 import { sdkModule } from "./sdk.mjs";
 
 const { ARMORIQ_ENV: BUILD_ENV, ENDPOINTS } = createRequire(import.meta.url)(
@@ -109,7 +110,7 @@ function savedLogin(backend) {
   }
 }
 
-export function withLogin(settings) {
+export function withLogin(settings, env = process.env) {
   const login = savedLogin(settings.backendEndpoint);
   const { apiKey, orgId, userId, email, loggedInAt } = {
     apiKey: "",
@@ -120,8 +121,12 @@ export function withLogin(settings) {
     ...login?.profile,
   };
   const tracing = !settings.observabilityDisabled && Boolean(apiKey);
+  const orgMonitor = Boolean(apiKey) && orgMonitorFor(settings.dataDir, env);
   return {
     ...settings,
+    ...(orgMonitor && { intentRequired: false, planningEnabled: false, contextHintsEnabled: false }),
+    orgMonitor,
+    orgMonitorNotices: orgMonitor && orgMonitorNoticesFor(settings.dataDir, env),
     apiKey,
     orgId,
     userId,
@@ -135,7 +140,7 @@ export function withLogin(settings) {
 }
 
 export function loadConfig(env = process.env) {
-  return withLogin(loadSettings(env));
+  return withLogin(loadSettings(env), env);
 }
 
 export function loadSettings(env = process.env) {

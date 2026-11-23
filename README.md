@@ -85,7 +85,8 @@ Core environment variables:
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `ARMORCODEX_MODE` | `enforce` | `enforce` blocks failures; `monitor` logs only |
+| `ARMORCODEX_MODE` | `enforce` | Signed out: `enforce` blocks failures, `monitor` logs only. Signed in, the [workspace mode](#workspace-mode) decides |
+| `ARMORIQ_ORG_MODE` | unset | `enforce` makes this machine block whatever the workspace mode says |
 | `ARMORCODEX_INTENT_REQUIRED` | `true` | Require a registered intent plan before Bash |
 | `ARMORCODEX_DATA_DIR` | `~/.codex/armorcodex` | Runtime, policy, and pending-plan storage |
 | `ARMORCODEX_VALIDITY_SECONDS` | `3600` | Intent token lifetime. Values above 3600 are capped at 3600, the most ArmorIQ issues |
@@ -94,6 +95,18 @@ Core environment variables:
 | `ARMORCODEX_CRYPTO_POLICY_ENABLED` | `false` | Enable Merkle policy binding |
 | `ARMORCODEX_OBSERVABILITY_DISABLED` | `false` | Stop sending execution traces; also stops the token usage sync. Same as the `disable_observability` plugin option |
 | `ARMORCODEX_USAGE_SYNC_DISABLED` | `false` | Stop the token usage sync and keep traces. Applies only while observability is on. Same as the `disable_usage_sync` plugin option |
+
+### Workspace mode
+
+Signed in, ArmorCodex follows the mode your workspace picks under **Tool calls in the chat** on the Monitor page of ArmorIQ Tools. It reads the mode at session start, keeps it in `org-mode.json` in the data directory, and applies it from that session on; until it has an answer it runs Quiet.
+
+| Mode | A call your policy or plan check would stop | What Codex shows |
+|---|---|---|
+| Quiet (the default) | Runs, and is listed under Would have blocked on the Monitor page | Nothing from ArmorCodex, no session banner and no plan prompt |
+| Show in chat | Runs, and is listed on the Monitor page | One line per call: `ArmorIQ would block this call in Enforce (<reason>). Monitor let it run.` |
+| Block | Is blocked, and a held shell command goes to Codex's approval prompt | The block reason |
+
+In Quiet and Show in chat no intent plan is required, no hold is routed to an approval, an unreachable backend blocks nothing, and Codex's own approval prompts still apply. The audit row of each such call carries `would_be`, `would_be_code` and `would_be_reason`.
 
 ### Token usage sync
 

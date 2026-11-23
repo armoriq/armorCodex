@@ -52,7 +52,8 @@ async function setup(t, behavior) {
     ARMORCODEX_DATA_DIR: dataDir,
     BACKEND_ENDPOINT: backend.url,
     IAP_ENDPOINT: backend.url,
-    PROXY_ENDPOINT: backend.url
+    PROXY_ENDPOINT: backend.url,
+    ARMORIQ_ORG_MODE: "enforce"
   };
   return { home, dataDir, backend, env };
 }
