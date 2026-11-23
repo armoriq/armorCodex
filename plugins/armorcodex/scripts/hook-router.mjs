@@ -46,7 +46,7 @@ async function main() {
     input = JSON.parse(rawInput);
   } catch {
     // Fail closed: in enforce mode a malformed PreToolUse payload is denied, not silently allowed.
-    if (config.mode === "enforce") {
+    if (config.mode === "enforce" && !config.orgMonitor) {
       emitJson(denyPreTool("ArmorCodex hook payload invalid JSON"));
     }
     return;
@@ -104,7 +104,7 @@ main().catch((error) => {
   let debug = false;
   try {
     const config = loadConfig();
-    mode = config.mode;
+    mode = config.orgMonitor ? "monitor" : config.mode;
     debug = config.debug;
   } catch {
     // loadConfig itself threw (e.g. malformed credentials file). Stay

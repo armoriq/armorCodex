@@ -35,6 +35,7 @@ import { appendNdjsonLine, readJson, writePrivateFile } from "./fs-store.mjs";
 import { readFile, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { autoUpdate } from "./update-apply.mjs";
+import { monitorNote, orgMonitorFor, refreshOrgMode, rememberWouldBe, takeWouldBe } from "./org-mode.mjs";
 import { invokesPolicyAdmin, isProtectedPath, writesProtectedPath } from "./shell-guard.mjs";
 import { VERDICT_RANK, decideV2, logShadow } from "./v2-decision.mjs";
 import {
@@ -212,7 +213,13 @@ function readIntentTokenRaw(input, session) {
   return "";
 }
 
+async function monitorInstead(input, config, action, reason, code = null) {
+  await rememberWouldBe(config, input.tool_use_id, { action, code, reason });
+  return config.orgMonitorNotices ? withSystemMessage({}, monitorNote(action, reason)) : null;
+}
+
 async function denyAndAudit(input, config, reason, errorMessage = reason, status = "blocked") {
+  if (config.orgMonitor) return monitorInstead(input, config, "block", reason, errorMessage === reason ? null : errorMessage);
   await auditToolCall(input, config, { status, output: null, error_message: redactSecrets(errorMessage) }, null);
   return denyPreTool(reason);
 }
@@ -335,6 +342,12 @@ export async function handleSessionStart(input, config, updateOptions = {}) {
   await saveRuntimeState(config.runtimeFile, runtimeState);
 
   debugLog(config, `session started: ${sessionId}, mode=${config.mode}`);
+
+  await refreshOrgMode(config);
+  if (config.apiKey && orgMonitorFor(config.dataDir)) {
+    await autoUpdate(config, updateOptions);
+    return null;
+  }
 
   // The update notice is for the person, not the model: handed to the model it
   // reads as an instruction to run the install command mid-session.
@@ -599,7 +612,10 @@ export async function handlePreToolUse(input, config) {
   const session = getSession(runtimeState, sessionId) || {};
   const intentTokenRaw = readIntentTokenRaw(input, session);
 
-  if (decision.verdict === "hold") {
+  if (decision.verdict === "hold" && config.orgMonitor) {
+    const notice = await monitorInstead(input, config, "hold", v2BlockReason(toolName, decision, "holds"));
+    if (notice) return notice;
+  } else if (decision.verdict === "hold") {
     if (!shouldDeny(config)) {
       const reason = v2BlockReason(toolName, decision, "holds");
       process.stderr.write(`[armorcodex] monitor mode: ${reason}; allowing it\n`);
@@ -765,7 +781,7 @@ export async function handlePreToolUse(input, config) {
 export async function handlePermissionRequest(input, config) {
   const toolName = typeof input.tool_name === "string" ? input.tool_name : "";
   const toolInput = sanitizeParams(input.tool_input, config.sanitize);
-  if (!toolName) {
+  if (!toolName || config.orgMonitor) {
     return null;
   }
 
@@ -834,6 +850,7 @@ async function buildAuditRow(input, config, outcome, unknownStep, hold, record) 
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   const session = getSession(await loadRuntimeState(config.runtimeFile), sessionId) || {};
   const inputs = sanitizeParams(input.tool_input, config.sanitize);
+  const wouldBe = await takeWouldBe(config, input.tool_use_id);
   return fitAuditRow({
     ...auditLink(config, sessionId, session.intentTokenRaw || ""),
     step_index: matchedStepIndex(session.plan, toolName, inputs) ?? unknownStep,
@@ -843,7 +860,12 @@ async function buildAuditRow(input, config, outcome, unknownStep, hold, record) 
     input: withPolicyRecord(redactSecrets(inputs), record ?? (await takePolicyRecord(config, input.tool_use_id)), hold),
     executed_at: new Date().toISOString(),
     duration_ms: await takeToolDuration(config, input.tool_use_id),
-    ...outcome
+    ...outcome,
+    ...(wouldBe && {
+      would_be: wouldBe.action,
+      would_be_code: wouldBe.code ?? null,
+      would_be_reason: redactSecrets(String(wouldBe.reason ?? "")).slice(0, 1000)
+    })
   });
 }
 
