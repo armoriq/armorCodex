@@ -33,12 +33,14 @@ import {
 } from "./backend-posture.mjs";
 import { appendNdjsonLine, readJson, writePrivateFile } from "./fs-store.mjs";
 import { readFile, unlink } from "node:fs/promises";
+import { homedir } from "node:os";
 import { autoUpdate } from "./update-apply.mjs";
 import { monitorNote, orgMonitorFor, refreshOrgMode, rememberWouldBe, takeWouldBe } from "./org-mode.mjs";
-import { decideV2, logShadow } from "./v2-decision.mjs";
+import { invokesPolicyAdmin, isProtectedPath, writesProtectedPath } from "./shell-guard.mjs";
+import { VERDICT_RANK, decideV2, logShadow } from "./v2-decision.mjs";
 import {
+  approvedHold,
   combinePolicyDecisions,
-  markHoldPrompted,
   resolveHold,
   savePolicyRecord,
   settleHold,
@@ -110,9 +112,20 @@ function ruleNamesTool(ruleTool, toolName) {
   return rule === tool;
 }
 
-function unapprovedMcpServer(toolName, rules) {
+const MCP_RESOURCE_TOOLS = new Set(["list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"]);
+
+function mcpServerCall(toolName, toolInput) {
   const match = MCP_TOOL_RE.exec(toolName);
-  if (!match) return "";
+  if (match) return { server: match[1], tool: toolName };
+  if (!MCP_RESOURCE_TOOLS.has(normalizeToolName(toolName))) return null;
+  const server = typeof toolInput?.server === "string" ? toolInput.server.trim() : "";
+  return { server: server || "*", tool: server ? `mcp__${server}__*` : "" };
+}
+
+function unapprovedMcpServer(toolName, toolInput, rules) {
+  const call = mcpServerCall(toolName, toolInput);
+  if (!call) return "";
+  if (!call.tool) return call.server;
   const approved = rules.some(
     (rule) =>
       rule.action === "allow" &&
@@ -121,9 +134,49 @@ function unapprovedMcpServer(toolName, rules) {
       !rule.anyParam &&
       !rule.dataClass &&
       !rule.conditions?.length &&
-      ruleNamesTool(rule.tool, toolName)
+      ruleNamesTool(rule.tool, call.tool)
   );
-  return approved ? "" : match[1];
+  return approved ? "" : call.server;
+}
+
+const PATCH_TARGET_RE = /^[ \t]*\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$/gm;
+
+function patchTargets(toolInput) {
+  const text = isPlainObject(toolInput)
+    ? [toolInput.command, toolInput.input, toolInput.patch].find((value) => typeof value === "string") ?? ""
+    : typeof toolInput === "string"
+      ? toolInput
+      : "";
+  return [...text.matchAll(PATCH_TARGET_RE)].map((match) => match[1].trim());
+}
+
+function protectedWriteReason(norm, toolInput, cwd, config) {
+  const protectedPaths = [
+    config.dataDir,
+    config.policyFile,
+    config.runtimeFile,
+    path.join(homedir(), ".armoriq", "credentials.json")
+  ].filter((entry) => typeof entry === "string" && entry);
+  if (norm === "bash") {
+    const command = typeof toolInput?.command === "string" ? toolInput.command : "";
+    if (invokesPolicyAdmin(command)) {
+      return "ArmorCodex: policy management is human-only. Type `armor policy` at the Codex prompt.";
+    }
+    if (writesProtectedPath(command, cwd, protectedPaths)) {
+      return "ArmorCodex: shell commands that write, move or delete ArmorCodex policy, state or credential files are blocked. Use policy_update, which stages a change for the user to confirm.";
+    }
+  }
+  if (norm === "apply_patch") {
+    const names = new Set(protectedPaths.map((entry) => path.basename(entry)));
+    const hit = patchTargets(toolInput).some((target) => {
+      if (path.isAbsolute(target)) return isProtectedPath(target, protectedPaths);
+      return cwd ? isProtectedPath(path.resolve(cwd, target), protectedPaths) : names.has(path.basename(target));
+    });
+    if (hit) {
+      return "ArmorCodex: apply_patch cannot change ArmorCodex policy, state or credential files. Use policy_update, which stages a change for the user to confirm.";
+    }
+  }
+  return "";
 }
 
 function mergeIntentIntoSession(session, intentResponse) {
@@ -165,9 +218,9 @@ async function monitorInstead(input, config, action, reason, code = null) {
   return config.orgMonitorNotices ? withSystemMessage({}, monitorNote(action, reason)) : null;
 }
 
-async function denyAndAudit(input, config, reason, errorMessage = reason) {
+async function denyAndAudit(input, config, reason, errorMessage = reason, status = "blocked") {
   if (config.orgMonitor) return monitorInstead(input, config, "block", reason, errorMessage === reason ? null : errorMessage);
-  await auditToolCall(input, config, { status: "blocked", output: null, error_message: redactSecrets(errorMessage) }, null);
+  await auditToolCall(input, config, { status, output: null, error_message: redactSecrets(errorMessage) }, null);
   return denyPreTool(reason);
 }
 
@@ -203,11 +256,28 @@ function planCheckDenial(planCheck, toolName) {
   return `ArmorIQ plan check denied ${toolName}${reason ? ` (${reason.slice(denied.length + 2)})` : ""}`;
 }
 
-async function enforcePlanCheck(input, config, planCheck) {
+function unenforced(record, verdict, reason) {
+  const kept = record?.enforced === false && VERDICT_RANK[record.verdict] >= VERDICT_RANK[verdict];
+  return {
+    ...record,
+    verdict: kept ? record.verdict : verdict,
+    enforced: false,
+    unenforced_reasons: [...(record?.unenforced_reasons ?? []), reason]
+  };
+}
+
+async function recordUnenforced(input, config, record, verdict, reason) {
+  const next = unenforced(record, verdict, reason);
+  await savePolicyRecord(config, input.tool_use_id, next);
+  return next;
+}
+
+async function enforcePlanCheck(input, config, planCheck, record) {
   const reason = planCheckDenial(planCheck, input.tool_name);
   if (!reason) return null;
   if (shouldDeny(config)) return denyAndAudit(input, config, reason);
   process.stderr.write(`[armorcodex] monitor mode: ${reason}; allowing it\n`);
+  await recordUnenforced(input, config, record, "block", reason);
   await appendNdjsonLine(path.join(config.dataDir, "monitor.jsonl"), {
     at: Date.now(),
     session_id: input.session_id,
@@ -234,6 +304,32 @@ function matchedStepIndex(plan, toolName, toolInput) {
 // SessionStart
 // ---------------------------------------------------------------------------
 
+const LOCAL_ONLY_SCOPE = "only the local policy and intent plan apply; org policies, approvals and audit upload are off";
+
+export function sessionBanner(config, { unreadable = false, posture = null } = {}) {
+  const enforcing = shouldDeny(config);
+  const intent = config.intentRequired ? "required" : "optional";
+  const head = `ArmorCodex active (${enforcing ? "ENFORCING" : "MONITORING"}, intent=${intent})`;
+  const notes = [];
+  if (unreadable) notes.push(POLICY_UNREADABLE_NOTICE);
+  if (!enforcing) {
+    notes.push(
+      "Monitor mode: the local policy still blocks; intent drift, org policy blocks and holds, and backend outages are allowed, not blocked"
+    );
+  }
+  if (posture === "unreachable" && enforcing) {
+    notes.push("The ArmorIQ backend is not answering: every tool call except ArmorCodex's own tools is blocked until it answers");
+  }
+  if (config.keyRejected || posture === "signed_out") {
+    notes.push(`ArmorIQ rejected the stored key: ${LOCAL_ONLY_SCOPE} until you sign in again`);
+  } else if (!config.apiKey) {
+    notes.push(`Not signed in to ArmorIQ: ${LOCAL_ONLY_SCOPE}`);
+  } else if (config.policyV2Enabled === false) {
+    notes.push("Org policies are off (ARMORCODEX_POLICY_V2=false): only the local policy and intent plan apply");
+  }
+  return notes.length ? `${head}. ${notes.join(". ")}.` : head;
+}
+
 export async function handleSessionStart(input, config, updateOptions = {}) {
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   if (!sessionId) return null;
@@ -253,16 +349,14 @@ export async function handleSessionStart(input, config, updateOptions = {}) {
     return null;
   }
 
-  const modeLabel = config.mode === "enforce" ? "ENFORCING" : "MONITORING";
-  const intentLabel = config.intentRequired ? "required" : "optional";
-
   // The update notice is for the person, not the model: handed to the model it
   // reads as an instruction to run the install command mid-session.
   const update = await autoUpdate(config, updateOptions);
   const { unreadable } = config.policyFile ? await loadPolicyState(config.policyFile) : {};
-  const banner = `ArmorCodex active (${modeLabel}, intent=${intentLabel})`;
+  const posture = config.apiKey ? await backendPosture(config) : null;
+  const banner = sessionBanner(config, { unreadable, posture });
   return withSystemMessage(
-    addPromptContext(unreadable ? `${banner}. ${POLICY_UNREADABLE_NOTICE}.` : banner, "SessionStart"),
+    addPromptContext(banner, "SessionStart"),
     [unreadable && POLICY_UNREADABLE_NOTICE, update.notice].filter(Boolean).join("\n") || undefined
   );
 }
@@ -393,6 +487,10 @@ export async function handlePreToolUse(input, config) {
     return null;
   }
 
+  const cwd = typeof input.cwd === "string" && input.cwd ? input.cwd : null;
+  const protectedWrite = protectedWriteReason(norm, input.tool_input, cwd, config);
+  if (protectedWrite) return denyAndAudit(input, config, protectedWrite);
+
   // Reads run while the backend is down; every other capability, the web tools
   // whitelisted below included, waits on the backend posture first.
   const capability = toolCapability(toolName);
@@ -465,14 +563,17 @@ export async function handlePreToolUse(input, config) {
 
   // --- Policy: org v2 bundle and local armor.policy.v1, strictest wins ---
   const { policyState, decision } = await decidePolicy(input, config, toolName, toolInput);
-  await savePolicyRecord(config, input.tool_use_id, decision.record);
+  let policyRecord = decision.record;
+  await savePolicyRecord(config, input.tool_use_id, policyRecord);
 
-  const mcpServer = config.mcpDenyByDefault ? unapprovedMcpServer(toolName, policyState.policy.rules) : "";
+  const mcpServer = config.mcpDenyByDefault ? unapprovedMcpServer(toolName, input.tool_input, policyState.policy.rules) : "";
   if (mcpServer) {
     const deny = await denyOrAllow(
       input,
       config,
-      `ArmorCodex: MCP server "${mcpServer}" is not approved. The user can approve it by typing \`armor mcp approve ${mcpServer}\`, then \`armor yes\``
+      mcpServer === "*"
+        ? "ArmorCodex: listing MCP resources across every server is blocked while unapproved MCP servers are gated. Name an approved server."
+        : `ArmorCodex: MCP server "${mcpServer}" is not approved. The user can approve it by typing \`armor mcp approve ${mcpServer}\`, then \`armor yes\``
     );
     if (deny) return deny;
   }
@@ -504,24 +605,33 @@ export async function handlePreToolUse(input, config) {
     // The local file has always blocked in monitor mode too; v2 sharing the verdict does not change that.
     if (shouldDeny(config) || decision.localBlocks) return denyAndAudit(input, config, reason);
     process.stderr.write(`[armorcodex] monitor mode: ${reason}; allowing it\n`);
+    policyRecord = await recordUnenforced(input, config, policyRecord, "block", reason);
   }
+  // --- Intent token verification ---
+  // Reuse the runtimeState loaded above instead of re-reading from disk.
+  const session = getSession(runtimeState, sessionId) || {};
+  const intentTokenRaw = readIntentTokenRaw(input, session);
+
   if (decision.verdict === "hold" && config.orgMonitor) {
     const notice = await monitorInstead(input, config, "hold", v2BlockReason(toolName, decision, "holds"));
     if (notice) return notice;
   } else if (decision.verdict === "hold") {
-    const held = await resolveHold(config, input, decision);
-    if (held.action === "block") {
-      const deny = await denyOrAllow(input, config, held.reason);
-      if (deny) return deny;
+    if (!shouldDeny(config)) {
+      const reason = v2BlockReason(toolName, decision, "holds");
+      process.stderr.write(`[armorcodex] monitor mode: ${reason}; allowing it\n`);
+      policyRecord = await recordUnenforced(input, config, policyRecord, "hold", reason);
+    } else {
+      const held = await resolveHold(config, input, decision, intentTokenRaw);
+      if (held.delegationId) {
+        await savePolicyRecord(config, input.tool_use_id, { ...decision.record, delegation_id: held.delegationId });
+      }
+      // A blocked row fails the plan on the backend; a held one keeps it open for the approved retry.
+      if (held.action === "block") return denyAndAudit(input, config, held.reason, held.reason, held.delegationId ? "held" : "blocked");
     }
   }
 
-  // --- Intent token verification ---
-  // Reuse the runtimeState loaded above instead of re-reading from disk.
-  const session = getSession(runtimeState, sessionId) || {};
-  const planCheckDeny = await enforcePlanCheck(input, config, session.planCheck);
+  const planCheckDeny = await enforcePlanCheck(input, config, session.planCheck, policyRecord);
   if (planCheckDeny) return planCheckDeny;
-  const intentTokenRaw = readIntentTokenRaw(input, session);
   let localPlan = session.plan;
   let localExpiresAt = session.expiresAt;
   let remoteAllowed = false;
@@ -676,17 +786,19 @@ export async function handlePermissionRequest(input, config) {
   }
 
   const { decision } = await decidePolicy(input, config, toolName, toolInput, { logShadows: false });
-  if (decision.verdict === "hold" && (await markHoldPrompted(config, input))) {
-    return withSystemMessage(
-      {},
-      `${v2BlockReason(toolName, decision, "holds")} for your approval. Approve it only if you intended it.`
-    );
+  if (decision.verdict === "hold") {
+    const approved = await approvedHold(config, input);
+    if (approved) {
+      const request = approved.delegationId ? ` (request ${approved.delegationId})` : "";
+      return withSystemMessage({}, `ArmorIQ: a workspace member approved this ${toolName} call${request}.`);
+    }
   }
   if (decision.verdict !== "allow" && shouldDeny(config)) {
     const reason =
       decision.record.source === "v2"
         ? v2BlockReason(toolName, decision)
         : decision.reason || "ArmorCodex policy denied approval request";
+    await auditToolCall(input, config, { status: "blocked", output: null, error_message: reason }, null, undefined, decision.record);
     return denyPermissionRequest(reason);
   }
 
@@ -733,7 +845,7 @@ async function takeToolDuration(config, toolUseId) {
   return started > 0 ? Date.now() - started : undefined;
 }
 
-async function buildAuditRow(input, config, outcome, unknownStep, hold) {
+async function buildAuditRow(input, config, outcome, unknownStep, hold, record) {
   const toolName = input.tool_name;
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   const session = getSession(await loadRuntimeState(config.runtimeFile), sessionId) || {};
@@ -745,7 +857,7 @@ async function buildAuditRow(input, config, outcome, unknownStep, hold) {
     action: toolName,
     tool: toolName,
     capability: toolCapability(toolName),
-    input: withPolicyRecord(redactSecrets(inputs), await takePolicyRecord(config, input.tool_use_id), hold),
+    input: withPolicyRecord(redactSecrets(inputs), record ?? (await takePolicyRecord(config, input.tool_use_id)), hold),
     executed_at: new Date().toISOString(),
     duration_ms: await takeToolDuration(config, input.tool_use_id),
     ...outcome,
@@ -757,10 +869,10 @@ async function buildAuditRow(input, config, outcome, unknownStep, hold) {
   });
 }
 
-async function auditToolCall(input, config, outcome, unknownStep = 0, hold = undefined) {
+async function auditToolCall(input, config, outcome, unknownStep = 0, hold = undefined, record = undefined) {
   if (!config.auditEnabled || !config.apiKey || typeof input.tool_name !== "string" || !input.tool_name) return;
   try {
-    await createIapService(config).enqueueAudit(await buildAuditRow(input, config, outcome, unknownStep, hold));
+    await createIapService(config).enqueueAudit(await buildAuditRow(input, config, outcome, unknownStep, hold, record));
   } catch (error) {
     process.stderr.write(`[armorcodex] audit row rejected: ${error instanceof Error ? error.message : error}\n`);
   }

@@ -150,6 +150,21 @@ test("a 401 switches to local only mode instead of blocking as unreachable", asy
   assert.equal(backend.state.probes, 1);
 });
 
+test("after a 401 the next session banner says the stored key was rejected", async (t) => {
+  const { env, dataDir } = await setup(t, "401");
+  await preTool(env, "Bash", { command: "ls" });
+  assert.equal(posture(dataDir).state, "signed_out");
+  const { decision } = await hook(env, { hook_event_name: "SessionStart", source: "startup" });
+  assert.match(decision.hookSpecificOutput.additionalContext, /^ArmorCodex active \(ENFORCING, intent=\w+\)\. ArmorIQ rejected the stored key: only the local policy and intent plan apply; org policies, approvals and audit upload are off until you sign in again\.$/);
+});
+
+test("a reachable backend keeps the plain session banner", async (t) => {
+  const { env } = await setup(t, "ok");
+  await preTool(env, "Bash", { command: "ls" });
+  const { decision } = await hook(env, { hook_event_name: "SessionStart", source: "startup" });
+  assert.match(decision.hookSpecificOutput.additionalContext, /^ArmorCodex active \(ENFORCING, intent=\w+\)$/);
+});
+
 test("rows blocked while unreachable stay queued, then upload once the backend is back", async (t) => {
   const { env, dataDir, backend } = await setup(t, "503");
   assertUnreachableDeny(await preTool(env, "Bash", { command: "ls" }));
@@ -187,4 +202,15 @@ test("a slow call that finishes late does not replace a newer verdict", async (t
   assert.equal((await cachedPosture(config)).state, "ok");
   await recordBackendOutcome(config, "unreachable", now + 1);
   assert.equal((await cachedPosture(config)).state, "unreachable");
+});
+
+test("a saved verdict that claims to last past the posture window is ignored", async (t) => {
+  const { recordBackendOutcome, cachedPosture } = await import("../plugins/armorcodex/scripts/lib/backend-posture.mjs");
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "armorcodex-posture-until-"));
+  t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
+  const config = { dataDir, apiKey: KEY, backendEndpoint: "https://backend.example" };
+  await recordBackendOutcome(config, "ok", Date.now());
+  const file = path.join(dataDir, "backend-posture.json");
+  fs.writeFileSync(file, JSON.stringify({ ...posture(dataDir), state: "signed_out", until: Date.now() + 365 * 86_400_000 }));
+  assert.equal(await cachedPosture(config), null);
 });
