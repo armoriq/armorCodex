@@ -5,7 +5,7 @@ import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
-import { handlePreToolUse } from "../plugins/armorcodex/scripts/lib/engine.mjs";
+import { handlePostToolUse, handlePreToolUse } from "../plugins/armorcodex/scripts/lib/engine.mjs";
 import { requestIntent } from "../plugins/armorcodex/scripts/lib/intent.mjs";
 
 const { ArmorIQClient } = createRequire(new URL("../plugins/armorcodex/package.json", import.meta.url))(
@@ -84,7 +84,7 @@ test("enforce mode denies a listed tool when the check did not validate", async 
   assert.match(decision.hookSpecificOutput.permissionDecisionReason, /plan check denied Bash \(agent_unresolved\)/);
 });
 
-test("monitor mode allows a listed tool, logs it to stderr, and writes no row", async (t) => {
+test("monitor mode allows a listed tool, logs it, and its row records the plan check verdict as not enforced", async (t) => {
   const stderr = [];
   t.mock.method(process.stderr, "write", (chunk) => {
     stderr.push(String(chunk));
@@ -111,6 +111,34 @@ test("monitor mode allows a listed tool, logs it to stderr, and writes no row", 
     { at: 0, session_id: SESSION, tool: "Bash", tool_use_id: "call_1", reason: "ArmorIQ plan check denied Bash (block:no-shell)" }
   );
   assert.equal((await stat(logPath)).mode & 0o777, 0o600);
+
+  await handlePostToolUse(
+    { hook_event_name: "PostToolUse", session_id: SESSION, tool_name: "Bash", tool_input: { command: "ls" }, tool_use_id: "call_1", tool_response: "ok" },
+    config
+  );
+  const rows = await walRows(config);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].status, "success");
+  assert.deepEqual(rows[0].input.armoriq_policy, {
+    source: "default",
+    verdict: "block",
+    enforced: false,
+    unenforced_reasons: ["ArmorIQ plan check denied Bash (block:no-shell)"]
+  });
+});
+
+test("a monitor-mode call the plan check allows carries no unenforced verdict", async () => {
+  const config = await setup({ mode: "monitor", planCheck: blocksBash(true) });
+  await handlePreToolUse(
+    { hook_event_name: "PreToolUse", session_id: SESSION, tool_name: "webrun", tool_input: { q: "x" }, tool_use_id: "call_2" },
+    config
+  );
+  await handlePostToolUse(
+    { hook_event_name: "PostToolUse", session_id: SESSION, tool_name: "webrun", tool_input: { q: "x" }, tool_use_id: "call_2", tool_response: "ok" },
+    config
+  );
+  const [row] = await walRows(config);
+  assert.deepEqual(row.input.armoriq_policy, { source: "default" });
 });
 
 test("ArmorCodex's own tools and the read-only tools stay allowed even when the plan check lists them", async () => {

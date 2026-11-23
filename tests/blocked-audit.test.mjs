@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { handlePreToolUse } from "../plugins/armorcodex/scripts/lib/engine.mjs";
+import { handlePermissionRequest, handlePreToolUse } from "../plugins/armorcodex/scripts/lib/engine.mjs";
 
 const PLAN_ID = randomUUID();
 const SESSION = "sess-blocked";
@@ -91,5 +91,39 @@ test("a deny with no plan registered leaves a blocked row without a plan id", as
 test("monitor mode denies nothing and writes no blocked row", async () => {
   const config = await setup({ mode: "monitor" });
   assert.equal(await preToolUse(config, "mcp__serena__get_current_config"), null);
+  assert.deepEqual(await walRows(config), []);
+});
+
+test("a PermissionRequest the policy denies leaves one blocked row, like a PreToolUse deny", async () => {
+  const config = await setup({ rules: [{ id: "no-bash", action: "deny", tool: "Bash" }] });
+  const decision = await handlePermissionRequest(
+    {
+      hook_event_name: "PermissionRequest",
+      session_id: SESSION,
+      tool_name: "Bash",
+      tool_input: { command: "touch /etc/outside", description: "May I run touch outside the workspace?" }
+    },
+    config
+  );
+  assert.equal(decision?.hookSpecificOutput?.decision?.behavior, "deny");
+  const rows = await walRows(config);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].status, "blocked");
+  assert.equal(rows[0].tool, "Bash");
+  assert.equal(rows[0].plan_id, PLAN_ID);
+  assert.equal(rows[0].step_index, 0);
+  assert.equal(rows[0].error_message, decision.hookSpecificOutput.decision.message);
+  assert.equal(rows[0].input.command, "touch /etc/outside");
+  assert.equal(rows[0].input.armoriq_policy.source, "local");
+  assert.equal(rows[0].input.armoriq_policy.rule_id, "no-bash");
+});
+
+test("a PermissionRequest the policy allows writes no row", async () => {
+  const config = await setup();
+  const decision = await handlePermissionRequest(
+    { hook_event_name: "PermissionRequest", session_id: SESSION, tool_name: "Bash", tool_input: { command: "ls" } },
+    config
+  );
+  assert.equal(decision, null);
   assert.deepEqual(await walRows(config), []);
 });
