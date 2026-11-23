@@ -353,7 +353,7 @@ export async function handleArmorPolicyCommand(prompt, config, actor = "unknown"
     }
 
     case "view":
-      return `Policy v${state.version}:\n${JSON.stringify(state.policy, null, 2)}`;
+      return `Policy v${state.version}:\n${JSON.stringify(state.document, null, 2)}`;
 
     case "confirm":
       return confirmPending(config, state, parsed.id, actor);

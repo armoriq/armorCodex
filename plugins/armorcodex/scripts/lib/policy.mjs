@@ -1,14 +1,16 @@
-import { createHash } from "node:crypto";
+import { readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { isMatcherSpec, isPlainObject } from "./common.mjs";
+import { PRIVATE_FILE_MODE, writeJson } from "./fs-store.mjs";
 import {
-  isMatcherSpec,
-  isPlainObject,
-  isSubsetValue,
-  matchParams,
-  matchesAnyStringField,
-  matchesScalar,
-  normalizeToolName
-} from "./common.mjs";
-import { readJson, writeJson } from "./fs-store.mjs";
+  POLICY_IR_VERSION,
+  canonicalPolicyHash,
+  documentToRules,
+  evaluatePolicyDocument,
+  isPolicyDocument,
+  normalizePolicyDocument,
+  rulesToDocument
+} from "./policy-ir.mjs";
 
 const POLICY_ACTIONS = new Set(["allow", "deny", "require_approval"]);
 const POLICY_DATA_CLASSES = new Set(["PCI", "PAYMENT", "PHI", "PII"]);
@@ -40,51 +42,122 @@ export function normalizeRule(rule) {
         ? { $contains: rule.anyParam }
         : rule.anyParam;
   }
+  // Fields a rule carries only when it was read from an armor.policy.v1
+  // statement the legacy shape cannot express; kept so a rewrite round-trips.
+  if (isPlainObject(rule.selector)) normalized.selector = rule.selector;
+  if (Array.isArray(rule.conditions) && rule.conditions.length) normalized.conditions = rule.conditions;
+  if (isPlainObject(rule.principal)) normalized.principal = rule.principal;
+  if (isPlainObject(rule.resource)) normalized.resource = rule.resource;
   return normalized;
 }
 
-function normalizePolicy(policyLike) {
-  const input = isPlainObject(policyLike) ? policyLike : {};
-  const rulesInput = Array.isArray(input.rules) ? input.rules : [];
-  const rules = rulesInput.map((rule) => normalizeRule(rule)).filter(Boolean);
-  return { rules };
+function legacyRules(policyLike) {
+  const rules = Array.isArray(policyLike?.rules) ? policyLike.rules : [];
+  return rules.map((rule) => normalizeRule(rule)).filter(Boolean);
+}
+
+/** The armor.policy.v1 document for a stored policy, a rule list, or a legacy {rules:[]} policy. */
+export function toPolicyDocument(policyLike, base) {
+  if (isPolicyDocument(policyLike)) return normalizePolicyDocument(policyLike);
+  return rulesToDocument(legacyRules(policyLike), base);
+}
+
+function stateFrom(raw, document) {
+  return {
+    version: Number.isFinite(raw.version) ? raw.version : 0,
+    updatedAt: typeof raw.updatedAt === "string" ? raw.updatedAt : new Date().toISOString(),
+    updatedBy: typeof raw.updatedBy === "string" ? raw.updatedBy : undefined,
+    document,
+    policy: { rules: documentToRules(document) },
+    history: Array.isArray(raw.history) ? raw.history : []
+  };
+}
+
+function isLegacyStoredPolicy(raw) {
+  const policy = raw.policy ?? raw;
+  return isPlainObject(policy) && !isPolicyDocument(policy) && Array.isArray(policy.rules);
+}
+
+async function backupLegacyFile(policyFilePath) {
+  const text = await readFile(policyFilePath, "utf8");
+  const first = `${policyFilePath}.legacy.bak`;
+  for (const target of [first, `${policyFilePath}.legacy.${Date.now()}.${process.pid}.bak`]) {
+    try {
+      await writeFile(target, text, { encoding: "utf8", mode: PRIVATE_FILE_MODE, flag: "wx" });
+      return target;
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      if ((await readFile(target, "utf8")) === text) return target;
+    }
+  }
+  throw new Error(`could not back up ${policyFilePath} before migrating it`);
+}
+
+/**
+ * Rewrites a legacy {rules:[]} policy.json as armor.policy.v1 in place, keeping
+ * the original beside it. First-match order becomes deny_overrides, which only
+ * ever turns an allow into a block, never a block into an allow.
+ */
+async function migrateLegacyPolicy(policyFilePath, raw) {
+  const rules = legacyRules(raw.policy ?? raw);
+  const document = rulesToDocument(rules);
+  const backup = await backupLegacyFile(policyFilePath);
+  const version = (Number.isFinite(raw.version) ? raw.version : 0) + 1;
+  const updatedAt = new Date().toISOString();
+  const entry = {
+    version,
+    updatedAt,
+    updatedBy: "armorcodex-migration",
+    reason: `Migrated legacy {rules:[]} policy to ${POLICY_IR_VERSION}; original kept at ${path.basename(backup)}`,
+    policy: document
+  };
+  const migrated = {
+    version,
+    updatedAt,
+    updatedBy: "armorcodex-migration",
+    policy: document,
+    history: [...(Array.isArray(raw.history) ? raw.history : []), entry]
+  };
+  await writeJson(policyFilePath, migrated);
+  return migrated;
+}
+
+export const POLICY_UNREADABLE_NOTICE =
+  "ArmorCodex could not parse its policy file, so it denies tool calls until the file is fixed or replaced with `armor policy reset` then `armor yes`";
+
+async function readStoredPolicy(policyFilePath) {
+  let text;
+  try {
+    text = await readFile(policyFilePath, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") return {};
+    throw error;
+  }
+  try {
+    const raw = JSON.parse(text);
+    const policy = raw?.policy ?? raw;
+    const known = isPolicyDocument(policy) || Array.isArray(policy?.rules) || !Object.keys(raw).length;
+    if (isPlainObject(raw) && known) return raw;
+  } catch {}
+  return null;
 }
 
 export async function loadPolicyState(policyFilePath) {
-  const initial = {
-    version: 0,
-    updatedAt: new Date().toISOString(),
-    policy: { rules: [] },
-    history: []
-  };
-  const raw = await readJson(policyFilePath, initial);
-  const state = isPlainObject(raw) ? raw : initial;
-  return {
-    version: Number.isFinite(state.version) ? state.version : 0,
-    updatedAt: typeof state.updatedAt === "string" ? state.updatedAt : new Date().toISOString(),
-    updatedBy: typeof state.updatedBy === "string" ? state.updatedBy : undefined,
-    policy: normalizePolicy(state.policy || state),
-    history: Array.isArray(state.history) ? state.history : []
-  };
-}
-
-export async function savePolicyState(policyFilePath, state) {
-  await writeJson(policyFilePath, state);
+  const raw = await readStoredPolicy(policyFilePath);
+  if (raw === null) {
+    process.stderr.write(`[armorcodex] ERROR ${policyFilePath}: ${POLICY_UNREADABLE_NOTICE}\n`);
+    const denyAll = rulesToDocument([{ id: "deny-all", action: "deny", tool: "*" }]);
+    return { ...stateFrom({}, denyAll), unreadable: true };
+  }
+  if (isLegacyStoredPolicy(raw)) {
+    const migrated = await migrateLegacyPolicy(policyFilePath, raw);
+    return stateFrom(migrated, migrated.policy);
+  }
+  return stateFrom(raw, toPolicyDocument(raw.policy));
 }
 
 export function computePolicyHash(policy) {
-  return createHash("sha256").update(JSON.stringify(normalizePolicy(policy))).digest("hex");
-}
-
-function toolMatches(ruleTool, toolName) {
-  if (ruleTool === "*") {
-    return true;
-  }
-  const rt = normalizeToolName(ruleTool);
-  if (rt.length > 1 && rt.endsWith("*")) {
-    return normalizeToolName(toolName).startsWith(rt.slice(0, -1));
-  }
-  return rt === normalizeToolName(toolName);
+  return canonicalPolicyHash(toPolicyDocument(policy));
 }
 
 function extractStrings(value, depth, texts, keys) {
@@ -169,62 +242,14 @@ export function detectDataClasses(toolName, toolParams) {
 }
 
 export function evaluatePolicy({ policy, toolName, toolParams }) {
-  const rules = normalizePolicy(policy).rules;
   const dataClasses = detectDataClasses(toolName, toolParams);
-  const warnings = [];
-
-  for (const rule of rules) {
-    if (!toolMatches(rule.tool, toolName)) {
-      continue;
-    }
-    if (rule.dataClass && !dataClasses.has(rule.dataClass)) {
-      continue;
-    }
-    let paramsMatched = true;
-    if (rule.params) {
-      const result = matchParams(rule.params, toolParams || {});
-      paramsMatched = result.matched;
-      if (!result.matched && result.missingKeys.length > 0) {
-        warnings.push({
-          ruleId: rule.id,
-          tool: rule.tool,
-          missingKeys: result.missingKeys,
-          message: `Rule ${rule.id} references keys absent from ${toolName} input: ${result.missingKeys.join(", ")}. Consider using anyParam or operator-based matchers.`
-        });
-      }
-    }
-    if (!paramsMatched) {
-      continue;
-    }
-    if (rule.anyParam) {
-      if (!matchesAnyStringField(rule.anyParam, toolParams || {})) {
-        continue;
-      }
-    }
-    if (rule.action === "allow") {
-      return { allowed: true, matchedRule: rule, dataClasses: Array.from(dataClasses), warnings };
-    }
-    if (rule.action === "deny") {
-      return {
-        allowed: false,
-        reason: `ArmorCodex policy deny: ${rule.id}`,
-        matchedRule: rule,
-        dataClasses: Array.from(dataClasses),
-        warnings
-      };
-    }
-    if (rule.action === "require_approval") {
-      return {
-        allowed: false,
-        reason: `ArmorCodex policy requires approval: ${rule.id}`,
-        matchedRule: rule,
-        dataClasses: Array.from(dataClasses),
-        warnings
-      };
-    }
-  }
-
-  return { allowed: true, dataClasses: Array.from(dataClasses), warnings };
+  const decision = evaluatePolicyDocument({
+    policy: toPolicyDocument(policy),
+    toolName,
+    toolParams,
+    dataClasses
+  });
+  return { ...decision, dataClasses: Array.from(dataClasses) };
 }
 
 function truncateReason(text, max = 160) {
@@ -247,6 +272,12 @@ export function formatRule(rule) {
   }
   if (rule.params) {
     parts.push(`params=${JSON.stringify(rule.params)}`);
+  }
+  if (rule.selector && rule.selector.type !== "tool") {
+    parts.push(`on=${rule.selector.type}`);
+  }
+  for (const condition of rule.conditions || []) {
+    parts.push(`if=${condition.field} ${condition.op} ${JSON.stringify(condition.value)}`);
   }
   return parts.join(" ");
 }
@@ -467,22 +498,23 @@ export function mergeRules(existing, updates) {
 export async function persistNextState(policyFilePath, oldState, nextPolicy, actor, reason) {
   const version = oldState.version + 1;
   const updatedAt = new Date().toISOString();
+  const document = toPolicyDocument(nextPolicy, oldState.document);
   const entry = {
     version,
     updatedAt,
     updatedBy: actor,
     reason,
-    policy: nextPolicy
+    policy: document
   };
   const nextState = {
     version,
     updatedAt,
     updatedBy: actor,
-    policy: nextPolicy,
+    policy: document,
     history: [...oldState.history, entry]
   };
-  await savePolicyState(policyFilePath, nextState);
-  return nextState;
+  await writeJson(policyFilePath, nextState);
+  return stateFrom(nextState, document);
 }
 
 function formatPolicyHelp() {
@@ -562,7 +594,10 @@ export async function applyPolicyCommand({ policyFilePath, state, command, actor
       actor,
       command.reason || `Policy reorder: ${command.id}`
     );
-    return { state: nextState, message: `Policy ${command.id} moved to position ${clamped}.` };
+    return {
+      state: nextState,
+      message: `Policy ${command.id} moved to position ${clamped}. Order only changes the listing, except that a final rule for every tool (\`*\`) is the default for unmatched tools: a deny always wins over an allow.`
+    };
   }
   if (command.kind === "update") {
     if (!isPlainObject(command.update)) {
