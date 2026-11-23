@@ -111,10 +111,11 @@ function savedLogin(backend) {
 
 export function withLogin(settings) {
   const login = savedLogin(settings.backendEndpoint);
-  const { apiKey, orgId, userId, loggedInAt } = {
+  const { apiKey, orgId, userId, email, loggedInAt } = {
     apiKey: "",
     orgId: "",
     userId: "",
+    email: "",
     loggedInAt: "",
     ...login?.profile,
   };
@@ -124,6 +125,7 @@ export function withLogin(settings) {
     apiKey,
     orgId,
     userId,
+    userEmail: email,
     loggedInAt,
     loginHistory: login?.loginHistory ?? null,
     observabilityEnabled: tracing,
@@ -209,6 +211,9 @@ export function loadSettings(env = process.env) {
     productSlug: "armorcodex",
     mcpName: env.ARMORCODEX_MCP_NAME?.trim() || "codex",
     agentId: env.ARMORCODEX_AGENT_ID?.trim() || "codex",
+    // The product slug the backend resolves to this org's Codex agent for policy v2.
+    policyAgentId: env.ARMORCODEX_POLICY_AGENT?.trim() || "armorcodex",
+    policyV2Enabled: parseBoolean(env.ARMORCODEX_POLICY_V2, true),
     contextId: env.ARMORCODEX_CONTEXT_ID?.trim() || "default",
 
     // Intent enforcement — default true (enforce plan mode)
