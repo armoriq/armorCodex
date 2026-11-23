@@ -55,7 +55,10 @@ const ALLOWED = [
   () => 'for f in *.log; do rm "$f"; done',
   () => "date > last-clean.txt",
   () => `grep -n stageAndFormat ${data()}/../plugins/armorcodex/scripts/lib/armor-policy-commands.mjs`,
-  () => "node scripts/writeJson.mjs out/report.json"
+  () => "node scripts/writeJson.mjs out/report.json",
+  () => "echo $(date) > build.log",
+  () => "bash -c 'echo hi > notes.txt'",
+  () => "if true; then rm -f notes.txt; fi"
 ];
 
 const DENIED = [
@@ -75,7 +78,20 @@ const DENIED = [
   () => "sudo -u root rm ~/.armoriq/credentials.json",
   () => "echo ~/.armoriq/credentials.json | xargs rm",
   () => "rm -rf ~/.codex/arm*",
-  () => "f=policy; rm ~/.codex/armorcodex/$f.json"
+  () => "f=policy; rm ~/.codex/armorcodex/$f.json",
+  () => "rm ~/.codex/$x",
+  () => "if true; then rm ~/.codex/armorcodex/policy.json; fi",
+  () => "for x in 1; do rm ~/.armoriq/credentials.json; done",
+  () => "! rm ~/.codex/armorcodex/policy.json",
+  () => "echo $(rm ~/.codex/armorcodex/policy.json)",
+  () => "echo `rm ~/.codex/armorcodex/policy.json`",
+  () => "bash -c 'echo {} > ~/.codex/armorcodex/policy.json'",
+  () => "sh -lc \"rm ~/.armoriq/credentials.json\"",
+  () => `touch ${data()}/pending-plan.guard.json`,
+  () => `unlink ${data()}/policy.json`,
+  () => `mkdir ${data()}/policy-holds`,
+  () => "ln -s ~/.codex/armorcodex d && echo {} > d/policy.json",
+  () => `ln -s ${data()}/policy.json ./settings-link.json`
 ];
 
 for (const command of ALLOWED) {
@@ -103,6 +119,8 @@ for (const command of ADMIN_DENIED) {
 }
 
 for (const header of [
+  () => `  *** Add File: ${data()}/policy.json`,
+  () => `\t*** Update File: ${data()}/runtime.json`,
   () => `*** Add File: ${data()}/NOTES.md`,
   () => `*** Update File: ${data()}/policy.json`,
   () => `*** Delete File: ${data()}/runtime.json`,
@@ -145,4 +163,10 @@ test("the guard matches through a symlinked temp directory", async () => {
 
 test("an apply_patch outside ArmorCodex files runs", async () => {
   assert.equal(await toolDecision("apply_patch", patch(`*** Add File: ${workDir}/notes.md`)), "allow");
+});
+
+test("a variable target is not taken as a protected file when cwd is the home directory", async () => {
+  for (const command of ['rm -f "$tmpfile"', 'echo hi > "$LOG"', 'cp a.txt "$OUT"', 'mv "$f" "$f.bak"']) {
+    assert.equal(await toolDecision("Bash", { command }, home), "allow", command);
+  }
 });

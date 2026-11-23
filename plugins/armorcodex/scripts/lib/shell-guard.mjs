@@ -2,10 +2,14 @@ import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 
-const EVERY_OPERAND = new Set(["rm", "tee", "truncate", "chmod", "chown"]);
+const EVERY_OPERAND = new Set(["rm", "tee", "truncate", "chmod", "chown", "touch", "unlink", "shred", "mkdir"]);
 const INTO_DESTINATION = new Set(["cp", "install", "ln"]);
 const WRITE_COMMANDS = new Set([...EVERY_OPERAND, ...INTO_DESTINATION, "mv", "sed", "dd"]);
 const SEPARATOR = /^(&&|\|\||[;|&\n(){}])$/;
+const KEYWORDS = new Set(["if", "then", "else", "elif", "do", "while", "until", "!"]);
+const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh"]);
+const SUBSTITUTION = /\$\(([^()]*)\)|`([^`]*)`/g;
+const MAX_DEPTH = 4;
 const POLICY_ADMIN =
   /armor-policy-commands|handleArmorPolicyCommand|applyPolicyCommand|persistNextState|stageAndFormat|policy-pending|crypto-policy-state/i;
 const INTERPRETERS = new Set([
@@ -85,7 +89,7 @@ function unwrap(argv) {
   let i = 0;
   let stdin = false;
   for (;;) {
-    while (/^\w+=/.test(argv[i] ?? "")) i++;
+    while (/^\w+=/.test(argv[i] ?? "") || KEYWORDS.has(argv[i])) i++;
     const spec = WRAPPERS[path.basename(argv[i] ?? "")];
     if (!spec) return { argv: argv.slice(i), stdin };
     stdin ||= Boolean(spec.stdin);
@@ -125,6 +129,10 @@ function commandTargets([name, ...args]) {
     return [...whole(targetDir ? files : files.slice(0, -1)), ...exact(destinations(args))];
   }
   if (command === "rm") return whole(operands(args).files);
+  if (command === "ln") {
+    const { files, targetDir } = operands(args);
+    return [...exact(destinations(args)), ...whole(targetDir ? files : files.slice(0, -1))];
+  }
   if ((command === "chmod" || command === "chown") && args.some((a) => RECURSIVE.test(a)))
     return whole(operands(args).files);
   if (EVERY_OPERAND.has(command)) return exact(operands(args).files);
@@ -198,7 +206,11 @@ function patternHits(expanded, base, resolvedProtected, wholeTree) {
   if (/[$`]/.test(expanded)) {
     const head = expanded.slice(slash + 1, special);
     return resolvedProtected.some(
-      (p) => p !== dir && isUnder(p, dir) && path.relative(dir, p).startsWith(head)
+      (p) =>
+        p !== dir &&
+        isUnder(p, dir) &&
+        path.relative(dir, p).startsWith(head) &&
+        (head !== "" || path.dirname(p) === dir)
     );
   }
   const regex = globRegex(path.join(dir, expanded.slice(slash + 1)));
@@ -220,7 +232,19 @@ const isUnder = (target, protectedPath) =>
 export const isProtectedPath = (target, protectedPaths) =>
   protectedPaths.some((p) => isUnder(realPath(path.resolve(target)), realPath(path.resolve(p))));
 
-export function writesProtectedPath(command, cwd, protectedPaths) {
+function innerCommands(cmd, redirects) {
+  const inner = [];
+  for (const word of [...cmd, ...redirects]) {
+    for (const match of word.matchAll(SUBSTITUTION)) inner.push(match[1] ?? match[2]);
+  }
+  if (SHELLS.has(path.basename(cmd[0] ?? ""))) {
+    const flag = cmd.findIndex((arg, i) => i > 0 && /^-[a-zA-Z]*c[a-zA-Z]*$/.test(arg));
+    if (flag !== -1 && typeof cmd[flag + 1] === "string") inner.push(cmd[flag + 1]);
+  }
+  return inner;
+}
+
+export function writesProtectedPath(command, cwd, protectedPaths, depth = 0) {
   const resolvedProtected = protectedPaths.map((p) => realPath(path.resolve(p)));
   const basenames = new Set(protectedPaths.map((p) => path.basename(p)));
   const mentions = (word) => basenames.has(path.basename(word));
@@ -242,6 +266,11 @@ export function writesProtectedPath(command, cwd, protectedPaths) {
     if (stdin && WRITE_COMMANDS.has(path.basename(cmd[0] ?? "")) && words.some(mentions))
       return true;
     if ([...exact(redirects), ...commandTargets(cmd)].some((w) => hits(w, base))) return true;
+    if (
+      depth < MAX_DEPTH &&
+      innerCommands(cmd, redirects).some((inner) => writesProtectedPath(inner, base, protectedPaths, depth + 1))
+    )
+      return true;
   }
   return false;
 }

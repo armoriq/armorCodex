@@ -126,7 +126,7 @@ function unapprovedMcpServer(toolName, toolInput, rules) {
   return approved ? "" : call.server;
 }
 
-const PATCH_TARGET_RE = /^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$/gm;
+const PATCH_TARGET_RE = /^[ \t]*\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$/gm;
 
 function patchTargets(toolInput) {
   const text = isPlainObject(toolInput)
