@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { handlePermissionRequest, handlePreToolUse } from "../plugins/armorcodex/scripts/lib/engine.mjs";
 import { decideV2 } from "../plugins/armorcodex/scripts/lib/v2-decision.mjs";
-import { settleHold } from "../plugins/armorcodex/scripts/lib/policy-gate.mjs";
+import { combinePolicyDecisions, settleHold } from "../plugins/armorcodex/scripts/lib/policy-gate.mjs";
 
 // Captured from conmap-auto's GET /policy/bundles/current?agent=armorcodex: an
 // active org-wide policy blocking apply_patch and an agent shadow blocking Bash.
@@ -169,50 +169,143 @@ test("the local policy still blocks when v2 allows: strictest wins", async (t) =
   assert.match(out.hookSpecificOutput.permissionDecisionReason, /ArmorCodex policy deny: p1/);
 });
 
-test("a held Bash call: blocked with approvals off; with approvals on, released once to Codex's prompt", async (t) => {
-  const server = await backend(serveBundle(withPolicies([FLOOR_HOLD])));
-  t.after(server.close);
-  const cfg = await config(server.url);
-  const call = (mode, turn = "t1") => ({
-    hook_event_name: "PreToolUse",
-    session_id: "s-hold",
-    turn_id: turn,
-    permission_mode: mode,
-    tool_name: "Bash",
-    tool_input: { command: "date -u" }
-  });
+function holdBackend(answers) {
+  const calls = [];
+  const handler = (req, res) => {
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", () => {
+      const route = req.url.split("?")[0];
+      if (route === "/policy/bundles/current") return serveBundle(withPolicies([FLOOR_HOLD]))(req, res);
+      calls.push({ route, body: body ? JSON.parse(body) : undefined, email: req.headers["x-user-email"] });
+      const [status, payload] = answers[route]?.(calls) ?? [404, {}];
+      res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(payload));
+    });
+  };
+  return { handler, calls };
+}
 
-  const off = await handlePreToolUse(call("bypassPermissions"), cfg);
-  assert.match(off.hookSpecificOutput.permissionDecisionReason, /holds Bash for approval.*Approvals are off/);
+const jwtFor = (claims) => `h.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.s`;
 
-  const first = await handlePreToolUse(call("default"), cfg);
-  assert.match(first.hookSpecificOutput.permissionDecisionReason, /escalated permissions/);
-  assert.equal(await handlePreToolUse(call("default"), cfg), null, "the identical retry goes to the approval prompt");
+async function withPlan(cfg, sessionId, planId = "plan-1") {
+  const token = { jwtToken: jwtFor({ type: "iap_token", plan_id: planId, agent_id: "codex-minted" }), planId };
+  await writeFile(cfg.runtimeFile, JSON.stringify({ sessions: { [sessionId]: { intentTokenRaw: JSON.stringify(token) } } }));
+}
 
-  const prompt = await handlePermissionRequest(
-    { ...call("default"), hook_event_name: "PermissionRequest", tool_input: { command: "date -u", description: "why" } },
-    cfg
-  );
-  assert.equal(prompt.hookSpecificOutput, undefined, "the person decides");
-  assert.match(prompt.systemMessage, /codex-floor/);
-
-  assert.equal(await settleHold(cfg, { ...call("default"), hook_event_name: "PostToolUse" }), "approved");
-
-  const other = await handlePreToolUse({ ...call("default"), tool_input: { command: "date" } }, cfg);
-  assert.equal(other.hookSpecificOutput.permissionDecision, "deny", "a release covers only that exact command");
-  const later = await handlePreToolUse(call("default", "t2"), cfg);
-  assert.equal(later.hookSpecificOutput.permissionDecision, "deny", "a release covers only the turn it was refused in");
+const heldBash = (sessionId, command = "date -u") => ({
+  hook_event_name: "PreToolUse",
+  session_id: sessionId,
+  tool_use_id: "tu1",
+  tool_name: "Bash",
+  tool_input: { command }
 });
 
-test("a released hold that never reached a prompt is recorded as such", async (t) => {
+test("a held call without a signed plan is stopped with the way to attach one", async (t) => {
+  const { handler, calls } = holdBackend({});
+  const server = await backend(handler);
+  t.after(server.close);
+  const out = await handlePreToolUse(heldBash("s-noplan"), await config(server.url, { userEmail: "dev@acme.test" }));
+  assert.match(out.hookSpecificOutput.permissionDecisionReason, /holds Bash for approval.*register_intent_plan/);
+  assert.equal(calls.filter((c) => c.route !== "/iap/validate-key").length, 0);
+});
+
+test("a held call files one approval request, and its retry runs once the workspace approved it", async (t) => {
+  let approved = false;
+  const { handler, calls } = holdBackend({
+    "/iap/sdk/enforce": () =>
+      approved
+        ? [200, { allowed: true, enforcementAction: "allow", reason: "approved_delegation", metadata: { delegationId: "d-1" } }]
+        : [200, { allowed: false, enforcementAction: "hold", reason: "hold:Bash#0" }],
+    "/delegation/my-role": () => [200, { role: "member", limit: 5 }],
+    "/delegation/request": () => [201, { delegationId: "d-1", status: "pending" }]
+  });
+  const server = await backend(handler);
+  t.after(server.close);
+  const cfg = await config(server.url, { userEmail: "dev@acme.test", agentId: "codex", mcpName: "codex", auditEnabled: true });
+  await withPlan(cfg, "s-hold");
+
+  const first = await handlePreToolUse(heldBash("s-hold"), cfg);
+  assert.equal(first.hookSpecificOutput.permissionDecision, "deny");
+  assert.match(first.hookSpecificOutput.permissionDecisionReason, /"codex-floor" holds Bash for approval.*Approval request d-1 is waiting/);
+  const wal = (await readFile(path.join(cfg.dataDir, "audit", "current.jsonl"), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
+  assert.deepEqual(wal.map((r) => r.status), ["held"], "a held row keeps the plan open on the backend");
+  const enforce = calls.find((c) => c.route === "/iap/sdk/enforce").body;
+  assert.equal(enforce.agent_id, "codex-minted", "the agent the token was minted for, not the configured one");
+  assert.deepEqual(enforce.intent_token, { jwt_token: jwtFor({ type: "iap_token", plan_id: "plan-1", agent_id: "codex-minted" }), plan_id: "plan-1" });
+  assert.equal(enforce.user_email, "dev@acme.test");
+  assert.equal(enforce.mcp, "codex");
+  const request = calls.find((c) => c.route === "/delegation/request");
+  assert.deepEqual(
+    { ...request.body, email: request.email },
+    { tool: "Bash", action: "execute", arguments: { command: "date -u" }, requesterEmail: "dev@acme.test", requesterRole: "member", requesterLimit: 5, domain: "codex", planId: "plan-1", reason: "hold:Bash#0", email: "dev@acme.test" }
+  );
+
+  await handlePreToolUse(heldBash("s-hold"), cfg);
+  assert.equal(calls.filter((c) => c.route === "/delegation/request").length, 1, "a still-held retry reuses its request");
+
+  approved = true;
+  assert.equal(await handlePreToolUse(heldBash("s-hold"), cfg), null);
+  const prompt = await handlePermissionRequest({ ...heldBash("s-hold"), hook_event_name: "PermissionRequest" }, cfg);
+  assert.equal(prompt.hookSpecificOutput, undefined, "Codex's own sandbox prompt is left to the person");
+  assert.match(prompt.systemMessage, /approved this Bash call \(request d-1\)/);
+  assert.equal(await settleHold(cfg, { ...heldBash("s-hold"), hook_event_name: "PostToolUse" }), "approved");
+  assert.equal(await settleHold(cfg, { ...heldBash("s-hold"), hook_event_name: "PostToolUse" }), undefined);
+});
+
+test("a retry under the next turn's plan spends the approval filed under the earlier plan", async (t) => {
+  let status = "pending";
+  const { handler, calls } = holdBackend({
+    "/iap/sdk/enforce": (all) =>
+      all.at(-1).body.intent_token.plan_id === "plan-1" && status === "approved"
+        ? [200, { allowed: true, enforcementAction: "allow", reason: "approved_delegation", metadata: { delegationId: "d-1" } }]
+        : [200, { allowed: false, enforcementAction: "hold", reason: "hold:Bash#0" }],
+    "/delegation/my-role": () => [200, { role: "member", limit: 5 }],
+    "/delegation/request": () => [201, { delegationId: "d-1", status: "pending" }],
+    "/delegation/d-1/status": () => [200, { status, delegationId: "d-1" }]
+  });
+  const server = await backend(handler);
+  t.after(server.close);
+  const cfg = await config(server.url, { userEmail: "dev@acme.test", agentId: "codex", mcpName: "codex" });
+  await withPlan(cfg, "s-turns");
+  await handlePreToolUse(heldBash("s-turns"), cfg);
+
+  await withPlan(cfg, "s-turns", "plan-2");
+  const pending = await handlePreToolUse(heldBash("s-turns"), cfg);
+  assert.match(pending.hookSpecificOutput.permissionDecisionReason, /Approval request d-1 is waiting/);
+  assert.equal(calls.filter((c) => c.route === "/delegation/request").length, 1, "no second request for the same call");
+
+  status = "approved";
+  await withPlan(cfg, "s-turns", "plan-3");
+  assert.equal(await handlePreToolUse(heldBash("s-turns"), cfg), null);
+  const plans = calls.filter((c) => c.route === "/iap/sdk/enforce").map((c) => c.body.intent_token.plan_id);
+  assert.deepEqual(plans, ["plan-1", "plan-2", "plan-3", "plan-1"]);
+  assert.equal(await settleHold(cfg, { ...heldBash("s-turns"), hook_event_name: "PostToolUse" }), "approved");
+});
+
+test("a held call is stopped when the approval check fails or the backend blocks it", async (t) => {
+  for (const [answer, expected] of [
+    [() => [500, {}], /approval check failed \(HTTP 500\)/],
+    [() => [200, { allowed: false, enforcementAction: "block", message: "The intent token was issued to another agent." }], /issued to another agent/]
+  ]) {
+    const { handler, calls } = holdBackend({ "/iap/sdk/enforce": answer });
+    const server = await backend(handler);
+    t.after(server.close);
+    const cfg = await config(server.url, { userEmail: "dev@acme.test" });
+    await withPlan(cfg, "s-fail");
+    const out = await handlePreToolUse(heldBash("s-fail"), cfg);
+    assert.equal(out.hookSpecificOutput.permissionDecision, "deny");
+    assert.match(out.hookSpecificOutput.permissionDecisionReason, expected);
+    assert.equal(calls.filter((c) => c.route === "/delegation/request").length, 0);
+  }
+});
+
+test("a call only the tools default allows is not credited to a policy", async (t) => {
   const server = await backend(serveBundle(withPolicies([FLOOR_HOLD])));
   t.after(server.close);
-  const cfg = await config(server.url);
-  const call = { hook_event_name: "PreToolUse", session_id: "s-np", turn_id: "t1", permission_mode: "default", tool_name: "Bash", tool_input: { command: "make" } };
-  await handlePreToolUse(call, cfg);
-  assert.equal(await handlePreToolUse(call, cfg), null);
-  assert.equal(await settleHold(cfg, { ...call, hook_event_name: "PostToolUse" }), "ran_without_prompt");
-  assert.equal(await settleHold(cfg, { ...call, hook_event_name: "PostToolUse" }), undefined);
+  const decision = await decideV2(await config(server.url), "Read", { file_path: "a" });
+  assert.equal(decision.verdict, "allow");
+  assert.equal(decision.policyName, undefined);
+  assert.equal(combinePolicyDecisions(decision, { allowed: true, effect: "default" }).record.source, "default");
 });
 
 test("monitor mode still enforces a local block that v2 also makes", async (t) => {

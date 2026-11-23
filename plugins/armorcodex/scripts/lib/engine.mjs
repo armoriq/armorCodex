@@ -36,8 +36,8 @@ import { readFile, unlink } from "node:fs/promises";
 import { autoUpdate } from "./update-apply.mjs";
 import { decideV2, logShadow } from "./v2-decision.mjs";
 import {
+  approvedHold,
   combinePolicyDecisions,
-  markHoldPrompted,
   resolveHold,
   savePolicyRecord,
   settleHold,
@@ -159,8 +159,8 @@ function readIntentTokenRaw(input, session) {
   return "";
 }
 
-async function denyAndAudit(input, config, reason, errorMessage = reason) {
-  await auditToolCall(input, config, { status: "blocked", output: null, error_message: redactSecrets(errorMessage) }, null);
+async function denyAndAudit(input, config, reason, errorMessage = reason, status = "blocked") {
+  await auditToolCall(input, config, { status, output: null, error_message: redactSecrets(errorMessage) }, null);
   return denyPreTool(reason);
 }
 
@@ -492,20 +492,26 @@ export async function handlePreToolUse(input, config) {
     if (shouldDeny(config) || decision.localBlocks) return denyAndAudit(input, config, reason);
     process.stderr.write(`[armorcodex] monitor mode: ${reason}; allowing it\n`);
   }
-  if (decision.verdict === "hold") {
-    const held = await resolveHold(config, input, decision);
-    if (held.action === "block") {
-      const deny = await denyOrAllow(input, config, held.reason);
-      if (deny) return deny;
-    }
-  }
-
   // --- Intent token verification ---
   // Reuse the runtimeState loaded above instead of re-reading from disk.
   const session = getSession(runtimeState, sessionId) || {};
+  const intentTokenRaw = readIntentTokenRaw(input, session);
+
+  if (decision.verdict === "hold") {
+    if (!shouldDeny(config)) {
+      process.stderr.write(`[armorcodex] monitor mode: ${v2BlockReason(toolName, decision, "holds")}; allowing it\n`);
+    } else {
+      const held = await resolveHold(config, input, decision, intentTokenRaw);
+      if (held.delegationId) {
+        await savePolicyRecord(config, input.tool_use_id, { ...decision.record, delegation_id: held.delegationId });
+      }
+      // A blocked row fails the plan on the backend; a held one keeps it open for the approved retry.
+      if (held.action === "block") return denyAndAudit(input, config, held.reason, held.reason, held.delegationId ? "held" : "blocked");
+    }
+  }
+
   const planCheckDeny = await enforcePlanCheck(input, config, session.planCheck);
   if (planCheckDeny) return planCheckDeny;
-  const intentTokenRaw = readIntentTokenRaw(input, session);
   let localPlan = session.plan;
   let localExpiresAt = session.expiresAt;
   let remoteAllowed = false;
@@ -660,11 +666,12 @@ export async function handlePermissionRequest(input, config) {
   }
 
   const { decision } = await decidePolicy(input, config, toolName, toolInput, { logShadows: false });
-  if (decision.verdict === "hold" && (await markHoldPrompted(config, input))) {
-    return withSystemMessage(
-      {},
-      `${v2BlockReason(toolName, decision, "holds")} for your approval. Approve it only if you intended it.`
-    );
+  if (decision.verdict === "hold") {
+    const approved = await approvedHold(config, input);
+    if (approved) {
+      const request = approved.delegationId ? ` (request ${approved.delegationId})` : "";
+      return withSystemMessage({}, `ArmorIQ: a workspace member approved this ${toolName} call${request}.`);
+    }
   }
   if (decision.verdict !== "allow" && shouldDeny(config)) {
     const reason =
