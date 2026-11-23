@@ -7,7 +7,7 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { handleArmorPolicyCommand } from "../plugins/armorcodex/scripts/lib/armor-policy-commands.mjs";
-import { loadPolicyState } from "../plugins/armorcodex/scripts/lib/policy.mjs";
+import { loadPolicyState, toPolicyDocument } from "../plugins/armorcodex/scripts/lib/policy.mjs";
 
 const requirePlugin = createRequire(new URL("../plugins/armorcodex/package.json", import.meta.url));
 const { Client } = requirePlugin("@modelcontextprotocol/sdk/client/index.js");
@@ -25,7 +25,7 @@ async function withPolicyServer(fn) {
   const dataDir = path.join(home, "data");
   fs.mkdirSync(dataDir, { recursive: true });
   const policyFile = path.join(dataDir, "policy.json");
-  await writeFile(policyFile, JSON.stringify({ version: 3, policy: { rules: DENY_RULES }, history: [] }));
+  await writeFile(policyFile, JSON.stringify({ version: 3, policy: toPolicyDocument({ rules: DENY_RULES }), history: [] }));
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: ["--import", SANDBOX, SERVER],
