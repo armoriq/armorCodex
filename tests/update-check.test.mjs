@@ -314,7 +314,7 @@ test("SessionStart surfaces a pending update from state without any network call
     { liveRoot }
   );
 
-  assert.equal(sessionContext(output), "ArmorCodex active (ENFORCING, intent=required)");
+  assert.equal(sessionContext(output), "ArmorCodex active (ENFORCING, intent=required). Not signed in to ArmorIQ: only the local policy and intent plan apply; org policies, approvals and audit upload are off.");
   // systemMessage, not additionalContext: the notice is for the person, and
   // the model must not be handed an install command to run mid-session.
   assert.match(output.systemMessage, /ArmorCodex v9\.9\.9 is available \(running 0\.3\.3\)/);
@@ -338,7 +338,7 @@ test("SessionStart says nothing extra when the cached release matches the runnin
     config
   );
 
-  assert.equal(sessionContext(output), "ArmorCodex active (ENFORCING, intent=required)");
+  assert.equal(sessionContext(output), "ArmorCodex active (ENFORCING, intent=required). Not signed in to ArmorIQ: only the local policy and intent plan apply; org policies, approvals and audit upload are off.");
   assert.equal(output.systemMessage, undefined);
 });
 
@@ -356,6 +356,6 @@ test("SessionStart with the opt-out set never reads or writes update state", asy
     config
   );
 
-  assert.equal(sessionContext(output), "ArmorCodex active (ENFORCING, intent=required)");
+  assert.equal(sessionContext(output), "ArmorCodex active (ENFORCING, intent=required). Not signed in to ArmorIQ: only the local policy and intent plan apply; org policies, approvals and audit upload are off.");
   assert.equal(output.systemMessage, undefined);
 });

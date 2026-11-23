@@ -415,7 +415,7 @@ test("SessionStart swaps a staged release in and tells the user, in one session"
   );
 
   assert.match(output.systemMessage, /ArmorCodex updated to 0\.4\.0 \(was 0\.3\.3\)/);
-  assert.equal(output.hookSpecificOutput.additionalContext, "ArmorCodex active (ENFORCING, intent=required)");
+  assert.equal(output.hookSpecificOutput.additionalContext, "ArmorCodex active (ENFORCING, intent=required). Not signed in to ArmorIQ: only the local policy and intent plan apply; org policies, approvals and audit upload are off.");
   assert.equal(treeVersion(installHome), "0.4.0");
   assert.equal(treeVersion(paths.previous), "0.3.3");
   assert.ok(JSON.parse(readFileSync(config.runtimeFile, "utf8")).sessions["sess-swap"]);
@@ -438,7 +438,7 @@ test("SessionStart returns normally when the swap fails on a dirty tree", async 
     { installHome, liveRoot: installHome, env: withPath(binDir) }
   );
 
-  assert.equal(output.hookSpecificOutput.additionalContext, "ArmorCodex active (ENFORCING, intent=required)");
+  assert.equal(output.hookSpecificOutput.additionalContext, "ArmorCodex active (ENFORCING, intent=required). Not signed in to ArmorIQ: only the local policy and intent plan apply; org policies, approvals and audit upload are off.");
   assert.match(output.systemMessage, /ArmorCodex v0\.4\.0 is available/);
   assert.equal(treeVersion(installHome), "0.3.3");
 });
@@ -455,7 +455,7 @@ test("SessionStart returns normally when the install path is gone entirely", asy
     { installHome: missing, liveRoot: missing, env: { PATH: process.env.PATH } }
   );
 
-  assert.equal(output.hookSpecificOutput.additionalContext, "ArmorCodex active (ENFORCING, intent=required)");
+  assert.equal(output.hookSpecificOutput.additionalContext, "ArmorCodex active (ENFORCING, intent=required). Not signed in to ArmorIQ: only the local policy and intent plan apply; org policies, approvals and audit upload are off.");
   assert.equal(output.systemMessage, undefined, "a tree that is not a release checkout gets no notice");
 });
 
@@ -636,7 +636,7 @@ test("SessionStart still returns when the updater itself throws", async (t) => {
     { installHome: 42, liveRoot: 42, env: { PATH: process.env.PATH } }
   );
 
-  assert.equal(output.hookSpecificOutput.additionalContext, "ArmorCodex active (ENFORCING, intent=required)");
+  assert.equal(output.hookSpecificOutput.additionalContext, "ArmorCodex active (ENFORCING, intent=required). Not signed in to ArmorIQ: only the local policy and intent plan apply; org policies, approvals and audit upload are off.");
   assert.equal(output.systemMessage, undefined);
   assert.ok(JSON.parse(readFileSync(config.runtimeFile, "utf8")).sessions["sess-throw"]);
 });
