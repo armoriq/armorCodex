@@ -4,7 +4,7 @@ import { createServer } from "node:http";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { handlePermissionRequest, handlePreToolUse } from "../plugins/armorcodex/scripts/lib/engine.mjs";
+import { handlePermissionRequest, handlePostToolUse, handlePreToolUse } from "../plugins/armorcodex/scripts/lib/engine.mjs";
 import { decideV2 } from "../plugins/armorcodex/scripts/lib/v2-decision.mjs";
 import { combinePolicyDecisions, settleHold } from "../plugins/armorcodex/scripts/lib/policy-gate.mjs";
 
@@ -318,6 +318,27 @@ test("monitor mode still enforces a local block that v2 also makes", async (t) =
     cfg
   );
   assert.equal(out.hookSpecificOutput.permissionDecision, "deny");
+});
+
+test("in monitor mode a v2 block or hold runs, and its row records the verdict as not enforced", async (t) => {
+  const server = await backend(serveBundle(withPolicies([FLOOR_HOLD])));
+  t.after(server.close);
+  const cfg = await config(server.url, { mode: "monitor", auditEnabled: true });
+  for (const [tool, toolInput, id] of [["apply_patch", { input: "x" }, "call_patch"], ["Bash", { command: "date -u" }, "call_bash"]]) {
+    const call = { session_id: "s-mon", tool_name: tool, tool_input: toolInput, tool_use_id: id };
+    assert.equal(await handlePreToolUse({ ...call, hook_event_name: "PreToolUse" }, cfg), null);
+    await handlePostToolUse({ ...call, hook_event_name: "PostToolUse", tool_response: "ok" }, cfg);
+  }
+  const rows = (await readFile(path.join(cfg.dataDir, "audit", "current.jsonl"), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
+  assert.deepEqual(
+    rows.map((r) => [r.tool, r.status, r.input.armoriq_policy.policy_name, r.input.armoriq_policy.verdict, r.input.armoriq_policy.enforced]),
+    [
+      ["apply_patch", "success", "codex-floor", "block", false],
+      ["Bash", "success", "codex-floor", "hold", false]
+    ]
+  );
+  assert.match(rows[0].input.armoriq_policy.unenforced_reasons[0], /^ArmorIQ policy "codex-floor" blocked apply_patch/);
+  assert.match(rows[1].input.armoriq_policy.unenforced_reasons[0], /^ArmorIQ policy "codex-floor" holds Bash/);
 });
 
 test("a cached bundle confirmed in the future is refetched", async (t) => {
