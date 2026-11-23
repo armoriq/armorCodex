@@ -96,7 +96,8 @@ export function localOnly(config) {
     observabilityEnabled: false,
     usageSyncEnabled: false,
     orgMonitor: false,
-    orgMonitorNotices: false
+    orgMonitorNotices: false,
+    ...config.beforeOrgMonitor
   };
 }
 
