@@ -52,9 +52,38 @@ test("an allow rule limited by parameters does not approve the whole server", as
   assert.equal((await preToolUse(config, "mcp__gh__create_issue"))?.hookSpecificOutput?.permissionDecision, "deny");
 });
 
+const resourceCall = (config, toolName, toolInput) =>
+  handlePreToolUse({ hook_event_name: "PreToolUse", session_id: "sess-mcp", tool_name: toolName, tool_input: toolInput }, config);
+
+test("an unapproved MCP server's resources can be neither listed nor read, an approved server's can", async () => {
+  const config = await hookConfig();
+  const denied = async (toolName, toolInput) =>
+    (await resourceCall(config, toolName, toolInput))?.hookSpecificOutput?.permissionDecisionReason ?? "";
+  assert.match(await denied("read_mcp_resource", { server: "probe", uri: "probe://notes/secret" }), /MCP server "probe" is not approved/);
+  assert.match(await denied("list_mcp_resources", { server: "probe" }), /MCP server "probe" is not approved/);
+  assert.match(await denied("list_mcp_resource_templates", { server: "probe" }), /MCP server "probe" is not approved/);
+  assert.match(await denied("list_mcp_resources", {}), /across every server is blocked/);
+
+  await handleArmorPolicyCommand("/armor mcp approve probe", config, "sess-user");
+  await handleArmorPolicyCommand("/armor yes", config, "sess-user");
+  assert.equal(await resourceCall(config, "read_mcp_resource", { server: "probe", uri: "probe://notes/secret" }), null);
+  assert.equal(await resourceCall(config, "list_mcp_resources", { server: "probe" }), null);
+  assert.match(await denied("read_mcp_resource", { server: "other", uri: "other://x" }), /MCP server "other" is not approved/);
+});
+
+test("approving one tool of a server does not open its resources", async () => {
+  const config = await hookConfig();
+  const rules = [{ id: "probe-echo", action: "allow", tool: "mcp__probe__echo" }];
+  await writeFile(config.policyFile, JSON.stringify({ version: 1, policy: { rules }, history: [] }));
+  assert.equal(await preToolUse(config, "mcp__probe__echo"), null);
+  const decision = await resourceCall(config, "read_mcp_resource", { server: "probe", uri: "probe://notes/secret" });
+  assert.equal(decision?.hookSpecificOutput?.permissionDecision, "deny");
+});
+
 test("ARMORCODEX_MCP_DENY_BY_DEFAULT=false turns the MCP gate off", async () => {
   const config = await hookConfig({ ARMORCODEX_MCP_DENY_BY_DEFAULT: "false" });
   assert.equal(await preToolUse(config, "mcp__echo__echo"), null);
+  assert.equal(await resourceCall(config, "read_mcp_resource", { server: "probe", uri: "probe://notes/secret" }), null);
 });
 
 test("a blocked audit row redacts secrets in the backend's deny reason", async () => {
