@@ -149,6 +149,21 @@ test("a 401 switches to local only mode instead of blocking as unreachable", asy
   assert.equal(backend.state.probes, 1);
 });
 
+test("after a 401 the next session banner says the stored key was rejected", async (t) => {
+  const { env, dataDir } = await setup(t, "401");
+  await preTool(env, "Bash", { command: "ls" });
+  assert.equal(posture(dataDir).state, "signed_out");
+  const { decision } = await hook(env, { hook_event_name: "SessionStart", source: "startup" });
+  assert.match(decision.hookSpecificOutput.additionalContext, /^ArmorCodex active \(ENFORCING, intent=\w+\)\. ArmorIQ rejected the stored key: only the local policy and intent plan apply; org policies, approvals and audit upload are off until you sign in again\.$/);
+});
+
+test("a reachable backend keeps the plain session banner", async (t) => {
+  const { env } = await setup(t, "ok");
+  await preTool(env, "Bash", { command: "ls" });
+  const { decision } = await hook(env, { hook_event_name: "SessionStart", source: "startup" });
+  assert.match(decision.hookSpecificOutput.additionalContext, /^ArmorCodex active \(ENFORCING, intent=\w+\)$/);
+});
+
 test("rows blocked while unreachable stay queued, then upload once the backend is back", async (t) => {
   const { env, dataDir, backend } = await setup(t, "503");
   assertUnreachableDeny(await preTool(env, "Bash", { command: "ls" }));

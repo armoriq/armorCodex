@@ -219,6 +219,32 @@ function matchedStepIndex(plan, toolName, toolInput) {
 // SessionStart
 // ---------------------------------------------------------------------------
 
+const LOCAL_ONLY_SCOPE = "only the local policy and intent plan apply; org policies, approvals and audit upload are off";
+
+export function sessionBanner(config, { unreadable = false, posture = null } = {}) {
+  const enforcing = shouldDeny(config);
+  const intent = config.intentRequired ? "required" : "optional";
+  const head = `ArmorCodex active (${enforcing ? "ENFORCING" : "MONITORING"}, intent=${intent})`;
+  const notes = [];
+  if (unreadable) notes.push(POLICY_UNREADABLE_NOTICE);
+  if (!enforcing) {
+    notes.push(
+      "Monitor mode: the local policy still blocks; intent drift, org policy blocks and holds, and backend outages are allowed, not blocked"
+    );
+  }
+  if (posture === "unreachable" && enforcing) {
+    notes.push("The ArmorIQ backend is not answering: calls other than reads and ArmorCodex's own tools are blocked until it answers");
+  }
+  if (config.keyRejected || posture === "signed_out") {
+    notes.push(`ArmorIQ rejected the stored key: ${LOCAL_ONLY_SCOPE} until you sign in again`);
+  } else if (!config.apiKey) {
+    notes.push(`Not signed in to ArmorIQ: ${LOCAL_ONLY_SCOPE}`);
+  } else if (config.policyV2Enabled === false) {
+    notes.push("Org policies are off (ARMORCODEX_POLICY_V2=false): only the local policy and intent plan apply");
+  }
+  return notes.length ? `${head}. ${notes.join(". ")}.` : head;
+}
+
 export async function handleSessionStart(input, config, updateOptions = {}) {
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   if (!sessionId) return null;
@@ -232,16 +258,14 @@ export async function handleSessionStart(input, config, updateOptions = {}) {
 
   debugLog(config, `session started: ${sessionId}, mode=${config.mode}`);
 
-  const modeLabel = config.mode === "enforce" ? "ENFORCING" : "MONITORING";
-  const intentLabel = config.intentRequired ? "required" : "optional";
-
   // The update notice is for the person, not the model: handed to the model it
   // reads as an instruction to run the install command mid-session.
   const update = await autoUpdate(config, updateOptions);
   const { unreadable } = config.policyFile ? await loadPolicyState(config.policyFile) : {};
-  const banner = `ArmorCodex active (${modeLabel}, intent=${intentLabel})`;
+  const posture = config.apiKey ? await backendPosture(config) : null;
+  const banner = sessionBanner(config, { unreadable, posture });
   return withSystemMessage(
-    addPromptContext(unreadable ? `${banner}. ${POLICY_UNREADABLE_NOTICE}.` : banner, "SessionStart"),
+    addPromptContext(banner, "SessionStart"),
     [unreadable && POLICY_UNREADABLE_NOTICE, update.notice].filter(Boolean).join("\n") || undefined
   );
 }

@@ -87,7 +87,7 @@ export async function backendPosture(config) {
 }
 
 export function localOnly(config) {
-  return { ...config, apiKey: "", auditEnabled: false, observabilityEnabled: false, usageSyncEnabled: false };
+  return { ...config, apiKey: "", keyRejected: true, auditEnabled: false, observabilityEnabled: false, usageSyncEnabled: false };
 }
 
 export function unreachableReason(toolName, capability) {
