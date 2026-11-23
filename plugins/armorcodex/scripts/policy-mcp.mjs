@@ -7,8 +7,15 @@ import { loadSettings, withLogin } from "./lib/config.mjs";
 import { ensurePrivateDir, writeJson } from "./lib/fs-store.mjs";
 import { extractAllowedActions, requestIntent } from "./lib/intent.mjs";
 import { INTENT_PLAN_ZOD, PLAN_STEP_SCHEMA, normalizeIntentPlan } from "./lib/intent-schema.mjs";
-import { applyPolicyCommand, computePolicyHash, loadPolicyState, parsePolicyTextCommand } from "./lib/policy.mjs";
-import { handleArmorPolicyCommand } from "./lib/armor-policy-commands.mjs";
+import {
+  applyPolicyCommand,
+  computePolicyHash,
+  loadPolicyState,
+  mergeRules,
+  normalizeRule,
+  parsePolicyTextCommand
+} from "./lib/policy.mjs";
+import { handleArmorPolicyCommand, stageAndFormat } from "./lib/armor-policy-commands.mjs";
 import { createAuditFlusher } from "./lib/audit-flusher.mjs";
 import { createAuditWal } from "./lib/audit-wal.mjs";
 import { createIapService } from "./lib/iap-service.mjs";
@@ -46,6 +53,13 @@ const POLICY_UPDATE_SCHEMA = z.object({
   mode: z.enum(["replace", "merge"]).optional(),
   rules: z.array(POLICY_RULE_SCHEMA)
 });
+
+const READ_ONLY_TEXT_COMMANDS = new Set(["none", "help", "list", "get"]);
+
+function proposedPolicy(state, update) {
+  const rules = update.rules.map((rule) => normalizeRule(rule)).filter(Boolean);
+  return { rules: update.mode === "replace" ? rules : mergeRules(state.policy.rules, rules) };
+}
 
 function toTextResult(text, extra = {}) {
   return {
@@ -187,14 +201,15 @@ async function run() {
     "policy_update",
     {
       title: "Policy Update",
-      description: "Manage ArmorCodex policy rules (update/list/delete/reset)",
+      description:
+        "Read ArmorCodex policy rules, or stage a rule change (merge or replace) for the user to review. Nothing is applied from here: the user reviews a staged change and applies it in the terminal with `armor policy confirm <id>`.",
       inputSchema: {
         text: z.string().optional(),
         update: POLICY_UPDATE_SCHEMA.optional()
       },
       annotations: {
         readOnlyHint: false,
-        destructiveHint: true,
+        destructiveHint: false,
         idempotentHint: false,
         openWorldHint: false
       }
@@ -207,6 +222,11 @@ async function run() {
 
       if (typeof args.text === "string" && args.text.trim()) {
         const command = parsePolicyTextCommand(args.text, state);
+        if (!READ_ONLY_TEXT_COMMANDS.has(command.kind)) {
+          return toTextResult(
+            "Policy changes from the agent are staged, never applied. Use the policy_command tool (e.g. 'policy remove <id>') or policy_update with `update`, then the user reviews and applies it with `armor policy confirm <id>`."
+          );
+        }
         const result = await applyPolicyCommand({
           policyFilePath: config.policyFile,
           state,
@@ -219,22 +239,14 @@ async function run() {
       if (args.update) {
         let updateInput = args.update;
         if (typeof updateInput === "string") {
-          try { updateInput = JSON.parse(updateInput); } catch { /* let validator complain */ }
+          try { updateInput = JSON.parse(updateInput); } catch { updateInput = null; }
         }
         const parsed = POLICY_UPDATE_SCHEMA.safeParse(updateInput);
         if (!parsed.success) {
           return toTextResult(`Policy update rejected: ${parsed.error.message}`);
         }
-        const result = await applyPolicyCommand({
-          policyFilePath: config.policyFile,
-          state,
-          command: {
-            kind: "update",
-            update: parsed.data
-          },
-          actor: "mcp"
-        });
-        return toTextResult(result.message, { version: result.state.version });
+        const message = await stageAndFormat(config, state, proposedPolicy(state, parsed.data), parsed.data.reason, "mcp");
+        return toTextResult(message, { version: state.version, staged: true });
       }
 
       return toTextResult("Policy update rejected: missing `text` or `update`.");
@@ -246,7 +258,7 @@ async function run() {
     {
       title: "Policy Command",
       description:
-        "Run a structured ArmorCodex /armor policy command. Read and stage are allowed (e.g. 'policy list', 'policy view', 'policy add deny bash', 'policy default deny', 'policy template lockdown'). Applying is human-only: 'confirm'/'yes' are rejected here and must be done from the terminal with /armor yes.",
+        "Run a structured ArmorCodex /armor policy command. Read and stage are allowed (e.g. 'policy list', 'policy view', 'policy add deny bash', 'policy default deny', 'policy template lockdown'). Applying is human-only: 'confirm'/'yes' are rejected here and must be done from the terminal with armor policy confirm <id>.",
       inputSchema: {
         command: z.string().min(1)
       },
