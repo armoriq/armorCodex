@@ -11,7 +11,7 @@ import { signIn } from "./helpers/login.mjs";
 const HOOK_ROUTER = fileURLToPath(new URL("../plugins/armorcodex/scripts/hook-router.mjs", import.meta.url));
 const KEY = "ak_test_orgmonitor000000000000000000";
 
-function startBackend(answer) {
+function startBackend(answer, keyStatus = 200) {
   const state = { profileHeaders: [] };
   const server = http.createServer((req, res) => {
     req.resume();
@@ -23,7 +23,7 @@ function startBackend(answer) {
           : req.url === "/iap/validate-key"
             ? { userId: "user-login" }
             : { written: 1, failures: [] };
-      res.writeHead(200, { "content-type": "application/json" });
+      res.writeHead(req.url === "/iap/validate-key" ? keyStatus : 200, { "content-type": "application/json" });
       res.end(JSON.stringify(body));
     });
   });
@@ -32,10 +32,10 @@ function startBackend(answer) {
   );
 }
 
-async function setup(t, answer, extraEnv = {}) {
+async function setup(t, answer, extraEnv = {}, keyStatus = 200) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "armorcodex-orgmonitor-"));
   const dataDir = path.join(home, "data");
-  const backend = await startBackend(answer);
+  const backend = await startBackend(answer, keyStatus);
   t.after(() => {
     backend.server.closeAllConnections();
     backend.server.close();
@@ -127,3 +127,9 @@ for (const [name, answer, extraEnv] of [
     );
   });
 }
+
+test("a key the backend rejects is signed out, so a Quiet workspace no longer turns off the local policy", async (t) => {
+  const { env } = await setup(t, { enforcementMode: "shadow", monitorNotices: false }, {}, 401);
+  const { pre } = await session(env);
+  assert.equal(pre?.hookSpecificOutput?.permissionDecision, "deny");
+});

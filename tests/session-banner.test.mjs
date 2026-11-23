@@ -8,6 +8,8 @@ import { handlePreToolUse, handleSessionStart } from "../plugins/armorcodex/scri
 import { localOnly } from "../plugins/armorcodex/scripts/lib/backend-posture.mjs";
 
 process.env.ARMORCODEX_NO_AUTO_UPDATE = "1";
+// These banners are for a Block workspace; with no workspace answer a signed-in session is Quiet and shows none.
+process.env.ARMORIQ_ORG_MODE = "enforce";
 
 const NOT_SIGNED_IN =
   "Not signed in to ArmorIQ: only the local policy and intent plan apply; org policies, approvals and audit upload are off";

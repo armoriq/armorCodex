@@ -87,7 +87,17 @@ export async function backendPosture(config) {
 }
 
 export function localOnly(config) {
-  return { ...config, apiKey: "", keyRejected: true, auditEnabled: false, observabilityEnabled: false, usageSyncEnabled: false };
+  // Signed out means no workspace, so the workspace Monitor cannot turn off the local policy.
+  return {
+    ...config,
+    apiKey: "",
+    keyRejected: true,
+    auditEnabled: false,
+    observabilityEnabled: false,
+    usageSyncEnabled: false,
+    orgMonitor: false,
+    orgMonitorNotices: false
+  };
 }
 
 export function unreachableReason(toolName, capability) {
