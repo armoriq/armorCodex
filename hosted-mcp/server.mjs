@@ -7,21 +7,6 @@ import { z } from "zod";
 const PORT = Number(process.env.PORT) || 8080;
 const DOMAIN_VERIFICATION_TOKEN = process.env.OPENAI_DOMAIN_VERIFICATION_TOKEN || "";
 
-const POLICY_RULE_SCHEMA = z.object({
-  id: z.string().min(1),
-  action: z.enum(["allow", "deny", "require_approval"]),
-  tool: z.string().min(1),
-  dataClass: z.enum(["PCI", "PAYMENT", "PHI", "PII"]).optional(),
-  params: z.record(z.string(), z.unknown()).optional(),
-  anyParam: z.union([z.string().min(1), z.record(z.string(), z.unknown())]).optional()
-});
-
-const POLICY_UPDATE_SCHEMA = z.object({
-  reason: z.string().min(1),
-  mode: z.enum(["replace", "merge"]).optional(),
-  rules: z.array(POLICY_RULE_SCHEMA)
-});
-
 const PLAN_STEP_SCHEMA = z.object({
   tool: z.string().min(1),
   rationale: z.string().optional(),
@@ -74,40 +59,6 @@ function buildServer() {
     name: "armorcodex-policy",
     version: "0.3.0"
   });
-
-  server.registerTool(
-    "policy_update",
-    {
-      title: "Policy Update",
-      description: "Updates the ArmorCodex policy rule set held in this server's in-memory store. Supports two modes: `merge` (default) upserts the submitted rules into the existing set, and `replace` overwrites the entire rule set with the submitted payload. The previous rules are not snapshotted, so `replace` cannot be undone from this tool. Annotations: readOnlyHint=false because the tool mutates server state; destructiveHint=true because replace mode irreversibly drops the prior rule set; openWorldHint=false because all state lives in this MCP server's memory and no external system is contacted.",
-      inputSchema: { update: POLICY_UPDATE_SCHEMA },
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: true,
-        idempotentHint: false,
-        openWorldHint: false
-      }
-    },
-    async (args) => {
-      const parsed = POLICY_UPDATE_SCHEMA.safeParse(args?.update);
-      if (!parsed.success) {
-        return toTextResult(`Policy update rejected: ${parsed.error.message}`);
-      }
-      const { mode = "merge", rules, reason } = parsed.data;
-      if (mode === "replace") {
-        state.policy.policy.rules = rules;
-      } else {
-        const byId = new Map(state.policy.policy.rules.map((r) => [r.id, r]));
-        for (const r of rules) byId.set(r.id, r);
-        state.policy.policy.rules = Array.from(byId.values());
-      }
-      state.policy.version += 1;
-      return toTextResult(
-        `Policy updated (${mode}) - ${rules.length} rules. Reason: ${reason}. Version: ${state.policy.version}.`,
-        { version: state.policy.version }
-      );
-    }
-  );
 
   server.registerTool(
     "policy_read",
