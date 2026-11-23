@@ -1,4 +1,4 @@
-import { realpathSync } from "node:fs";
+import { readdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 
@@ -10,6 +10,62 @@ const KEYWORDS = new Set(["if", "then", "else", "elif", "do", "while", "until", 
 const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh"]);
 const SUBSTITUTION = /\$\(([^()]*)\)|`([^`]*)`/g;
 const MAX_DEPTH = 4;
+const TARGETED = new Set([...WRITE_COMMANDS, "cd", "pushd"].filter((name) => name !== "sed" && name !== "dd"));
+const READ_ONLY = new Set([
+  "cat",
+  "ls",
+  "head",
+  "tail",
+  "grep",
+  "egrep",
+  "fgrep",
+  "wc",
+  "stat",
+  "file",
+  "jq",
+  "diff",
+  "cmp",
+  "test",
+  "[",
+  "echo",
+  "printf",
+  "md5",
+  "md5sum",
+  "shasum",
+  "sha256sum",
+  "realpath",
+  "readlink",
+  "basename",
+  "dirname",
+  "du",
+  "od",
+  "hexdump",
+  "strings",
+  "cut",
+  "tr",
+  "nl",
+  "pwd",
+  "true",
+  "false"
+]);
+const STATE_NAMES = [
+  "policy.json",
+  "runtime.json",
+  "backend-posture.json",
+  "crypto-policy-state.json",
+  "policy-bundle.json",
+  "policy-pending.json",
+  "policy-profiles.json",
+  "policy-shadow.jsonl",
+  "monitor.jsonl",
+  "usage-sync.log",
+  "policy-holds",
+  "policy-decisions",
+  "tool-starts",
+  "usage-live",
+  "credentials.json"
+];
+const STATE_PATTERN = /^(pending-plan\..+\.json|obs-turn\..+\.ndjson)$/;
 const POLICY_ADMIN =
   /armor-policy-commands|handleArmorPolicyCommand|applyPolicyCommand|persistNextState|stageAndFormat|policy-pending|crypto-policy-state/i;
 const INTERPRETERS = new Set([
@@ -34,6 +90,7 @@ const INTERPRETERS = new Set([
   "perl",
   "ruby",
 ]);
+const EXPANSION = /\$(?!HOME\b|\{HOME\})[\w{(]|`/;
 const TOKEN =
   /[ \t]*(?:(&&|\|\||&>>?|\d*>&(?:\d+|-)|\d*>>?\|?|\d*<<<|\d*<<-?|\d*<&(?:\d+|-)|\d*<>?|[;|&\n(){}])|((?:\$\{[^}]*\}|\$\([^)]*\)|`[^`]*`|"(?:\\.|[^"\\])*"|'[^']*'|\\[^]|[^\s"'`\\;&|<>(){}$]|\$)+))/y;
 
@@ -50,6 +107,8 @@ const WRAPPERS = {
   builtin: {},
   time: {},
   stdbuf: {},
+  setsid: {},
+  caffeinate: { withValue: new Set(["-t", "-w"]) },
 };
 
 const unquote = (raw) =>
@@ -145,6 +204,26 @@ function commandTargets([name, ...args]) {
 }
 
 const expandHome = (word) => word.replace(/^(~|\$HOME|\$\{HOME\})(?=\/|$)/, homedir());
+const expandHomeAll = (text) =>
+  text.replace(/(^|[\s=:'"(])~(?=\/|$|[\s'")])/g, `$1${homedir()}`).replace(/\$HOME\b|\$\{HOME\}/g, homedir());
+
+function stateNames(protectedPaths) {
+  const names = new Set([...STATE_NAMES, ...protectedPaths.map((p) => path.basename(p))]);
+  for (const dir of protectedPaths) {
+    try {
+      for (const entry of readdirSync(dir)) names.add(entry);
+    } catch {}
+  }
+  return { has: (name) => names.has(name) || STATE_PATTERN.test(name) };
+}
+
+function containsPath(text, target) {
+  for (let at = text.indexOf(target); at !== -1; at = text.indexOf(target, at + 1)) {
+    if (!/[\w.-]/.test(text[at + target.length] ?? "")) return true;
+  }
+  return false;
+}
+
 const SPECIAL = /[$`*?[]/;
 
 function realPath(target) {
@@ -237,6 +316,7 @@ function innerCommands(cmd, redirects) {
   for (const word of [...cmd, ...redirects]) {
     for (const match of word.matchAll(SUBSTITUTION)) inner.push(match[1] ?? match[2]);
   }
+  if (path.basename(cmd[0] ?? "") === "eval") inner.push(cmd.slice(1).join(" "));
   if (SHELLS.has(path.basename(cmd[0] ?? ""))) {
     const flag = cmd.findIndex((arg, i) => i > 0 && /^-[a-zA-Z]*c[a-zA-Z]*$/.test(arg));
     if (flag !== -1 && typeof cmd[flag + 1] === "string") inner.push(cmd[flag + 1]);
@@ -246,8 +326,23 @@ function innerCommands(cmd, redirects) {
 
 export function writesProtectedPath(command, cwd, protectedPaths, depth = 0) {
   const resolvedProtected = protectedPaths.map((p) => realPath(path.resolve(p)));
-  const basenames = new Set(protectedPaths.map((p) => path.basename(p)));
+  const basenames = stateNames(protectedPaths);
   const mentions = (word) => basenames.has(path.basename(word));
+  const home = realPath(homedir());
+  const literals = [...new Set([...resolvedProtected, ...protectedPaths.map((p) => path.resolve(p))])];
+  const namesLiterally = (text) => literals.some((p) => containsPath(expandHomeAll(text), p));
+  const fragments = resolvedProtected.filter((p) => p !== home && isUnder(p, home)).map((p) => path.relative(home, p));
+  const names = (word, base) => {
+    if (namesLiterally(word)) return true;
+    const expanded = expandHome(word);
+    if (SPECIAL.test(expanded)) return Boolean(patternHits(expanded, base, resolvedProtected, false)) || mentions(word);
+    return expanded.split("=").some((part) => {
+      const target = part && absoluteOf(part, base);
+      return Boolean(target) && resolvedProtected.some(
+        (p) => isUnder(target, p) || (isUnder(p, target) && target !== home && isUnder(target, home))
+      );
+    });
+  };
   const hits = ({ word, whole }, base) => {
     const expanded = expandHome(word);
     if (SPECIAL.test(expanded))
@@ -259,13 +354,22 @@ export function writesProtectedPath(command, cwd, protectedPaths, depth = 0) {
   const tokens = lex(command);
   if (!tokens) return command.split(/[\s"'=<>]+/).some(mentions);
   const words = wordsOf(tokens);
+  const commands = simpleCommands(tokens);
+  const dynamic =
+    EXPANSION.test(command) ||
+    commands.some(({ argv }) => {
+      const name = path.basename(unwrap(argv).argv[0] ?? "");
+      return INTERPRETERS.has(name) || name === "eval";
+    });
+  if (dynamic && (namesLiterally(command) || fragments.some((f) => containsPath(command, f)))) return true;
   let base = cwd;
-  for (const { argv, redirects } of simpleCommands(tokens)) {
+  for (const { argv, redirects } of commands) {
     const { argv: cmd, stdin } = unwrap(argv);
+    const name = path.basename(cmd[0] ?? "");
     if (cmd[0] === "cd" || cmd[0] === "pushd") base = changeDir(cmd, base);
-    if (stdin && WRITE_COMMANDS.has(path.basename(cmd[0] ?? "")) && words.some(mentions))
-      return true;
+    if (stdin && !READ_ONLY.has(name) && words.some(mentions)) return true;
     if ([...exact(redirects), ...commandTargets(cmd)].some((w) => hits(w, base))) return true;
+    if (cmd.length && !READ_ONLY.has(name) && !TARGETED.has(name) && cmd.some((w) => names(w, base))) return true;
     if (
       depth < MAX_DEPTH &&
       innerCommands(cmd, redirects).some((inner) => writesProtectedPath(inner, base, protectedPaths, depth + 1))

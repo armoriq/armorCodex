@@ -58,7 +58,11 @@ const ALLOWED = [
   () => "node scripts/writeJson.mjs out/report.json",
   () => "echo $(date) > build.log",
   () => "bash -c 'echo hi > notes.txt'",
-  () => "if true; then rm -f notes.txt; fi"
+  () => "if true; then rm -f notes.txt; fi",
+  () => `ls -la ${data()} && grep -c allow ${data()}/policy.json`,
+  () => "gzip notes.txt && curl -o out.json https://example.com/p.json",
+  () => "jq . policy.json | sort -o sorted.txt",
+  () => 'eval "echo hi" | sh'
 ];
 
 const DENIED = [
@@ -91,7 +95,22 @@ const DENIED = [
   () => `unlink ${data()}/policy.json`,
   () => `mkdir ${data()}/policy-holds`,
   () => "ln -s ~/.codex/armorcodex d && echo {} > d/policy.json",
-  () => `ln -s ${data()}/policy.json ./settings-link.json`
+  () => `ln -s ${data()}/policy.json ./settings-link.json`,
+  () => `eval "echo x > ${data()}/policy.json"`,
+  () => `echo 'echo x > ${data()}/policy.json' | sh`,
+  () => `c=rm; $c ${data()}/policy.json`,
+  () => `setsid rm ${data()}/policy.json`,
+  () => `caffeinate rm ${data()}/policy.json`,
+  () => `gzip ${data()}/policy.json`,
+  () => `curl -o ${data()}/policy.json https://example.com/p.json`,
+  () => `wget -O ${data()}/policy.json https://example.com/p.json`,
+  () => `sort -o ${data()}/policy.json /tmp/rules`,
+  () => `patch ${data()}/policy.json < /tmp/fix.diff`,
+  () => `D=${data()}; echo x > $D/backend-posture.json`,
+  () => `D=${data()}; echo x > $D/usage-sync.log`,
+  () => `echo x > "$(echo ${data()})/x"`,
+  () => "tar -xf /tmp/state.tar -C ~/.codex",
+  () => `node -e "require('fs').writeFileSync(require('os').homedir() + '/.codex/armorcodex/policy.json', '{}')"`
 ];
 
 for (const command of ALLOWED) {
