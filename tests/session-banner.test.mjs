@@ -73,7 +73,7 @@ test("a key the backend rejects at session start is reported as local only", asy
 test("a backend that is down at session start is named, with what it blocks", async (t) => {
   assert.equal(
     await banner(await configFor(t, { backendEndpoint: await backend(t, 503) })),
-    "ArmorCodex active (ENFORCING, intent=required). The ArmorIQ backend is not answering: calls other than reads and ArmorCodex's own tools are blocked until it answers."
+    "ArmorCodex active (ENFORCING, intent=required). The ArmorIQ backend is not answering: every tool call except ArmorCodex's own tools is blocked until it answers."
   );
   assert.equal(
     await banner(await configFor(t, { mode: "monitor", backendEndpoint: await backend(t, 503) })),

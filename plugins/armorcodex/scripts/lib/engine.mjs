@@ -233,7 +233,7 @@ export function sessionBanner(config, { unreadable = false, posture = null } = {
     );
   }
   if (posture === "unreachable" && enforcing) {
-    notes.push("The ArmorIQ backend is not answering: calls other than reads and ArmorCodex's own tools are blocked until it answers");
+    notes.push("The ArmorIQ backend is not answering: every tool call except ArmorCodex's own tools is blocked until it answers");
   }
   if (config.keyRejected || posture === "signed_out") {
     notes.push(`ArmorIQ rejected the stored key: ${LOCAL_ONLY_SCOPE} until you sign in again`);
