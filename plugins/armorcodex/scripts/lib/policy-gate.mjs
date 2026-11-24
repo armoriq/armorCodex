@@ -183,13 +183,18 @@ export async function resolveHold(config, input, decision, intentTokenRaw) {
   const args = isPlainObject(input.tool_input) ? input.tool_input : {};
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   const holds = await readHolds(config, sessionId);
+  const shape = callShape(toolName, input.tool_input);
+  if (holds[shape]?.state === "approved") {
+    delete holds[shape];
+    await writeJson(holdsPath(config, sessionId), holds);
+  }
   const call = { tool, domain, args };
   const callId = createHash("sha256").update(JSON.stringify([domain, tool, args])).digest("hex").slice(0, 32);
   const key = createHash("sha256").update(JSON.stringify([token.plan_id, domain, tool, args])).digest("hex").slice(0, 32);
   const approve = async (verdict) => {
     const delegationId = verdict.metadata?.delegationId;
     delete holds[key];
-    holds[callShape(toolName, input.tool_input)] = { state: "approved", delegationId, at: Date.now() };
+    holds[shape] = { state: "approved", delegationId, at: Date.now() };
     await writeJson(holdsPath(config, sessionId), holds);
     return { action: "allow", delegationId };
   };
@@ -271,8 +276,11 @@ export async function takePolicyRecord(config, toolUseId) {
   }
 }
 
-export function withPolicyRecord(input, record, hold) {
-  if (!record && !hold) return input;
-  const clean = Object.fromEntries(Object.entries({ ...record, hold }).filter(([, v]) => v !== undefined));
+export function withPolicyRecord(input, record, hold, localOverrides = []) {
+  const overrides = localOverrides.length ? localOverrides : undefined;
+  if (!record && !hold && !overrides) return input;
+  const clean = Object.fromEntries(
+    Object.entries({ ...record, hold, local_overrides: overrides }).filter(([, v]) => v !== undefined)
+  );
   return isPlainObject(input) ? { ...input, armoriq_policy: clean } : { value: input, armoriq_policy: clean };
 }

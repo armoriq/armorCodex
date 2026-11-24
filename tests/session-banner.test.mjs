@@ -8,11 +8,12 @@ import { handlePreToolUse, handleSessionStart } from "../plugins/armorcodex/scri
 import { localOnly } from "../plugins/armorcodex/scripts/lib/backend-posture.mjs";
 
 process.env.ARMORCODEX_NO_AUTO_UPDATE = "1";
-// These banners are for a Block workspace; with no workspace answer a signed-in session is Quiet and shows none.
 process.env.ARMORIQ_ORG_MODE = "enforce";
 
 const NOT_SIGNED_IN =
   "Not signed in to ArmorIQ: only the local policy and intent plan apply; org policies, approvals and audit upload are off";
+const REJECTED =
+  /^ArmorCodex active \(ENFORCING, intent=required\)\. ArmorIQ rejected the stored key: Bash, apply_patch and MCP calls are blocked until you sign in again with `.* login --product armorcodex --backend .*`\.$/;
 const MONITOR =
   "Monitor mode: the local policy still blocks; intent drift, org policy blocks and holds, and backend outages are allowed, not blocked";
 
@@ -58,17 +59,17 @@ test("an enforcing session with no login says only the local policy and intent p
   );
 });
 
-test("a stored key the backend rejected is reported as local only", async (t) => {
-  assert.equal(
+test("a stored key the backend rejected says calls are blocked until you sign in", async (t) => {
+  assert.match(
     await banner(localOnly(await configFor(t))),
-    "ArmorCodex active (ENFORCING, intent=required). ArmorIQ rejected the stored key: only the local policy and intent plan apply; org policies, approvals and audit upload are off until you sign in again."
+    REJECTED
   );
 });
 
-test("a key the backend rejects at session start is reported as local only", async (t) => {
-  assert.equal(
+test("a key the backend rejects at session start says calls are blocked until you sign in", async (t) => {
+  assert.match(
     await banner(await configFor(t, { backendEndpoint: await backend(t, 401) })),
-    "ArmorCodex active (ENFORCING, intent=required). ArmorIQ rejected the stored key: only the local policy and intent plan apply; org policies, approvals and audit upload are off until you sign in again."
+    REJECTED
   );
 });
 

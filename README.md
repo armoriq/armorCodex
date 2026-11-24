@@ -98,7 +98,7 @@ Core environment variables:
 
 ### Workspace mode
 
-Signed in, ArmorCodex follows the mode your workspace picks under **Tool calls in the chat** on the Monitor page of ArmorIQ Tools. It reads the mode at session start, keeps it in `org-mode.json` in the data directory, and applies it from that session on; until it has an answer it runs Quiet.
+Signed in, ArmorCodex follows the mode your workspace picks under **Tool calls in the chat** on the Monitor page of ArmorIQ Tools. It reads the mode at session start, keeps it in `org-mode.json` in the data directory, and applies it from that session on. When ArmorIQ does not answer, the last mode it confirmed stays in force. Until ArmorIQ has confirmed a mode at least once, ArmorCodex runs as Block and says so in the session banner. If ArmorIQ rejects the stored key, Bash, apply_patch and MCP calls are blocked until you sign in again.
 
 | Mode | A call your policy or plan check would stop | What Codex shows |
 |---|---|---|
@@ -107,6 +107,8 @@ Signed in, ArmorCodex follows the mode your workspace picks under **Tool calls i
 | Block | Is blocked, and a held shell command goes to Codex's approval prompt | The block reason |
 
 In Quiet and Show in chat no intent plan is required, no hold is routed to an approval, an unreachable backend blocks nothing, and Codex's own approval prompts still apply. The audit row of each such call carries `would_be`, `would_be_code` and `would_be_reason`.
+
+In every mode, a shell command or apply_patch that writes ArmorCodex's policy, state or credential files, `~/.codex/config.toml`, `~/.codex/hooks.json` or the installed plugin under `~/.armoriq/armorCodex` is blocked. Each audit row lists the local switches that turn enforcement down (for example `ARMORCODEX_MODE=monitor` or `ARMORCODEX_MCP_DENY_BY_DEFAULT=false`) under `armoriq_policy.local_overrides`.
 
 ### Token usage sync
 

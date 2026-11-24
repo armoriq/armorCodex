@@ -183,7 +183,7 @@ export function loadSettings(env = process.env) {
     false
   );
 
-  return {
+  const settings = {
     mode: mode === "monitor" ? "monitor" : "enforce",
     dataDir,
     policyFile,
@@ -274,4 +274,18 @@ export function loadSettings(env = process.env) {
 
     debug: parseBoolean(env.ARMORCODEX_DEBUG, false),
   };
+  return { ...settings, localOverrides: localOverrides(settings, env) };
+}
+
+function localOverrides(settings, env) {
+  const backendVariable = ["ARMORCODEX_BACKEND_ENDPOINT", "BACKEND_ENDPOINT"].find((name) => env[name]?.trim());
+  return [
+    settings.mode === "monitor" && "ARMORCODEX_MODE=monitor",
+    !settings.policyV2Enabled && "ARMORCODEX_POLICY_V2=false",
+    !settings.mcpDenyByDefault && "ARMORCODEX_MCP_DENY_BY_DEFAULT=false",
+    !settings.intentRequired && "ARMORCODEX_INTENT_REQUIRED=false",
+    !settings.verifySsl && "ARMORCODEX_VERIFY_SSL=false",
+    backendVariable,
+    env.ARMORCODEX_POLICY_FILE?.trim() && "ARMORCODEX_POLICY_FILE"
+  ].filter(Boolean);
 }

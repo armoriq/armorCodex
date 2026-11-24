@@ -252,6 +252,32 @@ test("a held call files one approval request, and its retry runs once the worksp
   assert.equal(await settleHold(cfg, { ...heldBash("s-hold"), hook_event_name: "PostToolUse" }), undefined);
 });
 
+test("an approval spent by a call that never finished does not carry over to a later run of the same call", async (t) => {
+  let approved = true;
+  const { handler } = holdBackend({
+    "/iap/sdk/enforce": () =>
+      approved
+        ? [200, { allowed: true, enforcementAction: "allow", reason: "approved_delegation", metadata: { delegationId: "d-1" } }]
+        : [200, { allowed: false, enforcementAction: "hold", reason: "hold:Bash#0" }],
+    "/delegation/my-role": () => [200, { role: "member", limit: 5 }],
+    "/delegation/request": () => [201, { delegationId: "d-2", status: "pending" }]
+  });
+  const server = await backend(handler);
+  t.after(server.close);
+  const cfg = await config(server.url, { userEmail: "dev@acme.test", agentId: "codex", mcpName: "codex" });
+  await withPlan(cfg, "s-failed");
+  assert.equal(await handlePreToolUse(heldBash("s-failed"), cfg), null);
+
+  approved = false;
+  await withPlan(cfg, "s-failed");
+  const later = { ...heldBash("s-failed"), tool_use_id: "tu2" };
+  const retry = await handlePreToolUse(later, cfg);
+  assert.match(retry.hookSpecificOutput.permissionDecisionReason, /Approval request d-2 is waiting/);
+  const prompt = await handlePermissionRequest({ ...later, hook_event_name: "PermissionRequest" }, cfg);
+  assert.equal(prompt.hookSpecificOutput.decision.behavior, "deny");
+  assert.equal(await settleHold(cfg, { ...later, hook_event_name: "PostToolUse" }), undefined);
+});
+
 test("a retry under the next turn's plan spends the approval filed under the earlier plan", async (t) => {
   let status = "pending";
   const { handler, calls } = holdBackend({

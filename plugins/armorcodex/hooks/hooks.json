@@ -58,6 +58,18 @@
         ]
       }
     ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ./scripts/bootstrap.mjs router",
+            "statusMessage": "Auditing failed ArmorCodex command"
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [

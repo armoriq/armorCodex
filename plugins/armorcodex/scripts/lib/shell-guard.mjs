@@ -324,12 +324,13 @@ function innerCommands(cmd, redirects) {
   return inner;
 }
 
-export function writesProtectedPath(command, cwd, protectedPaths, depth = 0) {
-  const resolvedProtected = protectedPaths.map((p) => realPath(path.resolve(p)));
+export function writesProtectedPath(command, cwd, protectedPaths, depth = 0, exactPaths = []) {
+  const everyPath = [...protectedPaths, ...exactPaths];
+  const resolvedProtected = everyPath.map((p) => realPath(path.resolve(p)));
   const basenames = stateNames(protectedPaths);
   const mentions = (word) => basenames.has(path.basename(word));
   const home = realPath(homedir());
-  const literals = [...new Set([...resolvedProtected, ...protectedPaths.map((p) => path.resolve(p))])];
+  const literals = [...new Set([...resolvedProtected, ...everyPath.map((p) => path.resolve(p))])];
   const namesLiterally = (text) => literals.some((p) => containsPath(expandHomeAll(text), p));
   const fragments = resolvedProtected.filter((p) => p !== home && isUnder(p, home)).map((p) => path.relative(home, p));
   const names = (word, base) => {
@@ -372,7 +373,7 @@ export function writesProtectedPath(command, cwd, protectedPaths, depth = 0) {
     if (cmd.length && !READ_ONLY.has(name) && !TARGETED.has(name) && cmd.some((w) => names(w, base))) return true;
     if (
       depth < MAX_DEPTH &&
-      innerCommands(cmd, redirects).some((inner) => writesProtectedPath(inner, base, protectedPaths, depth + 1))
+      innerCommands(cmd, redirects).some((inner) => writesProtectedPath(inner, base, protectedPaths, depth + 1, exactPaths))
     )
       return true;
   }

@@ -20,9 +20,11 @@ function cachedOrg(dataDir) {
 
 export const orgModeForced = (env = process.env) => env.ARMORIQ_ORG_MODE?.trim() === "enforce";
 
+export const orgModeKnown = (dataDir) => cachedOrg(dataDir).mode !== null;
+
 export function orgMonitorFor(dataDir, env = process.env) {
   if (orgModeForced(env)) return false;
-  return cachedOrg(dataDir).mode !== "enforce";
+  return cachedOrg(dataDir).mode === "shadow";
 }
 
 export const orgMonitorNoticesFor = (dataDir, env = process.env) =>

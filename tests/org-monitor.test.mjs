@@ -12,7 +12,7 @@ const HOOK_ROUTER = fileURLToPath(new URL("../plugins/armorcodex/scripts/hook-ro
 const KEY = "ak_test_orgmonitor000000000000000000";
 
 function startBackend(answer, keyStatus = 200) {
-  const state = { profileHeaders: [] };
+  const state = { profileHeaders: [], profileStatus: 200 };
   const server = http.createServer((req, res) => {
     req.resume();
     req.on("end", () => {
@@ -23,7 +23,9 @@ function startBackend(answer, keyStatus = 200) {
           : req.url === "/iap/validate-key"
             ? { userId: "user-login" }
             : { written: 1, failures: [] };
-      res.writeHead(req.url === "/iap/validate-key" ? keyStatus : 200, { "content-type": "application/json" });
+      const status =
+        req.url === "/iap/validate-key" ? keyStatus : req.url === "/policies/profiles/active" ? state.profileStatus : 200;
+      res.writeHead(status, { "content-type": "application/json" });
       res.end(JSON.stringify(body));
     });
   });
@@ -32,10 +34,11 @@ function startBackend(answer, keyStatus = 200) {
   );
 }
 
-async function setup(t, answer, extraEnv = {}, keyStatus = 200) {
+async function setup(t, answer, extraEnv = {}, keyStatus = 200, profileStatus = 200) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "armorcodex-orgmonitor-"));
   const dataDir = path.join(home, "data");
   const backend = await startBackend(answer, keyStatus);
+  backend.state.profileStatus = profileStatus;
   t.after(() => {
     backend.server.closeAllConnections();
     backend.server.close();
@@ -128,8 +131,83 @@ for (const [name, answer, extraEnv] of [
   });
 }
 
-test("a key the backend rejects is signed out, so a Quiet workspace no longer turns off the local policy", async (t) => {
+test("a key the backend rejects blocks the call and names the login command, even in a Quiet workspace", async (t) => {
   const { env } = await setup(t, { enforcementMode: "shadow", monitorNotices: false }, {}, 401);
   const { pre } = await session(env);
   assert.equal(pre?.hookSpecificOutput?.permissionDecision, "deny");
+  assert.match(pre.hookSpecificOutput.permissionDecisionReason, /rejected the stored key.* login --product armorcodex --backend /);
+});
+
+const modeFile = (dataDir) => path.join(dataDir, "org-mode.json");
+
+for (const [name, saved] of [
+  ["never confirmed", null],
+  ["a corrupt mode file", "{not json"],
+  ["an unknown mode value", JSON.stringify({ mode: "relaxed" })]
+]) {
+  test(`a workspace mode the server cannot confirm, with ${name}, enforces the policy`, async (t) => {
+    const { dataDir, env } = await setup(t, { enforcementMode: "shadow" }, {}, 200, 500);
+    if (saved !== null) fs.writeFileSync(modeFile(dataDir), saved);
+    const { start, pre } = await session(env);
+    assert.equal(pre?.hookSpecificOutput?.permissionDecision, "deny");
+    assert.match(start?.hookSpecificOutput?.additionalContext ?? "", /has not confirmed this workspace's mode, so ArmorCodex enforces the policy/);
+  });
+}
+
+test("when the server cannot answer, the last mode it confirmed still applies", async (t) => {
+  const { dataDir, backend, env } = await setup(t, { enforcementMode: "shadow", monitorNotices: false });
+  await hook(env, { hook_event_name: "SessionStart", source: "startup" });
+  backend.state.profileStatus = 500;
+  const { start, pre } = await session(env);
+  assert.equal(start, null);
+  assert.equal(pre, null);
+  assert.equal(JSON.parse(fs.readFileSync(modeFile(dataDir), "utf8")).mode, "shadow");
+});
+
+test("a deleted mode file is read again from the server on the next call", async (t) => {
+  const { dataDir, env } = await setup(t, { enforcementMode: "shadow", monitorNotices: false });
+  await hook(env, { hook_event_name: "SessionStart", source: "startup" });
+  fs.rmSync(modeFile(dataDir));
+  assert.equal(await hook(env, { hook_event_name: "PreToolUse", ...bash }), null);
+  assert.equal(JSON.parse(fs.readFileSync(modeFile(dataDir), "utf8")).mode, "shadow");
+});
+
+test("in a Quiet workspace the guard still stops a shell command that deletes ArmorCodex's policy file", async (t) => {
+  const { dataDir, env } = await setup(t, { enforcementMode: "shadow", monitorNotices: false });
+  await hook(env, { hook_event_name: "SessionStart", source: "startup" });
+  const pre = await hook(env, {
+    hook_event_name: "PreToolUse",
+    tool_name: "Bash",
+    tool_input: { command: `rm ${path.join(dataDir, "policy.json")}` },
+    tool_use_id: "call_rm_1"
+  });
+  assert.equal(pre?.hookSpecificOutput?.permissionDecision, "deny");
+  assert.ok(fs.existsSync(path.join(dataDir, "policy.json")));
+});
+
+test("each local switch that turns enforcement down is reported on the call's audit row", async (t) => {
+  const { dataDir, env } = await setup(
+    t,
+    { enforcementMode: "enforce" },
+    {
+      ARMORCODEX_MODE: "monitor",
+      ARMORCODEX_POLICY_V2: "false",
+      ARMORCODEX_MCP_DENY_BY_DEFAULT: "false",
+      ARMORCODEX_INTENT_REQUIRED: "false",
+      ARMORCODEX_VERIFY_SSL: "false"
+    }
+  );
+  fs.rmSync(path.join(dataDir, "policy.json"));
+  await hook(env, { hook_event_name: "SessionStart", source: "startup" });
+  assert.equal(await hook(env, { hook_event_name: "PreToolUse", ...bash }), null);
+  await hook(env, { hook_event_name: "PostToolUse", ...bash, tool_response: { stdout: "a.txt" } });
+  const [row] = walRows(dataDir);
+  assert.deepEqual(row.input.armoriq_policy.local_overrides, [
+    "ARMORCODEX_MODE=monitor",
+    "ARMORCODEX_POLICY_V2=false",
+    "ARMORCODEX_MCP_DENY_BY_DEFAULT=false",
+    "ARMORCODEX_INTENT_REQUIRED=false",
+    "ARMORCODEX_VERIFY_SSL=false",
+    "BACKEND_ENDPOINT"
+  ]);
 });
