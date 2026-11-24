@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { buildAuthHeaders, normalizeToolName, postJson } from "./common.mjs";
 import { readJson, writeJson } from "./fs-store.mjs";
+import { leaveOrgMonitor } from "./org-mode.mjs";
 
 export const BACKEND_UNREACHABLE = "backend_unreachable";
 export const POSTURE_TIMEOUT_MS = 2000;
@@ -89,15 +90,12 @@ export async function backendPosture(config) {
 export function localOnly(config) {
   // Signed out means no workspace, so the workspace Monitor cannot turn off the local policy.
   return {
-    ...config,
+    ...leaveOrgMonitor(config),
     apiKey: "",
     keyRejected: true,
     auditEnabled: false,
     observabilityEnabled: false,
-    usageSyncEnabled: false,
-    orgMonitor: false,
-    orgMonitorNotices: false,
-    ...config.beforeOrgMonitor
+    usageSyncEnabled: false
   };
 }
 
