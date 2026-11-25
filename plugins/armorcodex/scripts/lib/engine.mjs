@@ -35,7 +35,7 @@ import { appendNdjsonLine, readJson, writePrivateFile } from "./fs-store.mjs";
 import { readFile, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { autoUpdate } from "./update-apply.mjs";
-import { monitorNote, orgMonitorFor, refreshOrgMode, rememberWouldBe, takeWouldBe } from "./org-mode.mjs";
+import { dropWouldBe, leaveOrgMonitor, monitorNote, orgMonitorFor, refreshOrgMode, rememberWouldBe, takeWouldBe } from "./org-mode.mjs";
 import { invokesPolicyAdmin, isProtectedPath, writesProtectedPath } from "./shell-guard.mjs";
 import { VERDICT_RANK, decideV2, logShadow } from "./v2-decision.mjs";
 import {
@@ -214,7 +214,8 @@ function readIntentTokenRaw(input, session) {
 }
 
 async function monitorInstead(input, config, action, reason, code = null) {
-  await rememberWouldBe(config, input.tool_use_id, { action, code, reason });
+  await rememberWouldBe(config, input, { action, code, reason });
+  await recordToolStart(config, input.tool_use_id);
   return config.orgMonitorNotices ? withSystemMessage({}, monitorNote(action, reason)) : null;
 }
 
@@ -348,6 +349,7 @@ export async function handleSessionStart(input, config, updateOptions = {}) {
     await autoUpdate(config, updateOptions);
     return null;
   }
+  if (config.orgMonitor) config = leaveOrgMonitor(config);
 
   // The update notice is for the person, not the model: handed to the model it
   // reads as an instruction to run the install command mid-session.
@@ -850,7 +852,7 @@ async function buildAuditRow(input, config, outcome, unknownStep, hold, record) 
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   const session = getSession(await loadRuntimeState(config.runtimeFile), sessionId) || {};
   const inputs = sanitizeParams(input.tool_input, config.sanitize);
-  const wouldBe = await takeWouldBe(config, input.tool_use_id);
+  const wouldBe = await takeWouldBe(config, input);
   return fitAuditRow({
     ...auditLink(config, sessionId, session.intentTokenRaw || ""),
     step_index: matchedStepIndex(session.plan, toolName, inputs) ?? unknownStep,
@@ -939,6 +941,7 @@ export async function handleStop(input, config) {
 export async function handleSessionEnd(input, config) {
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   if (!sessionId) return null;
+  await dropWouldBe(config, sessionId).catch(() => {});
 
   const runtimeState = await loadRuntimeState(config.runtimeFile);
   // Remove the session entirely

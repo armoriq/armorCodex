@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { readFile, unlink } from "node:fs/promises";
+import { readFile, rm, unlink } from "node:fs/promises";
 import path from "node:path";
 import { buildAuthHeaders } from "./common.mjs";
 import { writePrivateFile } from "./fs-store.mjs";
@@ -47,18 +48,38 @@ export async function refreshOrgMode(config) {
   }
 }
 
-const wouldBePath = (config, toolUseId) =>
+export const leaveOrgMonitor = (config) => ({
+  ...config,
+  orgMonitor: false,
+  orgMonitorNotices: false,
+  ...config.beforeOrgMonitor
+});
+
+const sessionWouldBeDir = (config, sessionId) =>
+  path.join(config.dataDir, "would-be", createHash("sha256").update(String(sessionId ?? "")).digest("hex").slice(0, 32));
+
+const wouldBePath = (config, { session_id: sessionId, tool_use_id: toolUseId }) =>
   typeof toolUseId === "string" && /^[A-Za-z0-9_-]+$/.test(toolUseId)
-    ? path.join(config.dataDir, "would-be", toolUseId)
+    ? path.join(sessionWouldBeDir(config, sessionId), toolUseId)
     : null;
 
-export async function rememberWouldBe(config, toolUseId, verdict) {
-  const file = wouldBePath(config, toolUseId);
-  if (file && config.apiKey) await writePrivateFile(file, JSON.stringify(verdict)).catch(() => {});
+const lostVerdict = (why) => process.stderr.write(`[armorcodex] would-be verdict not recorded: ${why}\n`);
+
+export async function rememberWouldBe(config, input, verdict) {
+  if (!config.apiKey) return;
+  const file = wouldBePath(config, input);
+  if (!file) return lostVerdict("no tool_use_id");
+  await writePrivateFile(file, JSON.stringify(verdict)).catch((error) =>
+    lostVerdict(error instanceof Error ? error.message : String(error))
+  );
 }
 
-export async function takeWouldBe(config, toolUseId) {
-  const file = wouldBePath(config, toolUseId);
+export async function dropWouldBe(config, sessionId) {
+  await rm(sessionWouldBeDir(config, sessionId), { recursive: true, force: true });
+}
+
+export async function takeWouldBe(config, input) {
+  const file = wouldBePath(config, input);
   if (!file) return null;
   const text = await readFile(file, "utf8").catch(() => "");
   await unlink(file).catch(() => {});
