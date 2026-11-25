@@ -4,11 +4,10 @@ import { buildAuthHeaders, postJson } from "./common.mjs";
 import { cachedPosture, classifyStatus, POSTURE_TIMEOUT_MS, recordBackendOutcome } from "./backend-posture.mjs";
 
 export async function shipQueuedAudit(config) {
-  if (!config.apiKey) return;
   const posture = await cachedPosture(config);
   const wal = createAuditWal({ dataDir: config.dataDir, config });
   const iapService = createIapService(config);
-  await wal.drain(async ({ rows }) => {
+  if (config.apiKey) await wal.drain(async ({ rows }) => {
     const started = Date.now();
     try {
       const response = await iapService.shipAuditBatch(rows);
@@ -32,4 +31,8 @@ export async function shipQueuedAudit(config) {
       }
     }
   });
+  await wal.reportHealth(posture?.state === "unreachable" ? "backend_unreachable"
+    : posture?.state === "signed_out" ? "auth_paused" : undefined);
+  if (config.apiKey) await createAuditWal({ dataDir: config.dataDir, config, stream: "health" })
+    .drain(({ rows }) => iapService.shipHealthBatch(rows));
 }

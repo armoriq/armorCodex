@@ -1,0 +1,42 @@
+{
+  "types": ["dead_letter", "queue_stalled", "plan_request_failed"],
+  "queues": ["audit", "runs", "health"],
+  "reasonCodes": {
+    "dead_letter": ["rejected", "attempts_exhausted", "oversize"],
+    "queue_stalled": ["backend_unreachable", "auth_paused", "rate_limited", "server_error", "undeliverable_login"],
+    "plan_request_failed": ["timeout", "network", "rate_limited", "server_error", "request_in_progress", "rejected"]
+  },
+  "limits": { "maxEventsPerRequest": 100, "maxCount": 1000000 },
+  "examples": [
+    {
+      "name": "dead letter after exhausted delivery",
+      "event": { "event_id": "11111111-1111-4111-8111-111111111111", "type": "dead_letter", "queue": "audit", "count": 3, "reason_code": "attempts_exhausted", "occurred_at": "2026-11-14T12:00:00Z" },
+      "outcome": "accepted"
+    },
+    {
+      "name": "stalled queue with pending age",
+      "event": { "event_id": "22222222-2222-4222-8222-222222222222", "type": "queue_stalled", "queue": "runs", "count": 12, "oldest_pending_seconds": 3600, "reason_code": "backend_unreachable", "occurred_at": "2026-11-14T12:00:00Z" },
+      "outcome": "accepted"
+    },
+    {
+      "name": "exhausted logical plan request",
+      "event": { "event_id": "33333333-3333-4333-8333-333333333333", "type": "plan_request_failed", "queue": "health", "count": 1, "reason_code": "timeout", "occurred_at": "2026-11-14T12:00:00Z" },
+      "outcome": "accepted"
+    },
+    {
+      "name": "reason belongs to a different type",
+      "event": { "event_id": "44444444-4444-4444-8444-444444444444", "type": "dead_letter", "queue": "audit", "count": 1, "reason_code": "timeout", "occurred_at": "2026-11-14T12:00:00Z" },
+      "outcome": "rejected"
+    },
+    {
+      "name": "free text reason is refused",
+      "event": { "event_id": "55555555-5555-4555-8555-555555555555", "type": "queue_stalled", "queue": "audit", "count": 1, "reason_code": "an arbitrary error message", "occurred_at": "2026-11-14T12:00:00Z" },
+      "outcome": "rejected"
+    },
+    {
+      "name": "count exceeds the cap",
+      "event": { "event_id": "66666666-6666-4666-8666-666666666666", "type": "dead_letter", "queue": "audit", "count": 1000001, "reason_code": "oversize", "occurred_at": "2026-11-14T12:00:00Z" },
+      "outcome": "rejected"
+    }
+  ]
+}

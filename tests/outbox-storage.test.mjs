@@ -198,7 +198,11 @@ test("the production ship path probes a paused key and a successful authenticate
   await wal.appendLine(row(1));
   const paths = [];
   let first = true;
-  t.mock.method(globalThis, "fetch", async (url) => {
+  t.mock.method(globalThis, "fetch", async (url, init) => {
+    if (new URL(url).pathname === "/iap/client-events") {
+      const { events } = JSON.parse(init.body);
+      return new Response(JSON.stringify({ results: events.map(({ event_id }) => ({ event_id, outcome: "accepted" })) }), { status: 200 });
+    }
     paths.push(new URL(url).pathname);
     if (first) { first = false; return new Response("{}", { status: 401 }); }
     return new Response(JSON.stringify({ failures: [] }), { status: 200 });
@@ -329,17 +333,34 @@ test("batch transport preserves HTTP row outcomes and Retry-After for outbox set
   assert.equal(reply.body.results[0].outcome, "retryable");
 });
 
+test("health transport sends event ids and preserves per event outcomes", async (t) => {
+  const config = { backendEndpoint: "https://a.invalid", apiKey: "ak_test_transport", timeoutMs: 1000 };
+  const event = { event_id: row().client_row_id, type: "dead_letter", queue: "audit", count: 2, reason_code: "rejected", occurred_at: "2026-11-15T12:00:00Z" };
+  t.mock.method(globalThis, "fetch", async (url, init) => {
+    assert.equal(url, `${config.backendEndpoint}/iap/client-events`);
+    assert.equal(init.headers.Authorization, `Bearer ${config.apiKey}`);
+    assert.deepEqual(JSON.parse(init.body), { events: [event] });
+    return new Response(JSON.stringify({ results: [{ event_id: event.event_id, outcome: "duplicate" }] }), { status: 200 });
+  });
+  const reply = await createIapService(config).shipHealthBatch([event]);
+  assert.equal(reply.body.results[0].outcome, "duplicate");
+});
+
 test("local status shows undeliverable rows, dead letters and capture failures", async (t) => {
   const { wal, dataDir } = await setup(t, { sizeLimits: { maxRowBytes: 1024, maxBatchBytes: 4096, maxBatchRows: 10, truncationMarker: { truncated: true } } });
   await wal.appendLine(row(1));
   await wal.appendLine({ ...row(2), error_message: "x".repeat(2048) });
   await wal.appendLine({ ...row(2), error_message: "x".repeat(2048) });
   await wal.recordCaptureFailure(row(3));
+  await wal.reportHealth();
+  await createAuditWal({ dataDir, login, stream: "health" }).drain(async () => ({ status: 404, body: {} }));
   const config = { dataDir, runtimeFile: path.join(dataDir, "runtime.json"), apiKey: "", backendEndpoint: "https://b.invalid" };
   const reply = await handleUserPromptSubmit({ session_id: "status", prompt: "/armor status" }, config);
   assert.match(JSON.stringify(reply), /Undeliverable audit rows: 1/);
   assert.match(JSON.stringify(reply), /Dead letter audit rows: 1/);
   assert.match(JSON.stringify(reply), /Audit capture failures: 1/);
+  assert.match(JSON.stringify(reply), /Health events waiting to upload: 1/);
+  assert.match(JSON.stringify(reply), /Health reporting paused: yes/);
 });
 
 test("a hook reports a capture storage failure instead of returning success", async (t) => {

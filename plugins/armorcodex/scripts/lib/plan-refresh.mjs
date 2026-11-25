@@ -56,7 +56,7 @@ export async function refreshSession(currentConfig, sessionId, { expiredOnly = f
       const result = await requestWithRetry(async (timeoutMs) => {
         if (!await update(() => true)) throw new Error("the prompt or login changed while refreshing");
         return requestIntent(config, { plan: descriptor.body.plan }, descriptor, { timeoutMs });
-      }, { timeoutMs: config.timeoutMs, deadlineAt });
+      }, { timeoutMs: config.timeoutMs, deadlineAt, config, requestKey: descriptor.key });
       if (!result?.tokenRaw || !result.planId || !Number.isFinite(result.expiresAt)) {
         throw new Error("the backend returned no token, plan id or expiry");
       }

@@ -11,6 +11,7 @@ import { beginPrompt, retireSessionPlan, syncSessionAuth, withRuntimeState } fro
 import { signIn, withHome } from "./helpers/login.mjs";
 import { recordBackendOutcome } from "../plugins/armorcodex/scripts/lib/backend-posture.mjs";
 import { handlePreToolUse } from "../plugins/armorcodex/scripts/lib/engine.mjs";
+import { createAuditWal } from "../plugins/armorcodex/scripts/lib/audit-wal.mjs";
 
 const requirePlugin = createRequire(new URL("../plugins/armorcodex/package.json", import.meta.url));
 const { Client } = requirePlugin("@modelcontextprotocol/sdk/client/index.js");
@@ -216,6 +217,7 @@ test("retryable SDK failures resend the persisted body and contract headers with
   const requests = await h.requests();
   assert.equal(requests.length, 5);
   for (const request of requests) assert.deepEqual(request, requests[0]);
+  assert.deepEqual(await createAuditWal({ dataDir: h.config().dataDir, config: h.config(), stream: "health" }).readPending(), []);
 });
 
 for (const [failure, row, env] of [
@@ -233,6 +235,9 @@ for (const [failure, row, env] of [
     assert.equal((await h.state()).pendingRequest, null);
     await h.register();
     assert.equal((await h.requests()).length, 2);
+    const events = await createAuditWal({ dataDir: h.config().dataDir, config: h.config(), stream: "health" }).readPending();
+    assert.equal(events.length, 1);
+    assert.deepEqual([events[0].row.type, events[0].row.count, events[0].row.reason_code], ["plan_request_failed", 1, "rejected"]);
   });
 }
 
@@ -313,6 +318,9 @@ test("an unknown outcome retains the descriptor and reuses it on the next regist
   assert.equal(different.isError, true);
   assert.match(message(different), /Register the same plan again to retry it, or start a new prompt/);
   assert.equal((await h.requests()).length, 1);
+  const events = await createAuditWal({ dataDir: h.config().dataDir, config: h.config(), stream: "health" }).readPending();
+  assert.equal(events.length, 1);
+  assert.deepEqual([events[0].row.type, events[0].row.count, events[0].row.reason_code], ["plan_request_failed", 1, "server_error"]);
   await writeFile(h.config().policyFile, JSON.stringify({ version: 2, policy: { rules: [{ id: "changed", action: "deny", tool: "Write" }] } }));
   const second = await h.register();
   assert.equal(second.isError ?? false, false);
@@ -365,10 +373,18 @@ test("one logical deadline bounds attempts and honours both Retry-After forms", 
 
 test("a hung attempt ends at the logical deadline", async (t) => {
   const { requestWithRetry } = await requestModule();
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), "armorcodex-hung-health-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const config = { dataDir, backendEndpoint: "https://a.invalid", apiKey: "ak_test_hung" };
   t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
-  const result = assert.rejects(requestWithRetry(() => new Promise(() => {}), { timeoutMs: 60000 }), (error) => error.unconfirmed === true);
+  const result = assert.rejects(requestWithRetry(() => new Promise(() => {}), {
+    timeoutMs: 60000, config, requestKey: "hung-request"
+  }), (error) => error.unconfirmed === true);
   t.mock.timers.tick(40000);
   await result;
+  const pending = await createAuditWal({ dataDir, config, stream: "health" }).readPending();
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].row.reason_code, "timeout");
 });
 
 test("validity precedence and bounds reject invalid configuration by variable name", () => {
