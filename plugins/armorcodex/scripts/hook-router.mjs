@@ -14,10 +14,12 @@ import {
 } from "./lib/engine.mjs";
 import { ensurePrivateDir } from "./lib/fs-store.mjs";
 import { observeHook } from "./lib/observability.mjs";
+import { orgModeForced, orgModeKnown, refreshOrgMode } from "./lib/org-mode.mjs";
 import { withReach } from "./lib/reach.mjs";
 import { launchLiveUsage, trackUsageSession } from "./lib/usage-sync-launch.mjs";
 
 let currentEvent = "";
+const MODE_EVENTS = new Set(["UserPromptSubmit", "PreToolUse", "PermissionRequest"]);
 
 async function readStdin() {
   const chunks = [];
@@ -54,7 +56,12 @@ async function main() {
   const event = typeof input.hook_event_name === "string" ? input.hook_event_name : "";
   currentEvent = event;
   debugLog(config, `hook=${event}`);
-  if ((await cachedPosture(config))?.state === "signed_out") config = localOnly(config);
+  const posture = (await cachedPosture(config))?.state;
+  if (posture === "signed_out") config = localOnly(config);
+  if (MODE_EVENTS.has(event) && config.apiKey && posture !== "unreachable" && !orgModeForced() && !orgModeKnown(config.dataDir)) {
+    await refreshOrgMode(config);
+    config = loadConfig();
+  }
   await trackUsageSession(event, input, config);
 
   let output;

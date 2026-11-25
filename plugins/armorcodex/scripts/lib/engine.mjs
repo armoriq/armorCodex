@@ -27,6 +27,9 @@ import {
   backendPosture,
   formatArmorStatus,
   isStatusCommand,
+  KEY_REJECTED,
+  keyRejectedNote,
+  keyRejectedReason,
   localOnly,
   toolCapability,
   unreachableReason
@@ -34,8 +37,16 @@ import {
 import { appendNdjsonLine, readJson, writePrivateFile } from "./fs-store.mjs";
 import { readFile, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
-import { autoUpdate } from "./update-apply.mjs";
-import { monitorNote, orgMonitorFor, refreshOrgMode, rememberWouldBe, takeWouldBe } from "./org-mode.mjs";
+import { autoUpdate, defaultInstallHome } from "./update-apply.mjs";
+import {
+  monitorNote,
+  orgModeForced,
+  orgModeKnown,
+  orgMonitorFor,
+  refreshOrgMode,
+  rememberWouldBe,
+  takeWouldBe
+} from "./org-mode.mjs";
 import { invokesPolicyAdmin, isProtectedPath, writesProtectedPath } from "./shell-guard.mjs";
 import { VERDICT_RANK, decideV2, logShadow } from "./v2-decision.mjs";
 import {
@@ -150,6 +161,11 @@ function patchTargets(toolInput) {
   return [...text.matchAll(PATCH_TARGET_RE)].map((match) => match[1].trim());
 }
 
+function hostPaths() {
+  const codexHome = process.env.CODEX_HOME?.trim() || path.join(homedir(), ".codex");
+  return [defaultInstallHome(), path.join(codexHome, "config.toml"), path.join(codexHome, "hooks.json")];
+}
+
 function protectedWriteReason(norm, toolInput, cwd, config) {
   const protectedPaths = [
     config.dataDir,
@@ -157,23 +173,25 @@ function protectedWriteReason(norm, toolInput, cwd, config) {
     config.runtimeFile,
     path.join(homedir(), ".armoriq", "credentials.json")
   ].filter((entry) => typeof entry === "string" && entry);
+  const exactPaths = hostPaths();
   if (norm === "bash") {
     const command = typeof toolInput?.command === "string" ? toolInput.command : "";
     if (invokesPolicyAdmin(command)) {
       return "ArmorCodex: policy management is human-only. Type `armor policy` at the Codex prompt.";
     }
-    if (writesProtectedPath(command, cwd, protectedPaths)) {
-      return "ArmorCodex: shell commands that write, move or delete ArmorCodex policy, state or credential files are blocked. Use policy_update, which stages a change for the user to confirm.";
+    if (writesProtectedPath(command, cwd, protectedPaths, 0, exactPaths)) {
+      return "ArmorCodex: shell commands that write, move or delete ArmorCodex policy, state or credential files, or Codex's hook settings, are blocked. Use policy_update, which stages a change for the user to confirm.";
     }
   }
   if (norm === "apply_patch") {
     const names = new Set(protectedPaths.map((entry) => path.basename(entry)));
     const hit = patchTargets(toolInput).some((target) => {
-      if (path.isAbsolute(target)) return isProtectedPath(target, protectedPaths);
-      return cwd ? isProtectedPath(path.resolve(cwd, target), protectedPaths) : names.has(path.basename(target));
+      const everyPath = [...protectedPaths, ...exactPaths];
+      if (path.isAbsolute(target)) return isProtectedPath(target, everyPath);
+      return cwd ? isProtectedPath(path.resolve(cwd, target), everyPath) : names.has(path.basename(target));
     });
     if (hit) {
-      return "ArmorCodex: apply_patch cannot change ArmorCodex policy, state or credential files. Use policy_update, which stages a change for the user to confirm.";
+      return "ArmorCodex: apply_patch cannot change ArmorCodex policy, state or credential files, or Codex's hook settings. Use policy_update, which stages a change for the user to confirm.";
     }
   }
   return "";
@@ -218,10 +236,14 @@ async function monitorInstead(input, config, action, reason, code = null) {
   return config.orgMonitorNotices ? withSystemMessage({}, monitorNote(action, reason)) : null;
 }
 
-async function denyAndAudit(input, config, reason, errorMessage = reason, status = "blocked") {
-  if (config.orgMonitor) return monitorInstead(input, config, "block", reason, errorMessage === reason ? null : errorMessage);
+async function blockAndAudit(input, config, reason, errorMessage = reason, status = "blocked") {
   await auditToolCall(input, config, { status, output: null, error_message: redactSecrets(errorMessage) }, null);
   return denyPreTool(reason);
+}
+
+function denyAndAudit(input, config, reason, errorMessage = reason, status = "blocked") {
+  if (config.orgMonitor) return monitorInstead(input, config, "block", reason, errorMessage === reason ? null : errorMessage);
+  return blockAndAudit(input, config, reason, errorMessage, status);
 }
 
 function denyOrAllow(input, config, reason) {
@@ -306,7 +328,7 @@ function matchedStepIndex(plan, toolName, toolInput) {
 
 const LOCAL_ONLY_SCOPE = "only the local policy and intent plan apply; org policies, approvals and audit upload are off";
 
-export function sessionBanner(config, { unreadable = false, posture = null } = {}) {
+export function sessionBanner(config, { unreadable = false, posture = null, modeUnconfirmed = false } = {}) {
   const enforcing = shouldDeny(config);
   const intent = config.intentRequired ? "required" : "optional";
   const head = `ArmorCodex active (${enforcing ? "ENFORCING" : "MONITORING"}, intent=${intent})`;
@@ -317,11 +339,14 @@ export function sessionBanner(config, { unreadable = false, posture = null } = {
       "Monitor mode: the local policy still blocks; intent drift, org policy blocks and holds, and backend outages are allowed, not blocked"
     );
   }
+  if (modeUnconfirmed) {
+    notes.push("ArmorIQ has not confirmed this workspace's mode, so ArmorCodex enforces the policy until it answers");
+  }
   if (posture === "unreachable" && enforcing) {
     notes.push("The ArmorIQ backend is not answering: every tool call except ArmorCodex's own tools is blocked until it answers");
   }
   if (config.keyRejected || posture === "signed_out") {
-    notes.push(`ArmorIQ rejected the stored key: ${LOCAL_ONLY_SCOPE} until you sign in again`);
+    notes.push(keyRejectedNote(config.backendEndpoint));
   } else if (!config.apiKey) {
     notes.push(`Not signed in to ArmorIQ: ${LOCAL_ONLY_SCOPE}`);
   } else if (config.policyV2Enabled === false) {
@@ -354,7 +379,9 @@ export async function handleSessionStart(input, config, updateOptions = {}) {
   const update = await autoUpdate(config, updateOptions);
   const { unreadable } = config.policyFile ? await loadPolicyState(config.policyFile) : {};
   const posture = config.apiKey ? await backendPosture(config) : null;
-  const banner = sessionBanner(config, { unreadable, posture });
+  const modeUnconfirmed =
+    Boolean(config.apiKey) && posture !== "signed_out" && !orgModeForced() && !orgModeKnown(config.dataDir);
+  const banner = sessionBanner(config, { unreadable, posture, modeUnconfirmed });
   return withSystemMessage(
     addPromptContext(banner, "SessionStart"),
     [unreadable && POLICY_UNREADABLE_NOTICE, update.notice].filter(Boolean).join("\n") || undefined
@@ -489,19 +516,22 @@ export async function handlePreToolUse(input, config) {
 
   const cwd = typeof input.cwd === "string" && input.cwd ? input.cwd : null;
   const protectedWrite = protectedWriteReason(norm, input.tool_input, cwd, config);
-  if (protectedWrite) return denyAndAudit(input, config, protectedWrite);
+  if (protectedWrite) return blockAndAudit(input, config, protectedWrite);
 
   // Reads run while the backend is down; every other capability, the web tools
   // whitelisted below included, waits on the backend posture first.
   const capability = toolCapability(toolName);
   if (capability !== "read") {
-    const posture = await backendPosture(config);
+    const posture = config.keyRejected ? "signed_out" : await backendPosture(config);
     if (posture === "unreachable") {
       const reason = unreachableReason(toolName, capability);
       if (shouldDeny(config)) return denyAndAudit(input, config, reason, BACKEND_UNREACHABLE);
       process.stderr.write(`[armorcodex] monitor mode: ${reason}; allowing it\n`);
     } else if (posture === "signed_out") {
       config = localOnly(config);
+      const reason = keyRejectedReason(toolName, config.backendEndpoint);
+      if (shouldDeny(config)) return denyAndAudit(input, config, reason, KEY_REJECTED);
+      process.stderr.write(`[armorcodex] monitor mode: ${reason}; allowing it\n`);
     }
   }
 
@@ -857,7 +887,12 @@ async function buildAuditRow(input, config, outcome, unknownStep, hold, record) 
     action: toolName,
     tool: toolName,
     capability: toolCapability(toolName),
-    input: withPolicyRecord(redactSecrets(inputs), record ?? (await takePolicyRecord(config, input.tool_use_id)), hold),
+    input: withPolicyRecord(
+      redactSecrets(inputs),
+      record ?? (await takePolicyRecord(config, input.tool_use_id)),
+      hold,
+      config.localOverrides
+    ),
     executed_at: new Date().toISOString(),
     duration_ms: await takeToolDuration(config, input.tool_use_id),
     ...outcome,

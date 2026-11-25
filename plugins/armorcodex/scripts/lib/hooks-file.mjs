@@ -12,6 +12,7 @@ export function hookGroups(command) {
     PreToolUse: { matcher: "*", hooks: [hook({ statusMessage: "Checking ArmorCodex policy" })] },
     PermissionRequest: { matcher: "*", hooks: [hook({ statusMessage: "Checking ArmorCodex approval policy" })] },
     PostToolUse: { matcher: "*", hooks: [hook({ statusMessage: "Auditing ArmorCodex command" })] },
+    PostToolUseFailure: { matcher: "*", hooks: [hook({ statusMessage: "Auditing failed ArmorCodex command" })] },
     Stop: { hooks: [hook({ timeout: 30 })] },
     SessionEnd: { hooks: [hook({ timeout: 3 })] }
   };

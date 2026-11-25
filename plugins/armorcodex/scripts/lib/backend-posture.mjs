@@ -2,8 +2,10 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { buildAuthHeaders, normalizeToolName, postJson } from "./common.mjs";
 import { readJson, writeJson } from "./fs-store.mjs";
+import { loginCommand } from "./reach.mjs";
 
 export const BACKEND_UNREACHABLE = "backend_unreachable";
+export const KEY_REJECTED = "key_rejected";
 export const POSTURE_TIMEOUT_MS = 2000;
 export const POSTURE_TTL_MS = 30_000;
 export const STATUS_COMMAND = "/armor status";
@@ -108,6 +110,20 @@ export function unreachableReason(toolName, capability) {
   );
 }
 
+function signInHint(backendEndpoint) {
+  try {
+    return `sign in again with \`${loginCommand(backendEndpoint)}\``;
+  } catch {
+    return "sign in to ArmorIQ again";
+  }
+}
+
+export const keyRejectedNote = (backendEndpoint) =>
+  `ArmorIQ rejected the stored key: Bash, apply_patch and MCP calls are blocked until you ${signInHint(backendEndpoint)}`;
+
+export const keyRejectedReason = (toolName, backendEndpoint) =>
+  `ArmorCodex blocked ${toolName} (${KEY_REJECTED}): ArmorIQ rejected the stored key, so the workspace policy cannot be checked. To run it, ${signInHint(backendEndpoint)}.`;
+
 export function isStatusCommand(prompt) {
   return typeof prompt === "string" && /^\s*\/?armor(?:codex:armor)?\s+status\s*$/i.test(prompt);
 }
@@ -115,7 +131,7 @@ export function isStatusCommand(prompt) {
 const POSTURE_LINES = {
   ok: "reachable",
   unreachable: `unreachable (${BACKEND_UNREACHABLE}): Bash, apply_patch, MCP and other calls are blocked; rechecked every 30 seconds`,
-  signed_out: "rejected the stored key (401): running in local only mode until you sign in again"
+  signed_out: "rejected the stored key (401): Bash, apply_patch and MCP calls are blocked until you sign in again"
 };
 
 export async function formatArmorStatus(config, { queuedRows }) {

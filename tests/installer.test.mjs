@@ -123,7 +123,7 @@ test("the installer finale prints the notice and claims it only when the ping is
       if (enabled) assert.equal(lstatSync(marker).mode & 0o777, 0o600);
       const { hooks } = JSON.parse(readFileSync(join(home, ".codex/hooks.json"), "utf8"));
       const commands = Object.values(hooks).flatMap((groups) => groups.flatMap((group) => group.hooks.map((hook) => hook.command)));
-      assert.deepEqual(commands, Array(7).fill(`node ${new URL("../plugins/armorcodex/scripts/bootstrap.mjs", import.meta.url).pathname} router`));
+      assert.deepEqual(commands, Array(8).fill(`node ${new URL("../plugins/armorcodex/scripts/bootstrap.mjs", import.meta.url).pathname} router`));
     });
   }
 });
@@ -184,11 +184,11 @@ test("a normal update adds the Stop and SessionEnd hooks to an existing ArmorCod
   );
   assert.match(
     result.stdout,
-    /added missing ArmorCodex UserPromptSubmit, PreToolUse, PermissionRequest, PostToolUse, Stop, SessionEnd hook\(s\)/,
+    /added missing ArmorCodex UserPromptSubmit, PreToolUse, PermissionRequest, PostToolUse, PostToolUseFailure, Stop, SessionEnd hook\(s\)/,
   );
 });
 
-test("an existing hooks.json with only another tool's hooks keeps them and gains all seven ArmorCodex hooks", async (t) => {
+test("an existing hooks.json with only another tool's hooks keeps them and gains all eight ArmorCodex hooks", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "armorcodex-other-hooks-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const home = join(root, "home");
@@ -207,7 +207,7 @@ test("an existing hooks.json with only another tool's hooks keeps them and gains
   const { hooks } = JSON.parse(readFileSync(hooksPath, "utf8"));
   const ours = (event) => (hooks[event] ?? []).filter((group) =>
     group.hooks.some((hook) => /armorcodex\/scripts\/bootstrap\.mjs router$/i.test(hook.command)));
-  for (const event of ["SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "Stop", "SessionEnd"]) {
+  for (const event of ["SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "PostToolUseFailure", "Stop", "SessionEnd"]) {
     assert.equal(ours(event).length, 1, `${event} should have one ArmorCodex hook`);
   }
   assert.deepEqual(hooks.SessionStart[0], other[0]);
@@ -243,7 +243,7 @@ test("install then uninstall leaves another tool's hooks.json byte-identical, wh
   const install = await runInstaller(root, home, binDir);
   assert.equal(install.status, 0, install.stderr || install.stdout);
   const installed = readFileSync(hooksPath, "utf8");
-  assert.equal((installed.match(/bootstrap\.mjs router/g) ?? []).length, 7);
+  assert.equal((installed.match(/bootstrap\.mjs router/g) ?? []).length, 8);
   assert.match(installed, /^ {4}"hooks"/m);
 
   const uninstall = await runInstaller(root, home, binDir, "--uninstall");
@@ -747,7 +747,7 @@ for (const [name, prompts, failingLogin] of [
     const after = installed(home, installHome);
     assert.equal(after.head, latest);
     assert.match(after.config, /ArmorCodex managed block/);
-    assert.equal(after.hooks.split(`${installHome}/plugins/armorcodex/scripts/bootstrap.mjs`).length - 1, 7);
+    assert.equal(after.hooks.split(`${installHome}/plugins/armorcodex/scripts/bootstrap.mjs`).length - 1, 8);
   });
 }
 

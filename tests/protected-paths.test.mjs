@@ -26,6 +26,9 @@ before(() => {
   mkdirSync(config.dataDir, { recursive: true });
   mkdirSync(path.join(home, ".armoriq"), { recursive: true });
   writeFileSync(path.join(home, ".armoriq", "credentials.json"), "{}");
+  mkdirSync(path.join(home, ".armoriq", "armorCodex", "scripts"), { recursive: true });
+  writeFileSync(path.join(home, ".armoriq", "armorCodex", "package.json"), "{}");
+  writeFileSync(path.join(home, ".armoriq", "armorCodex", "README.md"), "");
 });
 after(() => {
   process.env.HOME = savedHome;
@@ -41,6 +44,7 @@ async function toolDecision(tool_name, tool_input, cwd = workDir) {
 
 const decision = (command) => toolDecision("Bash", { command });
 const data = () => config.dataDir;
+
 const patch = (header) => ({ command: `*** Begin Patch\n${header}\n+{}\n*** End Patch` });
 
 const ALLOWED = [
@@ -62,7 +66,11 @@ const ALLOWED = [
   () => `ls -la ${data()} && grep -c allow ${data()}/policy.json`,
   () => "gzip notes.txt && curl -o out.json https://example.com/p.json",
   () => "jq . policy.json | sort -o sorted.txt",
-  () => 'eval "echo hi" | sh'
+  () => 'eval "echo hi" | sh',
+  () => "cat ~/.codex/config.toml && grep -n hooks ~/.codex/hooks.json",
+  () => 'cp template.json "$OUT/package.json"',
+  () => "touch $WORK/config.toml && sed -i 's/a/b/' $DIR/hooks.json",
+  () => "rm -rf $BUILD/scripts && echo x | xargs touch README.md"
 ];
 
 const DENIED = [
@@ -110,7 +118,12 @@ const DENIED = [
   () => `D=${data()}; echo x > $D/usage-sync.log`,
   () => `echo x > "$(echo ${data()})/x"`,
   () => "tar -xf /tmp/state.tar -C ~/.codex",
-  () => `node -e "require('fs').writeFileSync(require('os').homedir() + '/.codex/armorcodex/policy.json', '{}')"`
+  () => `node -e "require('fs').writeFileSync(require('os').homedir() + '/.codex/armorcodex/policy.json', '{}')"`,
+  () => "sed -i '' 's/hooks = true/hooks = false/' ~/.codex/config.toml",
+  () => "printf '[features]\\nhooks = false\\n' >> ~/.codex/config.toml",
+  () => "echo '{}' > ~/.codex/hooks.json",
+  () => "rm ~/.codex/hooks.json",
+  () => "echo 'export {}' > ~/.armoriq/armorCodex/plugins/armorcodex/scripts/lib/engine.mjs"
 ];
 
 for (const command of ALLOWED) {
@@ -120,7 +133,7 @@ for (const command of ALLOWED) {
 }
 
 for (const command of DENIED) {
-  test(`a shell write to ArmorCodex policy, state or credentials is denied, even in monitor mode: ${command()}`, async () => {
+  test(`a shell write to ArmorCodex policy, state, credentials or Codex hook settings is denied, even in monitor mode: ${command()}`, async () => {
     assert.equal(await decision(command()), "deny");
   });
 }
@@ -144,9 +157,11 @@ for (const header of [
   () => `*** Update File: ${data()}/policy.json`,
   () => `*** Delete File: ${data()}/runtime.json`,
   () => `*** Update File: ${workDir}/a.txt\n*** Move to: ${data()}/policy.json`,
-  () => `*** Update File: ${home}/.armoriq/credentials.json`
+  () => `*** Update File: ${home}/.armoriq/credentials.json`,
+  () => `*** Update File: ${home}/.codex/config.toml`,
+  () => `*** Delete File: ${home}/.codex/hooks.json`
 ]) {
-  test(`apply_patch to ArmorCodex policy, state or credentials is denied: ${header().split("\n").at(-1)}`, async () => {
+  test(`apply_patch to ArmorCodex policy, state, credentials or Codex hook settings is denied: ${header().split("\n").at(-1)}`, async () => {
     assert.equal(await toolDecision("apply_patch", patch(header())), "deny");
   });
 }

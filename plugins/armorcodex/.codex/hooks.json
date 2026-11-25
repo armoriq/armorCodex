@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$(git rev-parse --show-toplevel)/plugins/armorcodex/scripts/bootstrap.mjs\" router",
+            "command": "d=\"$PWD\"; until [ -f \"$d/.codex/hooks.json\" ] && [ -f \"$d/scripts/bootstrap.mjs\" ] || [ \"$d\" = / ]; do d=$(dirname \"$d\"); done; [ -f \"$d/scripts/bootstrap.mjs\" ] || d=\"$(git rev-parse --show-toplevel)/plugins/armorcodex\"; node \"$d/scripts/bootstrap.mjs\" router",
             "statusMessage": "Starting ArmorCodex"
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$(git rev-parse --show-toplevel)/plugins/armorcodex/scripts/bootstrap.mjs\" router",
+            "command": "d=\"$PWD\"; until [ -f \"$d/.codex/hooks.json\" ] && [ -f \"$d/scripts/bootstrap.mjs\" ] || [ \"$d\" = / ]; do d=$(dirname \"$d\"); done; [ -f \"$d/scripts/bootstrap.mjs\" ] || d=\"$(git rev-parse --show-toplevel)/plugins/armorcodex\"; node \"$d/scripts/bootstrap.mjs\" router",
             "statusMessage": "Loading ArmorCodex intent policy"
           }
         ]
@@ -29,7 +29,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$(git rev-parse --show-toplevel)/plugins/armorcodex/scripts/bootstrap.mjs\" router",
+            "command": "d=\"$PWD\"; until [ -f \"$d/.codex/hooks.json\" ] && [ -f \"$d/scripts/bootstrap.mjs\" ] || [ \"$d\" = / ]; do d=$(dirname \"$d\"); done; [ -f \"$d/scripts/bootstrap.mjs\" ] || d=\"$(git rev-parse --show-toplevel)/plugins/armorcodex\"; node \"$d/scripts/bootstrap.mjs\" router",
             "statusMessage": "Checking ArmorCodex policy"
           }
         ]
@@ -41,7 +41,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$(git rev-parse --show-toplevel)/plugins/armorcodex/scripts/bootstrap.mjs\" router",
+            "command": "d=\"$PWD\"; until [ -f \"$d/.codex/hooks.json\" ] && [ -f \"$d/scripts/bootstrap.mjs\" ] || [ \"$d\" = / ]; do d=$(dirname \"$d\"); done; [ -f \"$d/scripts/bootstrap.mjs\" ] || d=\"$(git rev-parse --show-toplevel)/plugins/armorcodex\"; node \"$d/scripts/bootstrap.mjs\" router",
             "statusMessage": "Checking ArmorCodex approval policy"
           }
         ]
@@ -53,8 +53,20 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$(git rev-parse --show-toplevel)/plugins/armorcodex/scripts/bootstrap.mjs\" router",
+            "command": "d=\"$PWD\"; until [ -f \"$d/.codex/hooks.json\" ] && [ -f \"$d/scripts/bootstrap.mjs\" ] || [ \"$d\" = / ]; do d=$(dirname \"$d\"); done; [ -f \"$d/scripts/bootstrap.mjs\" ] || d=\"$(git rev-parse --show-toplevel)/plugins/armorcodex\"; node \"$d/scripts/bootstrap.mjs\" router",
             "statusMessage": "Auditing ArmorCodex command"
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "d=\"$PWD\"; until [ -f \"$d/.codex/hooks.json\" ] && [ -f \"$d/scripts/bootstrap.mjs\" ] || [ \"$d\" = / ]; do d=$(dirname \"$d\"); done; [ -f \"$d/scripts/bootstrap.mjs\" ] || d=\"$(git rev-parse --show-toplevel)/plugins/armorcodex\"; node \"$d/scripts/bootstrap.mjs\" router",
+            "statusMessage": "Auditing failed ArmorCodex command"
           }
         ]
       }
@@ -64,7 +76,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$(git rev-parse --show-toplevel)/plugins/armorcodex/scripts/bootstrap.mjs\" router",
+            "command": "d=\"$PWD\"; until [ -f \"$d/.codex/hooks.json\" ] && [ -f \"$d/scripts/bootstrap.mjs\" ] || [ \"$d\" = / ]; do d=$(dirname \"$d\"); done; [ -f \"$d/scripts/bootstrap.mjs\" ] || d=\"$(git rev-parse --show-toplevel)/plugins/armorcodex\"; node \"$d/scripts/bootstrap.mjs\" router",
             "timeout": 30
           }
         ]
@@ -75,7 +87,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$(git rev-parse --show-toplevel)/plugins/armorcodex/scripts/bootstrap.mjs\" router",
+            "command": "d=\"$PWD\"; until [ -f \"$d/.codex/hooks.json\" ] && [ -f \"$d/scripts/bootstrap.mjs\" ] || [ \"$d\" = / ]; do d=$(dirname \"$d\"); done; [ -f \"$d/scripts/bootstrap.mjs\" ] || d=\"$(git rev-parse --show-toplevel)/plugins/armorcodex\"; node \"$d/scripts/bootstrap.mjs\" router",
             "timeout": 3
           }
         ]

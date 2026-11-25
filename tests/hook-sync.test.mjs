@@ -142,7 +142,7 @@ test("a stale ArmorCodex entry is rewritten to the current definition and re-tru
   assert.equal(readFileSync(hooksFile, "utf8"), `${JSON.stringify(expected, null, 2)}\n`);
 
   const listed = await listVia(codex.bin, hooksFile, root);
-  assert.equal(ourStatuses(listed, bootstrapPath).length, 7);
+  assert.equal(ourStatuses(listed, bootstrapPath).length, 8);
   assert.ok(ourStatuses(listed, bootstrapPath).every((status) => status.endsWith(":trusted")), ourStatuses(listed, bootstrapPath).join(" "));
   const otherAfter = listed.find((hook) => hook.command === "/opt/other-tool/on-end");
   assert.deepEqual(otherAfter, otherBefore);
