@@ -142,6 +142,7 @@ export function withLogin(settings, env = process.env) {
     userId,
     userEmail: email,
     loggedInAt,
+    loginBackend: login?.profile?.backend || "",
     loginHistory: login?.loginHistory ?? null,
     observabilityEnabled: tracing,
     usageSyncEnabled: tracing && !settings.usageSyncDisabled,
@@ -151,6 +152,19 @@ export function withLogin(settings, env = process.env) {
 
 export function loadConfig(env = process.env) {
   return withLogin(loadSettings(env), env);
+}
+
+function intentValidity(env) {
+  const variable = Object.hasOwn(env, "ARMORIQ_INTENT_VALIDITY_SECONDS")
+    ? "ARMORIQ_INTENT_VALIDITY_SECONDS"
+    : "ARMORCODEX_VALIDITY_SECONDS";
+  if (!Object.hasOwn(env, variable)) return 3600;
+  const value = env[variable]?.trim();
+  const seconds = Number(value);
+  if (!/^\d+$/.test(value || "") || !Number.isInteger(seconds) || seconds < 180 || seconds > 3600) {
+    throw new Error(`${variable} must be an integer from 180 to 3600 seconds.`);
+  }
+  return seconds;
 }
 
 export function loadSettings(env = process.env) {
@@ -213,7 +227,7 @@ export function loadSettings(env = process.env) {
     verifyStepEndpoint:
       env.ARMORCODEX_VERIFY_STEP_URL?.trim() ||
       `${backendEndpoint}/iap/verify-step`,
-    validitySeconds: Math.min(parseInteger(env.ARMORCODEX_VALIDITY_SECONDS, 3600), 3600),
+    validitySeconds: intentValidity(env),
     timeoutMs,
     // One attempt per tool call is usually right — a hung backend shouldn't
     // stall Codex for timeout * retries. Users who really want retries can

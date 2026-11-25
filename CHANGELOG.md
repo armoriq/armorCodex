@@ -6,12 +6,21 @@ All notable changes to ArmorCodex are recorded here. Format follows [Keep a Chan
 
 ### Added
 - Workspace Monitor. Signed in, ArmorCodex reads the mode set on the Tools Monitor page at session start and keeps it in `org-mode.json`. Quiet (the default) shows nothing in the session, asks for no plan, and lets a call the policy, plan check or outage check would stop run, recording on its audit row what Block would have done (`would_be`, `would_be_code`, `would_be_reason`). Show in chat also shows the user one line per such call. Block enforces as before. `ARMORIQ_ORG_MODE=enforce` forces Block on one machine. Requests send `X-ArmorIQ-Monitor-Aware: 1`.
-
-### Fixed
-- An auto-update now brings ArmorCodex's own entries in `~/.codex/hooks.json` up to the current definition, so installs that moved to 0.3.9 on their own stop logging `warning: clamping SessionEnd hook timeout to 3s`. At session start, when an entry pointing at the managed install differs, a background step rewrites it and records trust for the changed hooks through `codex app-server`, as the installer does. If the trust step fails, `hooks.json` and the previous trust are put back and the reason is written to `~/.codex/armorcodex/hooks-sync.log`; it is retried after an hour. Other tools' hooks, hooks the person never trusted, and entries pointing at another checkout are left alone. `ARMORCODEX_NO_AUTO_UPDATE=1` turns it off.
+- Each model prompt has its own registered plan. Open prompts refresh confirmed tokens every 15 seconds when expiry is near. Chat only prompts send no plan request.
+- `ARMORIQ_INTENT_VALIDITY_SECONDS` sets token validity from 180 to 3600 seconds, taking precedence over `ARMORCODEX_VALIDITY_SECONDS`.
 
 ### Changed
+
+- Registration replies distinguish backend confirmation, local recording and an unconfirmed request. To retry an unconfirmed request, register the same plan again or start a new prompt.
+- `ARMORCODEX_VALIDITY_SECONDS` outside 180 to 3600 now prevents startup instead of being capped. Update larger values before upgrading, then restart open Codex sessions.
+- This version needs `@armoriq/sdk-dev` 0.8.24 or later. Publishing that SDK and updating the dependency range and lockfile remain release steps.
 - The installer and the update path write hook entries from one module, `plugins/armorcodex/scripts/lib/hooks-file.mjs`. The installer runs it from the checked out plugin.
+
+### Fixed
+
+- Runtime and request locks recover after their holder dies, and shutdown waits for active registrations. Hook and MCP environments no longer retire each other's plans. A rejected login key records plans locally again.
+- Status and policy commands preserve the active prompt. Token refreshes preserve tool authorization, and audit rows are queued before activity writes.
+- An auto-update now brings ArmorCodex's own entries in `~/.codex/hooks.json` up to the current definition, so installs that moved to 0.3.9 on their own stop logging `warning: clamping SessionEnd hook timeout to 3s`. At session start, when an entry pointing at the managed install differs, a background step rewrites it and records trust for the changed hooks through `codex app-server`, as the installer does. If the trust step fails, `hooks.json` and the previous trust are put back and the reason is written to `~/.codex/armorcodex/hooks-sync.log`; it is retried after an hour. Other tools' hooks, hooks the person never trusted, and entries pointing at another checkout are left alone. `ARMORCODEX_NO_AUTO_UPDATE=1` turns it off.
 
 ## [0.3.9] - 2026-11-18
 

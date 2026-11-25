@@ -90,6 +90,7 @@ export function localOnly(config) {
   // Signed out means no workspace, so the workspace Monitor cannot turn off the local policy.
   return {
     ...config,
+    authConfig: config.authConfig || config,
     apiKey: "",
     keyRejected: true,
     auditEnabled: false,
