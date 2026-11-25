@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { handlePermissionRequest, handlePostToolUse, handlePostToolUseFailure, handlePreToolUse } from "../plugins/armorcodex/scripts/lib/engine.mjs";
 import { signIn } from "./helpers/login.mjs";
+import { recordBackendOutcome } from "../plugins/armorcodex/scripts/lib/backend-posture.mjs";
 
 const PLAN_ID = randomUUID();
 const SESSION = "sess-blocked";
@@ -22,6 +23,7 @@ async function setup({ mode = "enforce", withPlan = true, rules = [] } = {}) {
     policyFile: path.join(dataDir, "policy.json"),
     runtimeFile: path.join(dataDir, "runtime.json"),
     apiKey: "ak_test_blockedrow000000000000000000",
+    backendEndpoint: "https://audit.invalid",
     auditEnabled: true,
     useSdkIntent: false,
     intentEndpoint: "",
@@ -46,6 +48,7 @@ async function setup({ mode = "enforce", withPlan = true, rules = [] } = {}) {
   if (rules.length) {
     await writeFile(config.policyFile, JSON.stringify({ version: 1, policy: { rules }, history: [] }));
   }
+  await recordBackendOutcome(config, "ok");
   return config;
 }
 
@@ -110,6 +113,11 @@ for (const scenario of [
     const [row] = rows;
     assert.equal(row.status, scenario.status || "blocked");
     assert.equal(row.decision_code, scenario.decisionCode);
+    if (scenario.tool === "") {
+      assert.deepEqual(Object.keys(row).sort(), ["client_row_id", "session_id", "tool", "action", "input", "executed_at", "decision_code", "status"].sort());
+      assert.deepEqual([row.tool, row.action, row.input, row.session_id], ["unknown", "unknown", {}, SESSION]);
+      return;
+    }
     assert.ok(row.error_message.startsWith(`${scenario.code}: `), row.error_message);
     if (scenario.message) assert.match(row.error_message, scenario.message);
     assert.equal(row.tool, input.tool_name || "unknown");
@@ -120,7 +128,6 @@ for (const scenario of [
     assert.equal(row.session_id, SESSION);
     assert.equal(row.step_index, scenario.step === null ? null : 0);
     assert.equal(row.token, undefined);
-    if (scenario.tool === "") assert.deepEqual([row.tool, row.action, row.input], ["unknown", "unknown", {}]);
   });
 }
 
@@ -267,7 +274,10 @@ for (const scenario of [
     } else {
       assert.equal(rows.length, 1);
       assert.deepEqual([rows[0].tool, rows[0].action, rows[0].input, rows[0].status, rows[0].decision_code], ["unknown", "unknown", {}, "blocked", "internal_error"]);
-      assert.ok(rows[0].error_message.startsWith(`${scenario.code}: `));
+      assert.equal(rows[0].error_message, undefined);
+      assert.equal(rows[0].output, undefined);
+      assert.equal(rows[0].plan_id, undefined);
+      assert.equal(rows[0].prompt_id, undefined);
       assert.ok(!JSON.stringify(rows).includes("never-capture-this"));
     }
   });

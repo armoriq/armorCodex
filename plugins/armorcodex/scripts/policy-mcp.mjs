@@ -229,22 +229,19 @@ async function shipQueuedAudit(config) {
   if (!config.apiKey) return;
   const posture = await cachedPosture(config);
   if (posture && posture.state !== "ok") return;
-  const wal = createAuditWal({ dataDir: config.dataDir });
+  const wal = createAuditWal({ dataDir: config.dataDir, config });
   const iapService = createIapService(config);
-  for (;;) {
-    const { rows, endOffset } = await wal.readBatch(100);
-    if (rows.length === 0) return;
+  await wal.drain(async ({ rows }) => {
     const started = Date.now();
     try {
-      await iapService.shipAuditBatch(rows);
+      const response = await iapService.shipAuditBatch(rows);
+      await recordBackendOutcome(config, classifyStatus(response.status), started);
+      return response;
     } catch (error) {
       await recordBackendOutcome(config, typeof error?.status === "number" ? classifyStatus(error.status) : "unreachable", started);
       throw error;
     }
-    await recordBackendOutcome(config, "ok", started);
-    await wal.advanceOffset(endOffset);
-    process.stderr.write(`[armorcodex-policy] flushed ${rows.length} audit rows -> offset=${endOffset}\n`);
-  }
+  });
 }
 
 async function run() {

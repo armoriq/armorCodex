@@ -368,7 +368,8 @@ export async function postJson(url, payload, headers, timeoutMs) {
         data = null;
       }
     }
-    return { ok: response.ok, status: response.status, text, data };
+    return { ok: response.ok, status: response.status, text, data,
+      headers: { "retry-after": response.headers.get("retry-after") } };
   } finally {
     clearTimeout(timeout);
   }

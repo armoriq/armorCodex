@@ -22,7 +22,7 @@ import {
   POLICY_UNREADABLE_NOTICE
 } from "./policy.mjs";
 import { handleArmorPolicyCommand, isArmorPolicyCommand } from "./armor-policy-commands.mjs";
-import { auditRowId, createAuditEnvelope, createAuditWal, fitAuditRow, snapshotAuditContext } from "./audit-wal.mjs";
+import { auditRowId, createAuditEnvelope, createAuditWal, snapshotAuditContext } from "./audit-wal.mjs";
 import { decisionOutcome } from "./decision-codes.mjs";
 import {
   BACKEND_UNREACHABLE,
@@ -393,8 +393,8 @@ export async function handleUserPromptSubmit(input, config) {
   }
   if (input.parent_session_id || input.is_subagent) return null;
   if (isStatusCommand(prompt)) {
-    const { rows } = await createAuditWal({ dataDir: config.dataDir }).readBatch(Number.MAX_SAFE_INTEGER);
-    return blockPrompt(await formatArmorStatus(config, { queuedRows: rows.length }));
+    const status = await createAuditWal({ dataDir: config.dataDir, config }).status();
+    return blockPrompt(await formatArmorStatus(config, status));
   }
 
   if (isArmorPolicyCommand(prompt)) {
@@ -888,7 +888,7 @@ async function buildAuditRow(input, config, outcome, unknownStep, envelope, hold
   const context = { ...envelope.link };
   const stepIndex = matchedStepIndex(envelope.plan, toolName, inputs) ?? unknownStep;
   const started = decision ? null : await takeToolStart(config, envelope);
-  return fitAuditRow({
+  return {
     ...link,
     ...(started?.link ?? context),
     client_row_id: decision ? envelope.decisionId : started?.resultId || envelope.resultId,
@@ -905,7 +905,7 @@ async function buildAuditRow(input, config, outcome, unknownStep, envelope, hold
       would_be_code: wouldBe.code ?? null,
       would_be_reason: redactSecrets(String(wouldBe.reason ?? "")).slice(0, 1000)
     })
-  });
+  };
 }
 
 async function auditToolCall(input, config, outcome, unknownStep = 0, envelope, hold = undefined, record = undefined) {
@@ -915,13 +915,14 @@ async function auditToolCall(input, config, outcome, unknownStep = 0, envelope, 
     if (outcome.status === "blocked" || outcome.status === "held") envelope.decisionRecorded = true;
   } catch (error) {
     process.stderr.write(`[armorcodex] audit row rejected: ${error instanceof Error ? error.message : error}\n`);
+    throw error;
   }
 }
 
 export async function auditFallbackStop(input, config, code, reason, envelope = createAuditEnvelope(input)) {
   if (envelope.decisionRecorded || envelope.loggedOut) return;
   if (config.identityUnknown) {
-    await appendNdjsonLine(path.join(config.dataDir, "audit", "capture-failures.jsonl"), {
+    await createAuditWal({ dataDir: config.dataDir, config }).recordCaptureFailure({
       client_row_id: envelope.decisionId,
       session_id: envelope.sessionId,
       executed_at: envelope.executedAt,
@@ -929,8 +930,14 @@ export async function auditFallbackStop(input, config, code, reason, envelope = 
     });
     return;
   }
-  await auditToolCall({ ...input, tool_name: "unknown", tool_input: {} }, config,
-    decisionOutcome(code, reason), null, envelope);
+  if (!config.auditEnabled || !config.apiKey) return;
+  await createIapService(config).enqueueAudit({
+    client_row_id: envelope.decisionId,
+    ...(envelope.sessionId ? { session_id: envelope.sessionId } : {}),
+    executed_at: envelope.executedAt,
+    decision_code: decisionOutcome(code, reason).decision_code
+  }, { fallback: true });
+  envelope.decisionRecorded = true;
 }
 
 export async function handlePostToolUse(input, config, envelope = createAuditEnvelope(input)) {
