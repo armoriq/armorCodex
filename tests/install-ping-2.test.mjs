@@ -30,6 +30,9 @@ import {
 } from "../plugins/armorcodex/scripts/lib/reach.mjs";
 import * as reach from "../plugins/armorcodex/scripts/lib/reach.mjs";
 import { runWorker } from "../plugins/armorcodex/scripts/reach-ping.mjs";
+import { loadSettings } from "../plugins/armorcodex/scripts/lib/config.mjs";
+import { handlePreToolUse, handleUserPromptSubmit } from "../plugins/armorcodex/scripts/lib/engine.mjs";
+import { withRunState } from "../plugins/armorcodex/scripts/lib/runs.mjs";
 
 const contract = JSON.parse(
   readFileSync(new URL("./fixtures/install-ping-v1.json", import.meta.url)),
@@ -873,7 +876,7 @@ globalThis.fetch = (url, init) => {
   assert.equal(existsSync(`${file}.sending`), false);
 });
 
-test("reach work on the hook path including a real spawn stays under 20 ms at the 95th percentile", async (t) => {
+async function hookPathPerformance(t, reporting = false) {
   const timings = [];
   const realSpawn = cp.spawn;
   let home;
@@ -903,10 +906,14 @@ test("reach work on the hook path including a real spawn stays under 20 ms at th
         contract.localCountsLine[0].repeat(20000),
       );
     const { spawnWorker, ...deps } = launched(home).deps;
+    const runConfig = loadSettings({ HOME: home, ARMORCODEX_DATA_DIR: path.join(home, "data"), ARMORCODEX_RUN_REPORTING_ENABLED: String(reporting) });
+    if (reporting) await handleUserPromptSubmit({ session_id: "perf", prompt: "inspect" }, runConfig);
     const started = performance.now();
     const output = reach.withReach("SessionStart", {}, config, undefined, deps);
-    reach.withReach("PreToolUse", {}, config, denied, deps);
+    const decision = reporting ? await handlePreToolUse({ session_id: "perf", tool_name: "Bash", tool_use_id: `perf-${run}`, tool_input: {} }, runConfig) : denied;
+    reach.withReach("PreToolUse", {}, config, decision, deps);
     timings.push(performance.now() - started);
+    if (reporting) assert.equal(await withRunState(runConfig, (state) => Object.values(state.runs)[0].tool_calls), 1);
     assert.ok(output.systemMessage.startsWith("ArmorCodex is not signed in"));
     assert.equal(
       readFileSync(countsFile(home, "2026-11-13"), "utf8"),
@@ -919,4 +926,9 @@ test("reach work on the hook path including a real spawn stays under 20 ms at th
   timings.sort((a, b) => a - b);
   const p95 = timings[Math.floor(timings.length * 0.95)];
   assert.ok(p95 < 20, `p95 was ${p95.toFixed(3)} ms`);
-});
+}
+
+test("reach work on the hook path including a real spawn stays under 20 ms at the 95th percentile", (t) => hookPathPerformance(t));
+
+// regression: #0013
+test("reach work on the hook path including a real spawn stays under 20 ms at the 95th percentile with run reporting on", (t) => hookPathPerformance(t, true));

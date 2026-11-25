@@ -13,7 +13,7 @@ import {
 } from "./intent.mjs";
 import { createIapService } from "./iap-service.mjs";
 import { refreshSession } from "./plan-refresh.mjs";
-import { accountForRun, closeRun, countRunTool, isRootRunHook, markRunUnreachable, prepareRun, publishRunReports, recoverRuns, runStateWarnings, startRun } from "./runs.mjs";
+import { accountForRun, closeRun, isRootRunHook, markRunUnreachable, prepareRun, publishRunReports, recoverRuns, runJournalWarnings, runStateWarnings, startRun } from "./runs.mjs";
 import {
   applyPolicyCommand,
   computePolicyHash,
@@ -411,7 +411,8 @@ export async function handleUserPromptSubmit(input, config) {
       runsPending: runStatus?.queuedRows, runsPaused: runStatus?.paused || runStatus?.undeliverable > 0,
       healthHold: healthStatus.hold, runsHold: runStatus?.hold,
       healthDeadLetters: healthStatus.deadLetters, runsDeadLetters: runStatus?.deadLetters,
-      runStateWarnings: config.runReportingEnabled ? runStateWarnings(config) : 0
+      runStateWarnings: config.runReportingEnabled ? runStateWarnings(config) : 0,
+      runJournalWarnings: config.runReportingEnabled ? runJournalWarnings(config) : 0
     }));
   }
 
@@ -495,17 +496,9 @@ function pendingMatchesSession(pending, session) {
 export async function handlePreToolUse(input, config, envelope = createAuditEnvelope(input)) {
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   const expected = await recordHookActivity(input, config);
-  if (expected && isRootRunHook(input)) await accountForRun(config, (state) => startRun(state, sessionId, expected, config));
-  await accountForRun(config, (state) => countRunTool(state, expected?.runId, input), { toolJournal: true });
-  await publishRunReports(config);
   snapshotAuditContext(envelope, expected);
   const toolName = typeof input.tool_name === "string" ? input.tool_name : "";
   const toolInput = sanitizeParams(input.tool_input, config.sanitize);
-  if (!toolName) {
-    if (shouldDeny(config)) await auditFallbackStop(input, config, "missing_tool_name", "ArmorCodex: missing tool_name on PreToolUse", envelope);
-    return shouldDeny(config) ? denyPreTool("ArmorCodex: missing tool_name on PreToolUse") : null;
-  }
-
   const norm = normalizeToolName(toolName);
   const armorTools = ["register_intent_plan", "policy_read", "policy_update", "policy_command"];
   // Codex MCP namespace is `mcp__<server>__` and the underlying MCP server name
@@ -515,13 +508,24 @@ export async function handlePreToolUse(input, config, envelope = createAuditEnve
   // anchored to our own server identifier so this can't whitelist a malicious
   // MCP server that happens to expose a same-named tool.
   const ARMOR_SERVER_RE = /(mcp__armorcodex[-_]policy__|armorcodex[-_]policy[._])/;
-  if (
-    armorTools.some(
-      (t) =>
-        norm === t ||
-        (norm.endsWith(t) && ARMOR_SERVER_RE.test(norm))
-    )
-  ) {
+  const armorTool = armorTools.some(
+    (t) =>
+      norm === t ||
+      (norm.endsWith(t) && ARMOR_SERVER_RE.test(norm))
+  );
+  const capability = toolCapability(toolName);
+  const posture = toolName && !armorTool && capability !== "read" ? await backendPosture(config) : null;
+  await accountForRun(config, (state) => {
+    if (expected && isRootRunHook(input)) {
+      startRun(state, sessionId, expected, config);
+      if (posture === "unreachable") markRunUnreachable(state, expected.runId);
+    }
+  }, { tool: { runId: expected?.runId, input } });
+  if (!toolName) {
+    if (shouldDeny(config)) await auditFallbackStop(input, config, "missing_tool_name", "ArmorCodex: missing tool_name on PreToolUse", envelope);
+    return shouldDeny(config) ? denyPreTool("ArmorCodex: missing tool_name on PreToolUse") : null;
+  }
+  if (armorTool) {
     await savePolicyRecord(config, input.tool_use_id, { source: "builtin" });
     return null;
   }
@@ -532,11 +536,9 @@ export async function handlePreToolUse(input, config, envelope = createAuditEnve
 
   // Reads run while the backend is down; every other capability, the web tools
   // whitelisted below included, waits on the backend posture first.
-  const capability = toolCapability(toolName);
+
   if (capability !== "read") {
-    const posture = await backendPosture(config);
     if (posture === "unreachable") {
-      if (isRootRunHook(input) && expected?.runId) await markRunUnreachable(config, expected.runId);
       const reason = unreachableReason(toolName, capability);
       if (shouldDeny(config)) return denyAndAudit(input, config, reason, BACKEND_UNREACHABLE, envelope);
       process.stderr.write(`[armorcodex] monitor mode: ${reason}; allowing it\n`);

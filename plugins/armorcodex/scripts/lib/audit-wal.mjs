@@ -537,7 +537,7 @@ export function createAuditWal(opts) {
         if ((health || runs) && reply.status === 403 && reply.body?.error === "org_required") {
           const retries = meta.hold?.credentialVersion === permitted.credentialVersion ? (meta.hold?.retries ?? 0) + 1 : 1;
           meta.hold = { reason: "org_required", retries, credentialVersion: permitted.credentialVersion,
-            nextProbeAt: clock.now() + Math.min(3_600_000, timing.authProbeMs * 2 ** Math.min(retries - 1, 30)) };
+            nextProbeAt: clock.now() + Math.min(3_600_000, 300_000 * 2 ** Math.min(retries - 1, 30)) };
           saveLogin(state.login, meta);
           return false;
         }

@@ -123,7 +123,7 @@ const POSTURE_LINES = {
   signed_out: "rejected the stored key (401): running in local only mode until you sign in again"
 };
 
-export async function formatArmorStatus(config, { queuedRows, undeliverable = 0, deadLetters = 0, captureFailures = 0, healthPending = 0, healthPaused = false, runsPending = 0, runsPaused = false, healthHold, runsHold, healthDeadLetters = 0, runsDeadLetters = 0, runStateWarnings = 0 }) {
+export async function formatArmorStatus(config, { queuedRows, undeliverable = 0, deadLetters = 0, captureFailures = 0, healthPending = 0, healthPaused = false, runsPending = 0, runsPaused = false, healthHold, runsHold, healthDeadLetters = 0, runsDeadLetters = 0, runStateWarnings = 0, runJournalWarnings = 0 }) {
   const lines = ["ArmorCodex status"];
   if (!config.apiKey) {
     lines.push(`  Signed in: no (local only mode, ${config.backendEndpoint})`);
@@ -145,6 +145,7 @@ export async function formatArmorStatus(config, { queuedRows, undeliverable = 0,
     lines.push(`  Run reports waiting to upload: ${runsPending}`);
     lines.push(`  Dead letter run reports: ${runsDeadLetters}`);
     if (runStateWarnings) lines.push(`  Run state files set aside: ${runStateWarnings}`);
+    if (runJournalWarnings) lines.push(`  Run journal lines set aside: ${runJournalWarnings}`);
     lines.push(`  Run reporting paused: ${runsPaused ? "yes" : "no"}`);
     if (runsHold) lines.push(`  Run reporting held: ${runsHold}`);
   }
