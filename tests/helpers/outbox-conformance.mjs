@@ -421,6 +421,443 @@ export function defineOutboxConformance({
         assert.match(dead[0].reason, new RegExp(String(status)));
       });
     }
+
+    // regression: #0010
+    it('R8: readable per row outcomes take precedence over a whole batch 400', async () => {
+      const { adapter } = await setup();
+      await adapter.append(row(1));
+      await adapter.append(row(2));
+      let sends = 0;
+      await adapter.drain(async ({ rows }) => {
+        sends += 1;
+        return { ...outcomes(rows, 'retryable'), status: 400 };
+      });
+      assert.equal(sends, 1);
+      assert.deepEqual(
+        (await adapter.readPending()).map(({ attempts }) => attempts),
+        [0, 0],
+      );
+    });
+
+    // regression: #0010
+    it('R8: legacy failures retain only the failed indices', async () => {
+      const { adapter } = await setup();
+      await adapter.append(row(1));
+      await adapter.append(row(2));
+      await adapter.drain(async () => ({
+        status: 200,
+        body: { written: 1, failures: [{ index: 1, error: 'busy' }] },
+      }));
+      assert.deepEqual(await pendingIds(adapter), [row(2).client_row_id]);
+      assert.equal((await adapter.readPending())[0].attempts, 0);
+    });
+
+    for (const status of [401, 403]) {
+      // regression: #0010
+      it(`R9: HTTP ${status} pauses this login without spending attempts`, async () => {
+        const { adapter, clock, timing } = await setup();
+        await adapter.append(row());
+        await adapter.drain(async () => ({ status, body: {} }));
+        const recovered = await adapter.restart();
+        await recovered.drain(
+          () => assert.fail('a paused login sent rows before revalidation'),
+          { probe: () => assert.fail('authentication was probed too soon') },
+        );
+        assert.equal((await recovered.readPending())[0].attempts, 0);
+        assert.equal((await recovered.status()).undeliverable, 1);
+        clock.advance(timing.authProbeMs);
+        let probes = 0;
+        await recovered.drain(
+          () => assert.fail('a failed probe resumed delivery'),
+          {
+            probe: async ({ login }) => {
+              assert.deepEqual(login, loginA);
+              probes += 1;
+              return { status };
+            },
+          },
+        );
+        assert.equal(probes, 1);
+        assert.equal((await recovered.readPending())[0].attempts, 0);
+        assert.equal((await recovered.status()).undeliverable, 1);
+        await recovered.switchLogin(loginA);
+        await recovered.drain(accept);
+        assert.deepEqual(await pendingIds(recovered), []);
+      });
+    }
+
+    // regression: #0010
+    it('R9: a periodic successful probe resumes the same login after restart', async () => {
+      const { adapter, clock, timing } = await setup();
+      await adapter.append(row());
+      await adapter.drain(async () => ({ status: 401, body: {} }));
+      let recovered = await adapter.restart();
+      clock.advance(timing.authProbeMs);
+      await recovered.drain(
+        () => assert.fail('a failed probe resumed delivery'),
+        { probe: async () => ({ status: 503 }) },
+      );
+      recovered = await recovered.restart();
+      await recovered.drain(
+        () => assert.fail('a paused login sent rows'),
+        { probe: () => assert.fail('probe delay did not survive restart') },
+      );
+      clock.advance(timing.authProbeMs);
+      let probes = 0;
+      await recovered.drain(accept, {
+        probe: async ({ login }) => {
+          assert.deepEqual(login, loginA);
+          probes += 1;
+          return { status: 200 };
+        },
+      });
+      assert.equal(probes, 1);
+      assert.deepEqual(await pendingIds(await recovered.restart()), []);
+      assert.equal((await recovered.status()).undeliverable, 0);
+    });
+
+    // regression: #0010
+    it('R9: another authenticated call resumes only its own credential and backend', async () => {
+      const { adapter } = await setup();
+      await adapter.append(row());
+      await adapter.drain(async () => ({ status: 401, body: {} }));
+      const recovered = await adapter.restart();
+      for (const login of [
+        { ...loginA, keyId: 'key-b' },
+        { ...loginA, backend: 'https://b.invalid' },
+      ]) {
+        await recovered.authenticationSucceeded(login);
+        await recovered.drain(() =>
+          assert.fail('another credential lifted the pause'),
+        );
+        assert.equal((await recovered.status()).undeliverable, 1);
+      }
+      await recovered.authenticationSucceeded(loginA);
+      await (await recovered.restart()).drain(accept);
+      assert.deepEqual(await pendingIds(recovered), []);
+    });
+
+    it('R9: a structured row refusal on 403 is settled without an authentication pause', async () => {
+      const { adapter } = await setup();
+      await adapter.append(row(1));
+      await adapter.drain(async ({ rows }) => ({
+        ...outcomes(rows, 'rejected'),
+        status: 403,
+      }));
+      assert.deepEqual(await pendingIds(adapter), []);
+      assert.equal((await adapter.readDeadLetters()).length, 1);
+      await adapter.append(row(2));
+      await adapter.drain(accept);
+      assert.deepEqual(await pendingIds(adapter), []);
+    });
+
+    for (const [status, attempts] of [
+      [413, 1],
+      [429, 0],
+      [500, 0],
+    ]) {
+      // regression: #0010
+      it(`R9: HTTP ${status} charges ${attempts} attempts and does not bisect`, async () => {
+        const { adapter } = await setup();
+        await adapter.append(row(1));
+        await adapter.append(row(2));
+        let sends = 0;
+        await adapter.drain(async () => {
+          sends += 1;
+          return { status, body: {} };
+        });
+        assert.equal(sends, 1);
+        assert.deepEqual(
+          (await adapter.readPending()).map(({ attempts }) => attempts),
+          [attempts, attempts],
+        );
+      });
+    }
+
+    it('R10: retry delay grows exponentially, persists and varies with jitter', async () => {
+      const delays = [];
+      for (const random of [0.25, 0.75]) {
+        const { adapter, clock, timing } = await setup({ random });
+        await adapter.append(row());
+        await adapter.drain(async () => ({ status: 503, body: {} }));
+        const first =
+          (await adapter.readPending())[0].nextAttemptAt - clock.now();
+        assert.ok(first > 0 && first <= timing.baseMs);
+        const recovered = await adapter.restart();
+        await recovered.drain(() => assert.fail('sent before retry delay'));
+        await advanceToRetry(recovered, clock);
+        await recovered.drain(async () => ({ status: 503, body: {} }));
+        const second =
+          (await recovered.readPending())[0].nextAttemptAt - clock.now();
+        assert.ok(second > first && second <= 2 * timing.baseMs);
+        delays.push(first);
+      }
+      assert.notEqual(delays[0], delays[1]);
+    });
+
+    for (const header of ['120', 'Sat, 14 Nov 2026 12:02:00 GMT']) {
+      it(`R10: Retry-After ${header} is a lower bound even beyond the backoff cap`, async () => {
+        const { adapter, clock } = await setup();
+        await adapter.append(row());
+        const until = clock.now() + 120_000;
+        await adapter.drain(async () => ({
+          status: 429,
+          body: {},
+          headers: { 'retry-after': header },
+        }));
+        assert.ok((await adapter.readPending())[0].nextAttemptAt >= until);
+        clock.advance(119_999);
+        const recovered = await adapter.restart();
+        await recovered.drain(() => assert.fail('Retry-After was shortened'));
+        await advanceToRetry(recovered, clock);
+        await recovered.drain(accept);
+        assert.deepEqual(await pendingIds(recovered), []);
+      });
+    }
+
+    for (const [failure, reply] of [
+      [
+        'network',
+        async () => {
+          throw new Error('connection lost');
+        },
+      ],
+      [
+        'timeout',
+        async () => {
+          throw new Error('request timed out');
+        },
+      ],
+      ['unreadable', async () => ({ status: 200, body: 'unreadable JSON' })],
+      ['5xx', async () => ({ status: 503, body: {} })],
+      ['408', async () => ({ status: 408, body: {} })],
+      ['429', async () => ({ status: 429, body: {} })],
+      [
+        'request_in_progress',
+        async () => ({ status: 409, body: { error: 'request_in_progress' } }),
+      ],
+      ['retryable', async ({ rows }) => outcomes(rows, 'retryable')],
+    ]) {
+      // regression: #0010
+      it(`R11: a long ${failure} outage keeps every row pending and then delivers it`, async () => {
+        let { adapter, clock, timing } = await setup();
+        const captured = [row(1), row(2), row(3)];
+        for (const capturedRow of captured) await adapter.append(capturedRow);
+        for (let attempt = 1; attempt <= 40; attempt += 1) {
+          let sends = 0;
+          await adapter.drain(async (request) => {
+            sends += 1;
+            assert.deepEqual(request.rows, captured);
+            return reply(request);
+          });
+          assert.equal(sends, 1);
+          adapter = await adapter.restart();
+          const pending = await adapter.readPending();
+          assert.deepEqual(pending.map(({ row }) => row), captured);
+          assert.deepEqual(
+            pending.map(({ attempts }) => attempts),
+            [0, 0, 0],
+          );
+          assert.deepEqual(await adapter.readDeadLetters(), []);
+          assert.equal((await adapter.status()).deadLetters, 0);
+          for (const entry of pending) {
+            const delay = entry.nextAttemptAt - clock.now();
+            assert.ok(delay > 0 && delay <= timing.maxMs);
+            if (attempt >= 4) assert.ok(delay >= timing.maxMs / 2);
+          }
+          await adapter.drain(() =>
+            assert.fail('sent before the persisted retry time'),
+          );
+          clock.advance(24 * 60 * 60 * 1000);
+        }
+        let delivered = 0;
+        await adapter.drain(async ({ rows }) => {
+          assert.deepEqual(rows, captured);
+          delivered += rows.length;
+          return outcomes(rows);
+        });
+        assert.equal(delivered, captured.length);
+        assert.deepEqual(await pendingIds(await adapter.restart()), []);
+        assert.deepEqual(await adapter.readDeadLetters(), []);
+      });
+    }
+
+    for (const [status, body] of [
+      [413, {}],
+      [409, { error: 'conflict' }],
+    ]) {
+      // regression: #0010
+      it(`R11: ten non transient HTTP ${status} refusals become one retained dead letter`, async () => {
+        let { adapter, clock } = await setup();
+        await adapter.append(row(1));
+        for (let attempt = 1; attempt <= 10; attempt += 1) {
+          await adapter.drain(async () => ({ status, body }));
+          adapter = await adapter.restart();
+          if (attempt < 10) {
+            assert.equal((await adapter.readPending())[0].attempts, attempt);
+            assert.deepEqual(await adapter.readDeadLetters(), []);
+            await advanceToRetry(adapter, clock);
+            if (attempt === 9) {
+              for (let outage = 0; outage < 12; outage += 1) {
+                await adapter.drain(async () => ({ status: 503, body: {} }));
+                adapter = await adapter.restart();
+                assert.deepEqual(await pendingIds(adapter), [row(1).client_row_id]);
+                assert.equal((await adapter.readPending())[0].attempts, 9);
+                assert.deepEqual(await adapter.readDeadLetters(), []);
+                await advanceToRetry(adapter, clock);
+              }
+            }
+          }
+        }
+        assert.deepEqual(await pendingIds(adapter), []);
+        const dead = await adapter.readDeadLetters();
+        assert.equal(dead.length, 1);
+        assert.deepEqual(dead[0].row, row(1));
+        assert.equal(dead[0].attempts, 10);
+        assert.match(dead[0].reason, new RegExp(String(status)));
+        clock.advance(100 * 365 * 24 * 60 * 60 * 1000);
+        adapter = await adapter.restart();
+        await adapter.drain(() => assert.fail('dead letter was sent again'));
+        assert.deepEqual(await adapter.readDeadLetters(), dead);
+        assert.equal((await adapter.status()).deadLetters, 1);
+        await adapter.append(row(2));
+        await adapter.drain(accept);
+        assert.deepEqual(await pendingIds(adapter), []);
+      });
+    }
+
+    it('R12: the exact UTF-8 row cap fits and one byte over is shrunk', async () => {
+      const { adapter, limits } = await setup();
+      const exact = row(1);
+      exact.input = { value: 'é' };
+      exact.input.value += 'x'.repeat(limits.maxRowBytes - bytes(exact));
+      assert.equal(bytes(exact), limits.maxRowBytes);
+      await adapter.append(exact);
+      const over = { ...copy(exact), client_row_id: row(2).client_row_id };
+      over.input.value += 'x';
+      await adapter.append(over);
+      const pending = await adapter.readPending();
+      assert.deepEqual(pending[0].row, exact);
+      assert.deepEqual(pending[1].row.input, limits.truncationMarker);
+      assert.ok(bytes(pending[1].row) <= limits.maxRowBytes);
+    });
+
+    for (const boundary of ['bytes', 'rows']) {
+      it(`R12: batch ${boundary} cap includes the JSON envelope`, async () => {
+        const sample = { ...row(), input: { value: '😀'.repeat(50) } };
+        const maxBatchBytes = bytes({ rows: [sample, sample] });
+        const sizeLimits =
+          boundary === 'bytes' ? { maxBatchBytes } : { maxBatchRows: 2 };
+        const { adapter, limits } = await setup({ sizeLimits });
+        for (let n = 1; n <= 3; n += 1)
+          await adapter.append({
+            ...sample,
+            client_row_id: row(n).client_row_id,
+          });
+        const sizes = [];
+        await adapter.drain(async ({ rows }) => {
+          assert.ok(bytes({ rows }) <= limits.maxBatchBytes);
+          assert.ok(rows.length <= limits.maxBatchRows);
+          sizes.push(rows.length);
+          return outcomes(rows);
+        });
+        assert.deepEqual(sizes, [2, 1]);
+        assert.deepEqual(await pendingIds(adapter), []);
+      });
+    }
+
+    it('R13: shrinking replaces input before output and preserves all other fields', async () => {
+      const { adapter, limits } = await setup();
+      const first = {
+        ...row(1),
+        input: { value: 'é'.repeat(1024) },
+        output: { value: 'keep' },
+      };
+      const second = {
+        ...row(2),
+        input: { value: 'small' },
+        output: { value: '😀'.repeat(1024) },
+      };
+      await adapter.append(first);
+      await adapter.append(second);
+      const pending = await adapter.readPending();
+      assert.deepEqual(pending[0].row, {
+        ...first,
+        input: limits.truncationMarker,
+      });
+      assert.deepEqual(pending[1].row, {
+        ...second,
+        input: limits.truncationMarker,
+        output: limits.truncationMarker,
+      });
+      assert.equal(first.input.value.length, 1024);
+      await adapter.drain(async ({ rows }) => {
+        for (const fitted of rows)
+          assert.ok(bytes(fitted) <= limits.maxRowBytes);
+        return outcomes(rows);
+      });
+    });
+
+    it('R13: metadata that cannot fit is dead lettered as oversize without a delivery', async () => {
+      const { adapter } = await setup();
+      const large = { ...row(), error_message: 'x'.repeat(2048) };
+      await adapter.append(large);
+      const recovered = await adapter.restart();
+      await recovered.drain(() => assert.fail('oversize metadata was sent'));
+      assert.deepEqual(await pendingIds(recovered), []);
+      const dead = await recovered.readDeadLetters();
+      assert.equal(dead.length, 1);
+      assert.deepEqual(dead[0].row, large);
+      assert.equal(dead[0].reason, 'oversize');
+      assert.equal(dead[0].attempts, 0);
+    });
+
+    it('R14: fallback capture uses only the minimal sanitized envelope', async () => {
+      const { adapter } = await setup();
+      const unsafe = {
+        ...row(),
+        input: { authorization: 'untrusted input' },
+        output: 'raw output',
+        error_message: 'raw crash details',
+      };
+      await adapter.append(unsafe, { fallback: true });
+      const expected = {
+        client_row_id: unsafe.client_row_id,
+        session_id: unsafe.session_id,
+        tool: 'unknown',
+        action: 'unknown',
+        input: {},
+        executed_at: unsafe.executed_at,
+        decision_code: unsafe.decision_code,
+        status: 'blocked',
+      };
+      assert.deepEqual((await adapter.readPending())[0].row, expected);
+      await adapter.drain(async ({ rows }) => {
+        assert.deepEqual(rows, [expected]);
+        return outcomes(rows);
+      });
+      const sessionless = row(2);
+      delete sessionless.session_id;
+      await adapter.append(sessionless, { fallback: true });
+      const pending = await adapter.readPending();
+      assert.equal(Object.hasOwn(pending[0].row, 'session_id'), false);
+      await adapter.drain(accept);
+    });
+
+    it('R14: missing identity counts a capture failure and a later login cannot adopt it', async () => {
+      const { adapter } = await setup({ login: null });
+      await adapter.append(row(), { fallback: true });
+      assert.equal((await adapter.status()).captureFailures, 1);
+      await adapter.append(row(2), { fallback: true, loggedOut: true });
+      assert.equal((await adapter.status()).captureFailures, 1);
+      const recovered = await adapter.restart();
+      assert.equal((await recovered.status()).captureFailures, 1);
+      await recovered.switchLogin(loginA);
+      await recovered.drain(() =>
+        assert.fail('a fallback without identity acquired a guessed login'),
+      );
+      assert.deepEqual(await pendingIds(recovered), []);
+    });
   });
 }
 
