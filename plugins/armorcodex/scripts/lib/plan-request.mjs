@@ -93,7 +93,11 @@ export async function requestWithRetry(send, options = {}) {
         error.reasonCode ?? (error.unconfirmed ? "timeout" : "rejected"), (options.now ?? Date.now)(), {
           event_id: auditRowId("plan_request_failed", options.requestKey, "decision")
         });
-      await createAuditWal({ dataDir: options.config.dataDir, config: options.config, stream: "health" }).appendLine(event);
+      try {
+        await createAuditWal({ dataDir: options.config.dataDir, config: options.config, stream: "health" }).appendLine(event);
+      } catch {
+        process.stderr.write("[armorcodex] plan_request_failed event not saved\n");
+      }
     }
     throw error;
   }

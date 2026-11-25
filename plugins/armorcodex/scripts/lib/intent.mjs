@@ -11,7 +11,7 @@ import {
 import { CLIENT } from "./client-identity.mjs";
 import { requireEndpoint } from "./config.mjs";
 import { sdkModule } from "./sdk.mjs";
-import { auditLogin, createAuditWal } from "./audit-wal.mjs";
+import { revalidateOutboxLogin } from "./audit-wal.mjs";
 import { recordBackendOutcome } from "./backend-posture.mjs";
 
 const sdkClientCache = new Map();
@@ -519,7 +519,7 @@ let legacyBackendLogged = false;
 async function authenticated(config, endpoint = config.backendEndpoint) {
   const backend = config.backendEndpoint?.replace(/\/+$/, "");
   if (config.dataDir && backend && (endpoint === backend || endpoint?.startsWith(backend + "/"))) {
-    await createAuditWal({ dataDir: config.dataDir, config }).authenticationSucceeded(auditLogin(config));
+    await revalidateOutboxLogin(config);
     await recordBackendOutcome(config, "ok");
   }
 }

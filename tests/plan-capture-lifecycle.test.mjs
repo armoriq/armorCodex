@@ -190,26 +190,28 @@ test("hook mode survives repeated MCP registration with a different environment"
   assert.doesNotMatch(requests, /\/iap\/sdk\/token|lifecycle.test\/intent/);
 });
 
-// regression: #0007
-test("shutdown waits for an in flight registration and releases its request lock", async (t) => {
-  const h = await setup(t, { ARMORCODEX_INTENT_URL: "https://capture.test/intent" });
-  signIn(h.home, { backend: h.config().backendEndpoint, apiKey: "test-capture-key" });
-  await h.prompt("first");
-  const registering = h.registerResult();
-  const outcome = registering.catch((error) => error);
-  await h.tokenRequested;
-  const closed = new Promise((resolve) => {
-    const original = h.transport.onclose;
-    h.transport.onclose = () => { original?.(); resolve(); };
+for (const enabled of ["true", "false"]) {
+  // regression: #0007
+  test(`shutdown waits for an in flight registration with run reporting ${enabled}`, async (t) => {
+    const h = await setup(t, { ARMORCODEX_INTENT_URL: "https://capture.test/intent", ARMORCODEX_RUN_REPORTING_ENABLED: enabled });
+    signIn(h.home, { backend: h.config().backendEndpoint, apiKey: "test-capture-key" });
+    await h.prompt("first");
+    const registering = h.registerResult();
+    const outcome = registering.catch((error) => error);
+    await h.tokenRequested;
+    const closed = new Promise((resolve) => {
+      const original = h.transport.onclose;
+      h.transport.onclose = () => { original?.(); resolve(); };
+    });
+    process.kill(h.transport.pid, "SIGTERM");
+    await h.releaseToken().catch(() => {});
+    const result = await outcome;
+    assert.equal(result.isError ?? false, false);
+    assert.match(result.content?.[0]?.text ?? String(result), /^Intent registered: plan /);
+    await closed;
+    assert.deepEqual((await readdir(h.config().dataDir)).filter((name) => name.endsWith(".lock")), []);
   });
-  process.kill(h.transport.pid, "SIGTERM");
-  await h.releaseToken().catch(() => {});
-  const result = await outcome;
-  assert.equal(result.isError ?? false, false);
-  assert.match(result.content?.[0]?.text ?? String(result), /^Intent registered: plan /);
-  await closed;
-  assert.deepEqual((await readdir(h.config().dataDir)).filter((name) => name.endsWith(".lock")), []);
-});
+}
 
 test("root prompts get UUIDs, deduplicate for five seconds, and close at Stop", async (t) => {
   const h = await setup(t);

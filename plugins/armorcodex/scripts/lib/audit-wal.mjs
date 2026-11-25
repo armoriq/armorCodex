@@ -10,6 +10,7 @@ import { ensurePrivateDirSync } from "./fs-store.mjs";
 import { SIZE_LIMITS } from "./audit-contract.mjs";
 import { validHistory } from "./login-ownership.mjs";
 import { CLIENT_EVENTS, clientEvent } from "./client-events.mjs";
+import { RUNS } from "./runs-contract.mjs";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -71,6 +72,14 @@ export function auditLogin(config) {
     loginHistory: config.loginHistory,
     userId: config.userId
   };
+}
+
+export async function revalidateOutboxLogin(config) {
+  for (const stream of ["audit", "health", ...(config.runReportingEnabled ? ["runs"] : [])]) {
+    try {
+      await createAuditWal({ dataDir: config.dataDir, config, stream }).authenticationSucceeded(auditLogin(config));
+    } catch { process.stderr.write("[armorcodex] outbox authentication not saved\n"); }
+  }
 }
 
 function validateLimits(limits) {
@@ -139,15 +148,21 @@ export function createAuditWal(opts) {
   const stream = opts.stream ?? "audit";
   if (!CLIENT_EVENTS.queues.includes(stream)) throw new Error("Invalid outbox stream");
   const health = stream === "health";
+  const runs = stream === "runs";
   const idField = health ? "event_id" : "client_row_id";
-  const batchField = health ? "events" : "rows";
+  const rowId = (row) => runs ? JSON.stringify([row.run_id, row.report_seq]) : row[idField];
+  const batchField = health ? "events" : runs ? "reports" : "rows";
   const auditDir = path.join(opts.dataDir, stream);
   const dir = path.join(auditDir, "outbox-v1");
   const archiveDir = path.join(dir, "archive");
   const receiptsDir = path.join(dir, "receipts");
   const unreportedDir = path.join(dir, "unreported");
   const configuredLimits = opts.sizeLimits ? validateLimits(opts.sizeLimits) : sharedLimits();
-  const limits = { ...configuredLimits, maxBatchRows: health ? Math.min(CLIENT_EVENTS.maxBatchEvents, configuredLimits.maxBatchRows) : configuredLimits.maxBatchRows };
+  const limits = {
+    ...configuredLimits,
+    maxBatchRows: Math.min(configuredLimits.maxBatchRows, health ? CLIENT_EVENTS.maxBatchEvents : runs ? RUNS.limits.maxBatchReports : Infinity),
+    maxBatchBytes: Math.min(configuredLimits.maxBatchBytes, runs ? RUNS.limits.maxBatchBytes : Infinity)
+  };
   const captureLimits = { ...limits, maxRowBytes: Math.min(limits.maxRowBytes, opts.contentLimitBytes ?? limits.maxRowBytes) };
   const clock = opts.clock ?? { now: Date.now, random: Math.random };
   const timing = { baseMs: 1000, maxMs: 300_000, lockTtlMs: 30_000, authProbeMs: 120_000, healthProbeMs: 30_000, ...opts.timing };
@@ -229,14 +244,14 @@ export function createAuditWal(opts) {
   function pending(segment, state = load(segment)) {
     const seen = new Set(state.settled);
     return records(segment).filter((row) => {
-      if (seen.has(row[idField]) || existsSync(receiptPath(state.login, row[idField]))) return false;
-      seen.add(row[idField]);
+      if (seen.has(rowId(row)) || existsSync(receiptPath(state.login, rowId(row)))) return false;
+      seen.add(rowId(row));
       return true;
-    }).map((row) => ({
+    }).map(({ _enqueuedAt, ...row }) => ({
       row, login: state.login, attempts: 0, retries: 0, nextAttemptAt: 0,
-      enqueuedAt: state.enqueued?.[row[idField]] ??
-        (Date.parse(row.occurred_at ?? row.executed_at) || statSync(rowsPath(segment)).mtimeMs),
-      ...state.delivery[row[idField]]
+      enqueuedAt: _enqueuedAt ??
+        (Date.parse(row.occurred_at ?? row.executed_at ?? row.started_at) || (state.createdAt ?? statSync(rowsPath(segment)).mtimeMs)),
+      ...state.delivery[rowId(row)]
     }));
   }
 
@@ -269,8 +284,8 @@ export function createAuditWal(opts) {
     try {
       replace(rowsPath(temporary), rows.map((row) => JSON.stringify(row) + "\n").join(""));
       save(temporary, {
-        version: 1, login: boundLogin(login), delivery: {},
-        settled: dead.map(({ row }) => row[idField]), dead, lease: null,
+        version: 1, login: boundLogin(login), delivery: {}, createdAt: clock.now(),
+        settled: dead.map(({ row }) => rowId(row)), dead, lease: null,
         ...(healthEvents.length ? { healthEvents } : {})
       });
       syncDir(temporary);
@@ -386,7 +401,7 @@ export function createAuditWal(opts) {
         const { _seq, _enqueuedAt, ...row } = original;
         row.client_row_id ||= auditRowId("legacy", hash(JSON.stringify(original)), "result");
         const name = "legacy." + hash(row.client_row_id);
-        if (existsSync(path.join(dir, name)) || existsSync(path.join(archiveDir, name))) continue;
+        if ([dir, archiveDir, unreportedDir].some((folder) => existsSync(path.join(folder, name)))) continue;
         if (login) createSegment(name, login, [row]);
         else unknown.push({ row, login: null, attempts: 0, nextAttemptAt: 0 });
       }
@@ -405,20 +420,23 @@ export function createAuditWal(opts) {
         decision_code: row.decision_code, status: "blocked"
       };
     }
-    row[idField] = typeof row[idField] === "string" && UUID.test(row[idField]) ? row[idField] : randomUUID();
+    if (runs) {
+      if (typeof row.run_id !== "string" || !row.run_id || row.run_id.length > RUNS.limits.maxIdChars ||
+          !Number.isSafeInteger(row.report_seq) || row.report_seq < 1) throw new Error("Invalid run report identity");
+    } else row[idField] = typeof row[idField] === "string" && UUID.test(row[idField]) ? row[idField] : randomUUID();
     return transaction(() => {
       if (!identified(login)) { captureFailure(row); return; }
-      if (existsSync(receiptPath(login, row[idField]))) return;
-      if (health && queueFiles().some((segment) => {
+      if (existsSync(receiptPath(login, rowId(row)))) return;
+      if ((health || runs) && queueFiles().some((segment) => {
         const state = load(segment);
         return bindingKey(state.login) === bindingKey(login) &&
-          (state.settled.includes(row[idField]) || records(segment).some((entry) => entry[idField] === row[idField]));
+          (state.settled.includes(rowId(row)) || Object.hasOwn(state.delivery, rowId(row)));
       })) return;
       const fitted = fitAuditRow(row, captureLimits, opts.contentLimitBytes !== undefined);
       try {
         if (!fitted) {
           fault("deadLetter");
-          const name = "queue." + hash(bindingKey(login)) + ".oversize." + row[idField];
+          const name = "queue." + hash(bindingKey(login)) + ".oversize." + hash(rowId(row));
           const existing = [dir, archiveDir, unreportedDir].some((folder) => existsSync(path.join(folder, name)));
           const segment = existing ? path.join(dir, name) : createSegment(name, login, [],
             [{ row, attempts: 0, reason: "oversize" }],
@@ -427,12 +445,11 @@ export function createAuditWal(opts) {
         } else {
           const segment = queueFor(login);
           const state = load(segment);
-          state.enqueued ??= {};
-          if (!state.enqueued[row[idField]]) {
-            state.enqueued[row[idField]] = clock.now();
+          append(rowsPath(segment), fitted, "append");
+          if (health || runs) {
+            state.delivery[rowId(row)] = { enqueuedAt: clock.now() };
             save(segment, state);
           }
-          append(rowsPath(segment), fitted, "append");
         }
       } catch (error) {
         try { captureFailure(row); } catch { /* Preserve the original storage error when diagnostics cannot be saved. */ }
@@ -446,24 +463,24 @@ export function createAuditWal(opts) {
     const results = new Map();
     if (Object.hasOwn(body, "results")) {
       if (!Array.isArray(body.results)) return null;
-      const ids = new Set(batch.map(({ row }) => row[idField]));
+      const ids = new Set(batch.map(({ row }) => rowId(row)));
       for (const result of body.results) {
-        if (!result || !ids.has(result[idField]) || results.has(result[idField]) ||
-          !CLIENT_EVENTS.outcomes.includes(result.outcome) ||
+        if (!result || !ids.has(rowId(result)) || results.has(rowId(result)) ||
+          !(runs ? ["accepted", "stale", "duplicate", "rejected"] : CLIENT_EVENTS.outcomes).includes(result.outcome) ||
           (result.error !== undefined && typeof result.error !== "string")) return null;
-        results.set(result[idField], result);
+        results.set(rowId(result), result);
       }
       return results;
     }
-    if (health || !Array.isArray(body.failures)) return null;
+    if (health || runs || !Array.isArray(body.failures)) return null;
     const failed = new Set();
     for (const failure of body.failures) {
       if (!failure || !Number.isInteger(failure.index) || failure.index < 0 || failure.index >= batch.length ||
         failed.has(failure.index) || typeof failure.error !== "string") return null;
       failed.add(failure.index);
-      results.set(batch[failure.index].row[idField], { outcome: "retryable", error: failure.error });
+      results.set(rowId(batch[failure.index].row), { outcome: "retryable", error: failure.error });
     }
-    for (const entry of batch) if (!results.has(entry.row[idField])) results.set(entry.row[idField], { outcome: "accepted" });
+    for (const entry of batch) if (!results.has(rowId(entry.row))) results.set(rowId(entry.row), { outcome: "accepted" });
     return results;
   }
 
@@ -500,13 +517,16 @@ export function createAuditWal(opts) {
     let networkError;
     try { reply = await send({ login: copy(batch[0].login), rows: batch.map(({ row }) => copy(row)) }); }
     catch (error) { networkError = String(error); reply = { status: 0, body: null }; }
+    if (reply?.skipped) return;
     const hasResults = reply?.body !== null && typeof reply?.body === "object" && Object.hasOwn(reply.body, "results");
-    const results = hasResults || (reply?.status >= 200 && reply?.status < 300) ? parseResults(reply.body, batch) : null;
+    const maySettle = (reply?.status >= 200 && reply?.status < 300) || [400, 403, 422].includes(reply?.status);
+    const results = (hasResults && maySettle) || (reply?.status >= 200 && reply?.status < 300)
+      ? parseResults(reply.body, batch) : null;
     const authorized = await transaction(() => {
       if (!existsSync(segment)) return false;
       const state = load(segment);
       if (!owns(state, generation)) return false;
-      if (health) {
+      if (health || runs) {
         state.endpointPaused = reply?.status === 404 || Boolean(state.endpointPaused && !reply?.status);
         state.probeAt = state.endpointPaused ? clock.now() + timing.healthProbeMs : 0;
         save(segment, state, [], generation);
@@ -514,6 +534,13 @@ export function createAuditWal(opts) {
       }
       if (reply?.status === 401 || (reply?.status === 403 && !(hasResults && results))) {
         const meta = loadLogin(state.login);
+        if ((health || runs) && reply.status === 403 && reply.body?.error === "org_required") {
+          const retries = meta.hold?.credentialVersion === permitted.credentialVersion ? (meta.hold?.retries ?? 0) + 1 : 1;
+          meta.hold = { reason: "org_required", retries, credentialVersion: permitted.credentialVersion,
+            nextProbeAt: clock.now() + Math.min(3_600_000, timing.authProbeMs * 2 ** Math.min(retries - 1, 30)) };
+          saveLogin(state.login, meta);
+          return false;
+        }
         meta.paused = { credentialVersion: permitted.credentialVersion ?? null, nextProbeAt: clock.now() + timing.authProbeMs };
         saveLogin(state.login, meta);
         state.stallReason = "auth_paused";
@@ -521,6 +548,10 @@ export function createAuditWal(opts) {
         return false;
       }
       if (reply?.status >= 200 && reply?.status < 300) authenticationSucceeded(state.login);
+      if (results || (reply?.status >= 200 && reply?.status < 300)) {
+        const meta = loadLogin(state.login);
+        if (meta.hold) { meta.hold = null; saveLogin(state.login, meta); }
+      }
       return true;
     });
     if (!authorized) return;
@@ -531,7 +562,7 @@ export function createAuditWal(opts) {
       return;
     }
     const split = results && batch.length > 1 ? batch.filter(({ row }) => {
-      const result = results.get(row[idField]);
+      const result = results.get(rowId(row));
       return result?.outcome === "retryable" && result.error === "batch_oversize";
     }) : [];
     await transaction(() => {
@@ -542,7 +573,7 @@ export function createAuditWal(opts) {
       const decisions = new Map();
       const deadCounts = new Map();
       for (const sent of batch) {
-        const id = sent.row[idField];
+        const id = rowId(sent.row);
         if (settled.has(id) || split.includes(sent)) continue;
         const result = results?.get(id);
         const isolated = !hasResults && batch.length === 1 && [400, 422].includes(reply?.status);
@@ -553,8 +584,8 @@ export function createAuditWal(opts) {
         const attempts = (state.delivery[id]?.attempts ?? 0) + (charged ? 1 : 0);
         const retries = (state.delivery[id]?.retries ?? 0) + 1;
         const reason = result?.error || networkError || (result ? result.outcome : "HTTP " + (reply?.status ?? 0) + ": unreadable or missing outcome");
-        state.delivery[id] = { attempts, retries, lastError: reason, nextAttemptAt: 0 };
-        if (["accepted", "duplicate"].includes(result?.outcome)) decisions.set(id, "ack");
+        state.delivery[id] = { enqueuedAt: sent.enqueuedAt, attempts, retries, lastError: reason, nextAttemptAt: 0 };
+        if (["accepted", "duplicate", ...(runs ? ["stale"] : [])].includes(result?.outcome)) decisions.set(id, "ack");
         else if (result?.outcome === "rejected" || isolated || attempts >= 10) {
           decisions.set(id, "deadLetter");
           const code = result?.outcome === "rejected" || isolated ? "rejected" : "attempts_exhausted";
@@ -562,17 +593,16 @@ export function createAuditWal(opts) {
         }
         else state.delivery[id].nextAttemptAt = clock.now() + retryDelay(retries, reply?.headers?.["retry-after"]);
       }
-      state.stallReason = decisions.size === batch.length ? null : reply?.status === 429 ? "rate_limited"
-        : reply?.status >= 500 ? "server_error" : "backend_unreachable";
+      state.stallReason = decisions.size + split.length === batch.length ? null : reply?.status === 429 ? "rate_limited"
+        : reply?.status ? "server_error" : "backend_unreachable";
       if (!save(segment, state, [], generation)) return;
       for (const [id, decision] of decisions) {
         if (decision === "deadLetter") state.dead.push({
-          row: batch.find(({ row }) => row[idField] === id).row,
+          row: batch.find(({ row }) => rowId(row) === id).row,
           attempts: state.delivery[id].attempts, reason: state.delivery[id].lastError
         });
         state.settled.push(id);
         delete state.delivery[id];
-        delete state.enqueued?.[id];
       }
       for (const [reason, count] of deadCounts) stageHealth(state, "dead_letter", count, reason);
       save(segment, state, [...new Set(decisions.values())], generation);
@@ -606,10 +636,15 @@ export function createAuditWal(opts) {
   }
 
   async function drain(send, { probe, allowDelivery = true } = {}) {
-    if (!health) await transaction(() => importLegacy());
+    if (stream === "audit") await transaction(() => importLegacy());
+    if (opts.canDeliverRow && !await transaction(() => queueFiles().some((segment) =>
+      pending(segment).some(({ row }) => opts.canDeliverRow(row))))) return;
     const authenticated = await probePaused(probe);
     if (!allowDelivery && !authenticated) return;
-    const ready = (state) => available(state.login) && (!state.endpointPaused || state.probeAt <= clock.now());
+    const ready = (state) => available(state.login) &&
+      (!loadLogin(state.login).hold || loadLogin(state.login).hold.nextProbeAt <= clock.now() ||
+        loadLogin(state.login).hold.credentialVersion !== currentLogin()?.credentialVersion) &&
+      (!state.endpointPaused || state.probeAt <= clock.now());
     const selected = await transaction(() => queueFiles().filter((segment) => ready(load(segment))));
     for (const segment of selected) {
       const generation = randomUUID();
@@ -620,7 +655,8 @@ export function createAuditWal(opts) {
         authenticationSucceeded(state.login);
         state.lease = { generation, expiresAt: clock.now() + timing.lockTtlMs };
         save(segment, state);
-        return pending(segment, state).filter((entry) => entry.nextAttemptAt <= clock.now());
+        return pending(segment, state).filter((entry) => entry.nextAttemptAt <= clock.now() &&
+          (!opts.canDeliverRow || opts.canDeliverRow(entry.row)));
       });
       if (!entries) continue;
       try {
@@ -630,11 +666,10 @@ export function createAuditWal(opts) {
             await transaction(() => {
               if (!existsSync(segment)) return;
               const state = load(segment);
-              if (!owns(state, generation) || state.settled.includes(entry.row[idField])) return;
+              if (!owns(state, generation) || state.settled.includes(rowId(entry.row))) return;
               state.dead.push({ row: entry.row, attempts: entry.attempts, reason: entry.lastError });
-              state.settled.push(entry.row[idField]);
-              delete state.delivery[entry.row[idField]];
-              delete state.enqueued?.[entry.row[idField]];
+              state.settled.push(rowId(entry.row));
+              delete state.delivery[rowId(entry.row)];
               stageHealth(state, "dead_letter", 1, "attempts_exhausted");
               save(segment, state, "deadLetter", generation);
             });
@@ -668,33 +703,60 @@ export function createAuditWal(opts) {
     if (health) return;
     const reports = await transaction(() => {
       const files = [...queueFiles(), ...queueFiles(unreportedDir)];
-      let lastStallAt = Math.max(-Infinity, ...files.map((file) => load(file).lastStallAt ?? -Infinity));
-      return files.flatMap((file) => {
+      const groups = new Map();
+      for (const name of readdirSync(dir).filter((name) => /^login\..*\.json$/.test(name))) {
+        const meta = JSON.parse(readText(path.join(dir, name)));
+        if (meta.healthEvents?.length) groups.set(bindingKey(meta.login), { login: meta.login, segments: [] });
+      }
+      const reports = files.flatMap((file) => {
         const state = load(file);
         if (file.startsWith(unreportedDir)) return (state.healthEvents ?? []).map((event) => ({ file, event, login: state.login }));
-        const entries = pending(file, state);
         const reason = !available(state.login) ? (loadLogin(state.login).paused ? "auth_paused" : "undeliverable_login")
           : stallReason ?? state.stallReason;
-        if (entries.length && reason && clock.now() - lastStallAt >= 3_600_000) {
-          stageHealth(state, "queue_stalled", entries.length, reason, {
-            oldest_pending_seconds: Math.max(0, Math.floor((clock.now() - entries.reduce((oldest, entry) => Math.min(oldest, entry.enqueuedAt), clock.now())) / 1000))
-          });
-          state.lastStallAt = lastStallAt = clock.now();
-          save(file, state);
-        }
+        const key = bindingKey(state.login);
+        if (!groups.has(key)) groups.set(key, { login: state.login, segments: [], reason });
+        const group = groups.get(key);
+        group.segments.push({ file, state });
+        group.reason ||= reason;
         return (state.healthEvents ?? []).map((event) => ({ file, event, login: state.login }));
       });
+      for (const { login, segments, reason } of groups.values()) {
+        const meta = loadLogin(login);
+        if (reason && clock.now() - (meta.lastStallAt ?? -Infinity) >= 3_600_000) {
+          const entries = segments.flatMap(({ file, state }) => pending(file, state));
+          if (entries.length) {
+            stageHealth(meta, "queue_stalled", entries.length, reason, {
+              oldest_pending_seconds: Math.max(0, Math.floor((clock.now() - entries.reduce((oldest, entry) => Math.min(oldest, entry.enqueuedAt), clock.now())) / 1000))
+            });
+            meta.lastStallAt = clock.now();
+            saveLogin(login, meta);
+          }
+        }
+        reports.push(...(meta.healthEvents ?? []).map((event) => ({ event, login, loginReceipt: true })));
+      }
+      return reports;
     });
     const spool = createAuditWal({ ...opts, stream: "health" });
-    for (const { file, event, login } of reports) {
+    for (const { file, event, login, loginReceipt } of reports) {
       // Keep the source receipt until the health append commits, so a crash can only cause a duplicate.
       await spool.appendLine(event, { binding: login });
       await transaction(() => {
-        const state = load(file);
+        if (loginReceipt) {
+          const meta = loadLogin(login);
+          meta.healthEvents = (meta.healthEvents ?? []).filter(({ event_id }) => event_id !== event.event_id);
+          saveLogin(login, meta);
+          return;
+        }
+        const current = [file, path.join(unreportedDir, path.basename(file)), path.join(archiveDir, path.basename(file))]
+          .find((candidate) => existsSync(candidate));
+        if (!current) throw new Error("Missing health source receipt");
+        const state = load(current);
         state.healthEvents = (state.healthEvents ?? []).filter(({ event_id }) => event_id !== event.event_id);
-        save(file, state);
-        if (file.startsWith(unreportedDir) && !state.healthEvents.length) {
-          renameSync(file, path.join(archiveDir, path.basename(file)));
+        save(current, state);
+        if (current.startsWith(unreportedDir) && !state.healthEvents.length) {
+          const target = path.join(archiveDir, path.basename(current));
+          if (existsSync(target)) renameSync(target, `${target}.conflict.${randomUUID()}`);
+          renameSync(current, target);
           syncDir(archiveDir);
           syncDir(unreportedDir);
         }
@@ -705,21 +767,25 @@ export function createAuditWal(opts) {
   return {
     appendLine, drain, reportHealth,
     readPending: () => transaction(() => {
-      const unknown = health ? [] : importLegacy();
+      const unknown = stream === "audit" ? importLegacy() : [];
       return [...queueFiles().flatMap((segment) => pending(segment)), ...unknown];
     }),
     readDeadLetters: () => transaction(() => [...queueFiles(), ...queueFiles(unreportedDir), ...queueFiles(archiveDir)].flatMap((segment) => load(segment).dead)),
     recordCaptureFailure: (row) => transaction(() => captureFailure(row)),
-    authenticationSucceeded: (login) => identified(login) && existsSync(loginPath(login))
+    authenticationSucceeded: (login) => identified(login) && existsSync(loginPath(login)) && loadLogin(login).paused
       ? transaction(() => authenticationSucceeded(login)) : Promise.resolve(),
     status: () => transaction(() => {
-      const unknown = health ? [] : importLegacy();
+      const unknown = stream === "audit" ? importLegacy() : [];
       const entries = queueFiles().flatMap((segment) => pending(segment));
       return {
         queuedRows: entries.length + unknown.length,
         undeliverable: unknown.length + entries.filter(({ login }) => !available(login)).length,
         deadLetters: [...queueFiles(), ...queueFiles(unreportedDir), ...queueFiles(archiveDir)].reduce((count, segment) => count + load(segment).dead.length, 0),
-        paused: queueFiles().some((segment) => Boolean(load(segment).endpointPaused)),
+        paused: queueFiles().some((segment) => {
+          const state = load(segment);
+          return Boolean(state.endpointPaused || loadLogin(state.login).paused);
+        }),
+        hold: queueFiles().map((segment) => loadLogin(load(segment).login).hold?.reason).find(Boolean) ?? null,
         captureFailures: readText(failuresPath).split("\n").filter(Boolean).length
       };
     })

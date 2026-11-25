@@ -5,7 +5,7 @@ import {
   postJson,
   readString
 } from "./common.mjs";
-import { auditLogin, createAuditWal } from "./audit-wal.mjs";
+import { createAuditWal, revalidateOutboxLogin } from "./audit-wal.mjs";
 import { CAPTURE_ROW_BYTES } from "./audit-contract.mjs";
 import { recordBackendOutcome } from "./backend-posture.mjs";
 import { requireEndpoint } from "./config.mjs";
@@ -22,7 +22,7 @@ export function createIapService(config) {
     const backend = backendEndpoint.replace(/\/+$/, "");
     if (response.ok && config.dataDir && config.apiKey && backend &&
       (endpoint === backend || endpoint.startsWith(backend + "/"))) {
-      await getAuditWal(config).authenticationSucceeded(auditLogin(config));
+      await revalidateOutboxLogin(config);
       await recordBackendOutcome(config, "ok");
     }
   };
@@ -175,6 +175,13 @@ export function createIapService(config) {
 
     async shipHealthBatch(events) {
       const response = await postJson(`${backendEndpoint}/iap/client-events`, { events }, headers, timeoutMs);
+      await authenticated(response);
+      return { status: response.status, body: response.data, headers: response.headers };
+    },
+
+    async shipRunBatch(reports) {
+      const response = await postJson(`${backendEndpoint}/iap/runs/batch`, { reports }, headers, timeoutMs);
+      await authenticated(response);
       return { status: response.status, body: response.data, headers: response.headers };
     },
 

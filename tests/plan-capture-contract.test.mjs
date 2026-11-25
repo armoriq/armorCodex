@@ -307,28 +307,37 @@ for (const [failure, reply] of [
 }
 
 // regression: #0007
-test("an unknown outcome retains the descriptor and reuses it on the next registration", async (t) => {
-  const h = await setup(t, { replies: [{ status: 503, reason: "temporarily unavailable", clockAdvance: 40000 }, {}] });
-  const first = await h.register();
-  assert.equal(first.isError, true);
-  assert.equal(message(first), "Plan registration not confirmed: temporarily unavailable. Register the same plan again to retry it with the same request id, or start a new prompt.");
-  const pending = (await h.state()).pendingRequest;
-  assert.ok(pending);
-  const different = await h.register({ ...PLAN, goal: "a different plan" });
-  assert.equal(different.isError, true);
-  assert.match(message(different), /Register the same plan again to retry it, or start a new prompt/);
-  assert.equal((await h.requests()).length, 1);
-  const events = await createAuditWal({ dataDir: h.config().dataDir, config: h.config(), stream: "health" }).readPending();
-  assert.equal(events.length, 1);
-  assert.deepEqual([events[0].row.type, events[0].row.count, events[0].row.reason_code], ["plan_request_failed", 1, "server_error"]);
-  await writeFile(h.config().policyFile, JSON.stringify({ version: 2, policy: { rules: [{ id: "changed", action: "deny", tool: "Write" }] } }));
-  const second = await h.register();
-  assert.equal(second.isError ?? false, false);
-  const requests = await h.requests();
-  assert.equal(requests.length, 2);
-  assert.deepEqual(requests[1], requests[0]);
-  assert.deepEqual(requests[1].descriptor, pending);
-});
+for (const healthStoreFails of [false, true]) {
+  // regression: #0012
+  test(`an unknown outcome retains the descriptor and reuses it on the next registration (health storage fails: ${healthStoreFails})`, async (t) => {
+    const h = await setup(t, { replies: [{ status: 503, reason: "temporarily unavailable", clockAdvance: 40000 }, {}] });
+    if (healthStoreFails) await writeFile(path.join(h.config().dataDir, "health"), "unavailable");
+    const first = await h.register();
+    assert.equal(first.isError, true);
+    assert.equal(message(first), "Plan registration not confirmed: temporarily unavailable. Register the same plan again to retry it with the same request id, or start a new prompt.");
+    const pending = (await h.state()).pendingRequest;
+    assert.ok(pending);
+    const different = await h.register({ ...PLAN, goal: "a different plan" });
+    assert.equal(different.isError, true);
+    assert.match(message(different), /Register the same plan again to retry it, or start a new prompt/);
+    assert.equal((await h.requests()).length, 1);
+    if (healthStoreFails) {
+      assert.equal((h.stderr().match(/plan_request_failed.*not saved/g) || []).length, 1);
+      await rm(path.join(h.config().dataDir, "health"));
+    } else {
+      const events = await createAuditWal({ dataDir: h.config().dataDir, config: h.config(), stream: "health" }).readPending();
+      assert.equal(events.length, 1);
+      assert.deepEqual([events[0].row.type, events[0].row.count, events[0].row.reason_code], ["plan_request_failed", 1, "server_error"]);
+    }
+    await writeFile(h.config().policyFile, JSON.stringify({ version: 2, policy: { rules: [{ id: "changed", action: "deny", tool: "Write" }] } }));
+    const second = await h.register();
+    assert.equal(second.isError ?? false, false);
+    const requests = await h.requests();
+    assert.equal(requests.length, 2);
+    assert.deepEqual(requests[1], requests[0]);
+    assert.deepEqual(requests[1].descriptor, pending);
+  });
+}
 
 for (const condition of ["no prompt", "unreachable"]) {
   // regression: #0007

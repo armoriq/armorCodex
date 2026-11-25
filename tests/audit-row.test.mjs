@@ -156,3 +156,23 @@ test("metadata that cannot fit is preserved in a counted dead letter", async () 
   assert.equal(dead.attempts, 0);
   assert.equal((await wal.status()).deadLetters, 1);
 });
+
+for (const failed of [false, true]) {
+  // regression: #0012
+  test(`a repeated ${failed ? "failed" : "successful"} result keeps its captured plan while another prompt changes runtime`, async () => {
+    const config = await setup();
+    const input = { session_id: SESSION, tool_name: "Bash", tool_use_id: "concurrent-result", tool_input: { command: "ls" } };
+    await handlePreToolUse(input, config);
+    const result = () => failed ? handlePostToolUseFailure({ ...input, error: "missing" }, config) : post(config, input);
+    await result();
+    const { withRuntimeState } = await import("../plugins/armorcodex/scripts/lib/runtime-state.mjs");
+    await withRuntimeState(config.runtimeFile, (state) => {
+      Object.assign(state.sessions[SESSION], { countedPlanId: "later-plan", tokenPlanId: "later-token", promptId: "later-prompt", plan: null });
+    });
+    await result();
+    const rows = await walRows(config);
+    assert.equal(rows.length, 2);
+    assert.equal(new Set(rows.map(({ client_row_id }) => client_row_id)).size, 1);
+    assert.deepEqual(rows.map(({ plan_id, step_index }) => [plan_id, step_index]), [[PLAN_ID, 0], [PLAN_ID, 0]]);
+  });
+}

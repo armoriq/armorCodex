@@ -13,6 +13,7 @@ import {
 } from "./intent.mjs";
 import { createIapService } from "./iap-service.mjs";
 import { refreshSession } from "./plan-refresh.mjs";
+import { accountForRun, closeRun, countRunTool, isRootRunHook, markRunUnreachable, prepareRun, publishRunReports, recoverRuns, runStateWarnings, startRun } from "./runs.mjs";
 import {
   applyPolicyCommand,
   computePolicyHash,
@@ -51,6 +52,7 @@ import {
   withPolicyRecord
 } from "./policy-gate.mjs";
 import path from "node:path";
+import { harnessProcess } from "./usage-sessions.mjs";
 import {
   beginPrompt,
   getSession,
@@ -66,7 +68,7 @@ import {
 async function recordHookActivity(input, config, update = () => {}) {
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   if (!sessionId) return null;
-  return withRuntimeState(config.runtimeFile, (state) => {
+  return withRuntimeState(config.runtimeFile, async (state) => {
     const session = syncSessionAuth(state, sessionId, config);
     if ((session.mode && session.mode !== config.mode) ||
         (session.backendEndpoint && session.backendEndpoint !== config.backendEndpoint)) {
@@ -77,7 +79,7 @@ async function recordHookActivity(input, config, update = () => {}) {
     session.backendEndpoint = config.backendEndpoint;
     if (session.promptOpenSince !== null && !isPromptOpen(session)) session.promptOpenSince = null;
     session.lastActivityAt = Date.now() / 1000;
-    update(session);
+    await update(session, state);
     return structuredClone(session);
   });
 }
@@ -362,12 +364,16 @@ export function sessionBanner(config, { unreadable = false, posture = null } = {
 
 export async function handleSessionStart(input, config, updateOptions = {}) {
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
-  if (!sessionId) return null;
+  if (!sessionId || (config.runReportingEnabled && !isRootRunHook(input))) return null;
+  const owner = config.runReportingEnabled ? harnessProcess() : null;
 
+  await accountForRun(config, (state) => recoverRuns(state, sessionId, input.source));
   await recordHookActivity(input, config, (session) => {
+    if (config.runReportingEnabled) session.runOwner = owner;
     session.startedAt = nowEpochSeconds();
     session.discoveredTools = [];
   });
+  await publishRunReports(config);
 
   debugLog(config, `session started: ${sessionId}, mode=${config.mode}`);
 
@@ -395,11 +401,18 @@ export async function handleUserPromptSubmit(input, config) {
   if (!prompt || !sessionId) {
     return null;
   }
-  if (input.parent_session_id || input.is_subagent) return null;
+  if (config.runReportingEnabled ? !isRootRunHook(input) : input.parent_session_id || input.is_subagent) return null;
   if (isStatusCommand(prompt)) {
     const status = await createAuditWal({ dataDir: config.dataDir, config }).status();
     const healthStatus = await createAuditWal({ dataDir: config.dataDir, config, stream: "health" }).status();
-    return blockPrompt(await formatArmorStatus(config, { ...status, healthPending: healthStatus.queuedRows, healthPaused: healthStatus.paused }));
+    const runStatus = config.runReportingEnabled ? await createAuditWal({ dataDir: config.dataDir, config, stream: "runs" }).status() : null;
+    return blockPrompt(await formatArmorStatus(config, {
+      ...status, healthPending: healthStatus.queuedRows, healthPaused: healthStatus.paused,
+      runsPending: runStatus?.queuedRows, runsPaused: runStatus?.paused || runStatus?.undeliverable > 0,
+      healthHold: healthStatus.hold, runsHold: runStatus?.hold,
+      healthDeadLetters: healthStatus.deadLetters, runsDeadLetters: runStatus?.deadLetters,
+      runStateWarnings: config.runReportingEnabled ? runStateWarnings(config) : 0
+    }));
   }
 
   if (isArmorPolicyCommand(prompt)) {
@@ -431,11 +444,14 @@ export async function handleUserPromptSubmit(input, config) {
     return blockPrompt(result.message);
   }
 
-  await recordHookActivity(input, config, (session) => {
+  const session = await recordHookActivity(input, config, (session) => {
     beginPrompt(session, prompt);
+    prepareRun(sessionId, session, config);
     session.lastPrompt = prompt;
     session.lastPromptAt = nowEpochSeconds();
   });
+  await accountForRun(config, (state) => startRun(state, sessionId, session, config));
+  await publishRunReports(config);
 
   const parts = [];
   if (config.planningEnabled) {
@@ -479,6 +495,9 @@ function pendingMatchesSession(pending, session) {
 export async function handlePreToolUse(input, config, envelope = createAuditEnvelope(input)) {
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   const expected = await recordHookActivity(input, config);
+  if (expected && isRootRunHook(input)) await accountForRun(config, (state) => startRun(state, sessionId, expected, config));
+  await accountForRun(config, (state) => countRunTool(state, expected?.runId, input), { toolJournal: true });
+  await publishRunReports(config);
   snapshotAuditContext(envelope, expected);
   const toolName = typeof input.tool_name === "string" ? input.tool_name : "";
   const toolInput = sanitizeParams(input.tool_input, config.sanitize);
@@ -517,6 +536,7 @@ export async function handlePreToolUse(input, config, envelope = createAuditEnve
   if (capability !== "read") {
     const posture = await backendPosture(config);
     if (posture === "unreachable") {
+      if (isRootRunHook(input) && expected?.runId) await markRunUnreachable(config, expected.runId);
       const reason = unreachableReason(toolName, capability);
       if (shouldDeny(config)) return denyAndAudit(input, config, reason, BACKEND_UNREACHABLE, envelope);
       process.stderr.write(`[armorcodex] monitor mode: ${reason}; allowing it\n`);
@@ -918,7 +938,6 @@ async function auditToolCall(input, config, outcome, unknownStep = 0, envelope, 
   try {
     await createIapService(config).enqueueAudit(await buildAuditRow(input, config, outcome, unknownStep, envelope, hold, record));
     if (outcome.status === "blocked" || outcome.status === "held") envelope.decisionRecorded = true;
-    else await unlink(toolStartPath(config, envelope)).catch(() => {});
   } catch (error) {
     process.stderr.write(`[armorcodex] audit row rejected: ${error instanceof Error ? error.message : error}\n`);
     throw error;
@@ -980,22 +999,38 @@ export async function handlePostToolUseFailure(input, config, envelope = createA
 
 export async function handleStop(input, config) {
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
-  if (!sessionId) return null;
+  if (!sessionId || (config.runReportingEnabled && !isRootRunHook(input))) return null;
 
-  await recordHookActivity(input, config, (session) => {
+  const session = await recordHookActivity(input, config, (session) => {
     session.promptOpenSince = null;
     session.lastStopAt = nowEpochSeconds();
+    if (config.runReportingEnabled) {
+      const context = session.runStarts?.find(({ run_id }) => run_id === session.runId);
+      if (context) context.closing ??= { ended_at: new Date(Date.now()).toISOString(), end_reason: "stop" };
+    }
   });
+  await accountForRun(config, (state) => {
+    startRun(state, sessionId, session, config);
+    closeRun(state, session.runId, "stop");
+  });
+  await publishRunReports(config);
   return null;
 }
 
 export async function handleSessionEnd(input, config) {
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
-  if (!sessionId) return null;
+  if (!sessionId || (config.runReportingEnabled && !isRootRunHook(input))) return null;
 
-  await withRuntimeState(config.runtimeFile, (state) => {
+  const session = await withRuntimeState(config.runtimeFile, (state) => {
+    const session = config.runReportingEnabled ? structuredClone(getSession(state, sessionId)) : null;
     delete state.sessions[sessionId];
+    return session;
   });
+  await accountForRun(config, (state) => {
+    if (session) startRun(state, sessionId, session, config);
+    closeRun(state, session?.runId, "session_end");
+  });
+  await publishRunReports(config);
 
   debugLog(config, `session ended: ${sessionId}`);
   return null;
