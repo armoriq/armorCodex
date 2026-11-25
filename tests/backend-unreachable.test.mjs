@@ -110,10 +110,10 @@ test("a backend that does not answer within 2 seconds blocks Bash, then apply_pa
 
   const rows = walRows(dataDir);
   assert.deepEqual(
-    rows.map((row) => [row.tool, row.capability, row.status, row.error_message]),
+    rows.map((row) => [row.tool, row.capability, row.status, row.decision_code, row.error_message]),
     [
-      ["Bash", "shell", "blocked", "backend_unreachable"],
-      ["apply_patch", "write", "blocked", "backend_unreachable"]
+      ["Bash", "shell", "blocked", "outage", `backend_unreachable: ${bash.decision.hookSpecificOutput.permissionDecisionReason}`],
+      ["apply_patch", "write", "blocked", "outage", `backend_unreachable: ${patch.decision.hookSpecificOutput.permissionDecisionReason}`]
     ]
   );
 });
@@ -123,7 +123,7 @@ test("a 5xx blocks every MCP tool, read-only ones included", async (t) => {
   assertUnreachableDeny(await preTool(env, "mcp__github__get_issue", { number: 1 }));
   const [row] = walRows(dataDir);
   assert.equal(row.capability, "mcp");
-  assert.equal(row.error_message, "backend_unreachable");
+  assert.match(row.error_message, /^backend_unreachable: /);
 });
 
 test("the verdict expires after 30 seconds and the next hook probes again", async (t) => {
@@ -188,7 +188,7 @@ test("rows blocked while unreachable stay queued, then upload once the backend i
   assert.equal(shipped.length, 1, stderr);
   assert.equal(shipped[0].capability, "shell");
   assert.equal(shipped[0].status, "blocked");
-  assert.equal(shipped[0].error_message, "backend_unreachable");
+  assert.match(shipped[0].error_message, /^backend_unreachable: /);
 });
 
 test("a slow call that finishes late does not replace a newer verdict", async (t) => {

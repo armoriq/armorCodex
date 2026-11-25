@@ -139,11 +139,11 @@ export function checkToolAgainstPlan({ plan, toolName, toolInput }) {
   const normalizedTool = normalizeToolName(toolName);
   const steps = Array.isArray(plan?.steps) ? plan.steps : [];
   if (!steps.length) {
-    return { allowed: false, reason: "ArmorCodex intent plan is empty" };
+    return { allowed: false, code: "intent_plan_empty", reason: "ArmorCodex intent plan is empty" };
   }
   const matches = steps.filter((step) => stepMatchesTool(step, normalizedTool));
   if (!matches.length) {
-    return { allowed: false, reason: `ArmorCodex intent drift: tool not in plan (${toolName})` };
+    return { allowed: false, code: "intent_drift", reason: `ArmorCodex intent drift: tool not in plan (${toolName})` };
   }
   if (!isPlainObject(toolInput)) {
     return { allowed: true };
@@ -173,6 +173,7 @@ export function checkToolAgainstPlan({ plan, toolName, toolInput }) {
   if (sawConstrainedMatch) {
     return {
       allowed: false,
+      code: "intent_parameter_mismatch",
       reason: `ArmorCodex intent mismatch: parameters not allowed for ${toolName}`
     };
   }
@@ -187,6 +188,7 @@ export function checkIntentTokenPlan({ intentTokenRaw, toolName, toolParams }) {
   if (parsed.expiresAt && Date.now() / 1000 > parsed.expiresAt) {
     return {
       matched: true,
+      code: "intent_token_expired",
       blockReason:
         "ArmorIQ intent token expired — call register_intent_plan to refresh, then retry",
       plan: parsed.plan
@@ -196,6 +198,7 @@ export function checkIntentTokenPlan({ intentTokenRaw, toolName, toolParams }) {
   if (!allowedActions.has(normalizeToolName(toolName))) {
     return {
       matched: true,
+      code: "intent_drift",
       blockReason: `ArmorIQ intent drift: tool not in plan (${toolName})`,
       plan: parsed.plan
     };
@@ -210,6 +213,7 @@ export function checkIntentTokenPlan({ intentTokenRaw, toolName, toolParams }) {
     if (!paramCheck.allowed) {
       return {
         matched: true,
+        code: paramCheck.code,
         blockReason: paramCheck.reason,
         plan: parsed.plan
       };

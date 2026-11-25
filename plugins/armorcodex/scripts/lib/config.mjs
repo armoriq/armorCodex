@@ -167,6 +167,13 @@ function intentValidity(env) {
   return seconds;
 }
 
+export function dataDirectory(env = process.env) {
+  return env.CODEX_PLUGIN_DATA?.trim() ||
+    env.CLAUDE_PLUGIN_DATA?.trim() ||
+    env.ARMORCODEX_DATA_DIR?.trim() ||
+    path.join(homedir(), ".codex", "armorcodex");
+}
+
 export function loadSettings(env = process.env) {
   const mode = (
     pluginOpt(env, "MODE", "ARMORCODEX_MODE") || "enforce"
@@ -176,11 +183,7 @@ export function loadSettings(env = process.env) {
 
   // Data directory: prefer plugin-injected storage, then
   // ARMORCODEX_DATA_DIR, then default ~/.codex/armorcodex.
-  const dataDir =
-    env.CODEX_PLUGIN_DATA?.trim() ||
-    env.CLAUDE_PLUGIN_DATA?.trim() ||
-    env.ARMORCODEX_DATA_DIR?.trim() ||
-    path.join(homedir(), ".codex", "armorcodex");
+  const dataDir = dataDirectory(env);
 
   const policyFile =
     env.ARMORCODEX_POLICY_FILE?.trim() || path.join(dataDir, "policy.json");

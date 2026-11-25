@@ -47,7 +47,7 @@ async function setup() {
   };
   await writeFile(
     config.runtimeFile,
-    JSON.stringify({ sessions: { [SESSION]: { intentTokenRaw: JSON.stringify(sdkIntentToken()), plan: PLAN } } })
+    JSON.stringify({ sessions: { [SESSION]: { intentTokenRaw: JSON.stringify(sdkIntentToken()), plan: PLAN, countedPlanId: PLAN_ID, tokenPlanId: PLAN_ID } } })
   );
   return config;
 }
@@ -102,7 +102,7 @@ test("audit rows reference the plan by id and carry no token, so a 16 KB token s
     await assert.rejects(handlePostToolUseFailure(
       { session_id: SESSION, tool_name: "Read", tool_input: {}, error: "missing" }, config
     ), /runtime lock unavailable/);
-    assert.deepEqual((await walRows(config)).map((row) => row.status), ["success", "failed", "success", "failed"]);
+    assert.deepEqual((await walRows(config)).map((row) => row.status), ["success", "failed"]);
   } finally {
     opening.mock.restore();
     writing.mock.restore();

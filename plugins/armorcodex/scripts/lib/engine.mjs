@@ -22,7 +22,8 @@ import {
   POLICY_UNREADABLE_NOTICE
 } from "./policy.mjs";
 import { handleArmorPolicyCommand, isArmorPolicyCommand } from "./armor-policy-commands.mjs";
-import { createAuditWal, fitAuditRow } from "./audit-wal.mjs";
+import { auditRowId, createAuditEnvelope, createAuditWal, fitAuditRow, snapshotAuditContext } from "./audit-wal.mjs";
+import { decisionOutcome } from "./decision-codes.mjs";
 import {
   BACKEND_UNREACHABLE,
   backendPosture,
@@ -239,14 +240,18 @@ async function monitorInstead(input, config, action, reason, code = null) {
   return config.orgMonitorNotices ? withSystemMessage({}, monitorNote(action, reason)) : null;
 }
 
-async function denyAndAudit(input, config, reason, errorMessage = reason, status = "blocked") {
-  if (config.orgMonitor) return monitorInstead(input, config, "block", reason, errorMessage === reason ? null : errorMessage);
-  await auditToolCall(input, config, { status, output: null, error_message: redactSecrets(errorMessage) }, null);
-  return denyPreTool(reason);
+async function denyAndAudit(input, config, reason, code, envelope) {
+  if (config.orgMonitor) return monitorInstead(input, config, "block", reason, code);
+  await auditToolCall(input, config, decisionOutcome(code, redactSecrets(reason)), null, envelope);
+  return input.hook_event_name === "PermissionRequest" ? denyPermissionRequest(reason) : denyPreTool(reason);
 }
 
-function denyOrAllow(input, config, reason) {
-  return shouldDeny(config) ? denyAndAudit(input, config, reason) : null;
+function localBlockCode(decision) {
+  return decision.matchedAction === "require_approval" ? "require_approval" : "policy_denied";
+}
+
+function denyOrAllow(input, config, reason, code, envelope) {
+  return shouldDeny(config) ? denyAndAudit(input, config, reason, code, envelope) : null;
 }
 
 async function decideV2OrBlock(config, toolName, toolInput) {
@@ -293,10 +298,10 @@ async function recordUnenforced(input, config, record, verdict, reason) {
   return next;
 }
 
-async function enforcePlanCheck(input, config, planCheck, record) {
+async function enforcePlanCheck(input, config, planCheck, envelope, record) {
   const reason = planCheckDenial(planCheck, input.tool_name);
   if (!reason) return null;
-  if (shouldDeny(config)) return denyAndAudit(input, config, reason);
+  if (shouldDeny(config)) return denyAndAudit(input, config, reason, "plan_check_denied", envelope);
   process.stderr.write(`[armorcodex] monitor mode: ${reason}; allowing it\n`);
   await recordUnenforced(input, config, record, "block", reason);
   await appendNdjsonLine(path.join(config.dataDir, "monitor.jsonl"), {
@@ -466,13 +471,15 @@ function pendingMatchesSession(pending, session) {
   return matchesSessionGeneration(session, pending);
 }
 
-export async function handlePreToolUse(input, config) {
+export async function handlePreToolUse(input, config, envelope = createAuditEnvelope(input)) {
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   const expected = await recordHookActivity(input, config);
+  snapshotAuditContext(envelope, expected);
   const toolName = typeof input.tool_name === "string" ? input.tool_name : "";
   const toolInput = sanitizeParams(input.tool_input, config.sanitize);
   if (!toolName) {
-    return denyOrAllow(input, config, "ArmorCodex: missing tool_name on PreToolUse");
+    if (shouldDeny(config)) await auditFallbackStop(input, config, "missing_tool_name", "ArmorCodex: missing tool_name on PreToolUse", envelope);
+    return shouldDeny(config) ? denyPreTool("ArmorCodex: missing tool_name on PreToolUse") : null;
   }
 
   const norm = normalizeToolName(toolName);
@@ -497,7 +504,7 @@ export async function handlePreToolUse(input, config) {
 
   const cwd = typeof input.cwd === "string" && input.cwd ? input.cwd : null;
   const protectedWrite = protectedWriteReason(norm, input.tool_input, cwd, config);
-  if (protectedWrite) return denyAndAudit(input, config, protectedWrite);
+  if (protectedWrite) return denyAndAudit(input, config, protectedWrite, "policy_denied", envelope);
 
   // Reads run while the backend is down; every other capability, the web tools
   // whitelisted below included, waits on the backend posture first.
@@ -506,10 +513,11 @@ export async function handlePreToolUse(input, config) {
     const posture = await backendPosture(config);
     if (posture === "unreachable") {
       const reason = unreachableReason(toolName, capability);
-      if (shouldDeny(config)) return denyAndAudit(input, config, reason, BACKEND_UNREACHABLE);
+      if (shouldDeny(config)) return denyAndAudit(input, config, reason, BACKEND_UNREACHABLE, envelope);
       process.stderr.write(`[armorcodex] monitor mode: ${reason}; allowing it\n`);
     } else if (posture === "signed_out") {
       config = localOnly(config);
+      envelope.loggedOut = true;
     }
   }
 
@@ -537,7 +545,8 @@ export async function handlePreToolUse(input, config) {
     const deny = await denyOrAllow(
       input,
       config,
-      "ArmorCodex intent token was not issued in time: call register_intent_plan again, then retry the tool"
+      "ArmorCodex intent token was not issued in time: call register_intent_plan again, then retry the tool",
+      "intent_token_not_issued", envelope
     );
     if (deny) {
       return deny;
@@ -565,11 +574,15 @@ export async function handlePreToolUse(input, config) {
     }
     return structuredClone(current || {});
   });
-  if (!session) return denyOrAllow(input, config, "ArmorCodex intent plan missing for this session: call register_intent_plan first, then retry the tool");
+  if (!session) return denyOrAllow(input, config, "ArmorCodex intent plan missing for this session: call register_intent_plan first, then retry the tool", "intent_plan_missing", envelope);
+  snapshotAuditContext(envelope, session);
   if (config.apiKey && config.mode !== "monitor" && isPromptOpen(session) && Date.parse(session.tokenExpiresAt) <= Date.now()) {
     try {
       const refreshed = await refreshSession(() => config.readCurrentAuth ? config.readCurrentAuth() : config, sessionId, { expiredOnly: true, expected: session });
-      if (refreshed) session = refreshed;
+      if (refreshed) {
+        session = refreshed;
+        snapshotAuditContext(envelope, session);
+      }
     } catch (error) {
       const reason = String(error instanceof Error ? error.message : error).split(config.apiKey || "\0").join("[redacted]");
       debugLog(config, `intent refresh failed: ${reason}`);
@@ -590,7 +603,9 @@ export async function handlePreToolUse(input, config) {
       config,
       mcpServer === "*"
         ? "ArmorCodex: listing MCP resources across every server is blocked while unapproved MCP servers are gated. Name an approved server."
-        : `ArmorCodex: MCP server "${mcpServer}" is not approved. The user can approve it by typing \`armor mcp approve ${mcpServer}\`, then \`armor yes\``
+        : `ArmorCodex: MCP server "${mcpServer}" is not approved. The user can approve it by typing \`armor mcp approve ${mcpServer}\`, then \`armor yes\``,
+      "policy_denied",
+      envelope
     );
     if (deny) return deny;
   }
@@ -604,7 +619,7 @@ export async function handlePreToolUse(input, config) {
       if (cachedState?.policyDigest) {
         const check = cryptoService.verifyPolicyDigest(currentDigest, cachedState.policyDigest);
         if (!check.valid) {
-          return denyOrAllow(input, config, `ArmorCodex crypto policy mismatch: ${check.reason}`);
+          return denyOrAllow(input, config, `ArmorCodex crypto policy mismatch: ${check.reason}`, "crypto_policy_mismatch", envelope);
         }
       }
     } catch (error) {
@@ -615,11 +630,11 @@ export async function handlePreToolUse(input, config) {
   if (decision.verdict === "block") {
     if (decision.record.source !== "v2") {
       const reason = policyState.unreadable ? POLICY_UNREADABLE_NOTICE : decision.reason;
-      return denyAndAudit(input, config, reason || "ArmorCodex policy denied");
+      return denyAndAudit(input, config, reason || "ArmorCodex policy denied", localBlockCode(decision), envelope);
     }
     const reason = v2BlockReason(toolName, decision);
     // The local file has always blocked in monitor mode too; v2 sharing the verdict does not change that.
-    if (shouldDeny(config) || decision.localBlocks) return denyAndAudit(input, config, reason);
+    if (shouldDeny(config) || decision.localBlocks) return denyAndAudit(input, config, reason, "policy_denied", envelope);
     process.stderr.write(`[armorcodex] monitor mode: ${reason}; allowing it\n`);
     policyRecord = await recordUnenforced(input, config, policyRecord, "block", reason);
   }
@@ -639,11 +654,11 @@ export async function handlePreToolUse(input, config) {
         await savePolicyRecord(config, input.tool_use_id, { ...decision.record, delegation_id: held.delegationId });
       }
       // A blocked row fails the plan on the backend; a held one keeps it open for the approved retry.
-      if (held.action === "block") return denyAndAudit(input, config, held.reason, held.reason, held.delegationId ? "held" : "blocked");
+      if (held.action === "block") return denyAndAudit(input, config, held.reason, held.delegationId ? "require_approval" : "policy_denied", envelope);
     }
   }
 
-  const planCheckDeny = await enforcePlanCheck(input, config, session.planCheck, policyRecord);
+  const planCheckDeny = await enforcePlanCheck(input, config, session.planCheck, envelope, policyRecord);
   if (planCheckDeny) return planCheckDeny;
   let localPlan = session.plan;
   let localExpiresAt = session.expiresAt;
@@ -663,7 +678,7 @@ export async function handlePreToolUse(input, config) {
     if (tokenCheck.matched) {
       tokenCheckMatched = true;
       if (tokenCheck.blockReason) {
-        return denyOrAllow(input, config, tokenCheck.blockReason);
+        return denyOrAllow(input, config, tokenCheck.blockReason, tokenCheck.code, envelope);
       }
       localPlan = tokenCheck.plan || localPlan;
       remoteAllowed = true;
@@ -672,7 +687,7 @@ export async function handlePreToolUse(input, config) {
 
   const parsedProofs = parseCsrgProofHeaders(input);
   if (parsedProofs.error) {
-    return denyOrAllow(input, config, parsedProofs.error);
+    return denyOrAllow(input, config, parsedProofs.error, "csrg_proof_invalid", envelope);
   }
   let csrgProofs = parsedProofs.proofs;
   if (!csrgProofs && intentTokenRaw && localPlan && typeof localPlan === "object") {
@@ -695,7 +710,7 @@ export async function handlePreToolUse(input, config) {
       Boolean(intentTokenRaw)
   );
   if (proofError) {
-    return denyOrAllow(input, config, proofError);
+    return denyOrAllow(input, config, proofError, "csrg_proof_missing", envelope);
   }
 
   if (intentTokenRaw && config.verifyStepEndpoint && config.csrgVerifyEnabled) {
@@ -709,7 +724,8 @@ export async function handlePreToolUse(input, config) {
         return denyOrAllow(
           input,
           config,
-          verifyResult.reason || `ArmorCodex intent verification denied for ${toolName}`
+          verifyResult.reason || `ArmorCodex intent verification denied for ${toolName}`,
+          "remote_verify_denied", envelope
         );
       }
       const merged = mergeIntentIntoSession(session, verifyResult);
@@ -725,7 +741,7 @@ export async function handlePreToolUse(input, config) {
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      const deny = await denyOrAllow(input, config, `ArmorCodex verify-step failed: ${message}`);
+      const deny = await denyOrAllow(input, config, `ArmorCodex verify-step failed: ${message}`, "remote_verify_failed", envelope);
       if (deny) {
         return deny;
       }
@@ -736,7 +752,8 @@ export async function handlePreToolUse(input, config) {
     const deny = await denyOrAllow(
       input,
       config,
-      "ArmorCodex intent token expired. Call register_intent_plan with your current plan to register a revision, then retry the tool"
+      "ArmorCodex intent token expired. Call register_intent_plan with your current plan to register a revision, then retry the tool",
+      "intent_token_expired", envelope
     );
     if (deny) {
       return deny;
@@ -753,7 +770,7 @@ export async function handlePreToolUse(input, config) {
     if (localCheck.allowed) {
       localPlanMatched = true;
     } else {
-      const deny = await denyOrAllow(input, config, localCheck.reason || "ArmorCodex intent drift");
+      const deny = await denyOrAllow(input, config, localCheck.reason || "ArmorCodex intent drift", localCheck.code, envelope);
       if (deny) {
         return deny;
       }
@@ -764,7 +781,8 @@ export async function handlePreToolUse(input, config) {
     const deny = await denyOrAllow(
       input,
       config,
-      "ArmorCodex intent plan missing for this session: call register_intent_plan first, then retry the tool"
+      "ArmorCodex intent plan missing for this session: call register_intent_plan first, then retry the tool",
+      "intent_plan_missing", envelope
     );
     if (deny) {
       return deny;
@@ -792,17 +810,19 @@ export async function handlePreToolUse(input, config) {
     upsertDiscoveredTool(state, toolName);
     return true;
   });
-  if (!current) return denyOrAllow(input, config, "ArmorCodex intent plan missing for this session: call register_intent_plan first, then retry the tool");
-  await recordToolStart(config, input.tool_use_id);
+  if (!current) return denyOrAllow(input, config, "ArmorCodex intent plan missing for this session: call register_intent_plan first, then retry the tool", "intent_plan_missing", envelope);
+  await recordToolStart(config, envelope, matchedStepIndex(envelope.plan, toolName, toolInput) ?? 0);
   return null;
 }
 
-export async function handlePermissionRequest(input, config) {
-  await recordHookActivity(input, config);
+export async function handlePermissionRequest(input, config, envelope = createAuditEnvelope(input)) {
+  snapshotAuditContext(envelope, await recordHookActivity(input, config));
   const toolName = typeof input.tool_name === "string" ? input.tool_name : "";
   const toolInput = sanitizeParams(input.tool_input, config.sanitize);
-  if (!toolName || config.orgMonitor) {
-    return null;
+  if (config.orgMonitor) return null;
+  if (!toolName) {
+    if (shouldDeny(config)) await auditFallbackStop(input, config, "missing_tool_name", "ArmorCodex: missing tool_name on PermissionRequest", envelope);
+    return shouldDeny(config) ? denyPermissionRequest("ArmorCodex: missing tool_name on PermissionRequest") : null;
   }
 
   const { decision } = await decidePolicy(input, config, toolName, toolInput, { logShadows: false });
@@ -818,64 +838,67 @@ export async function handlePermissionRequest(input, config) {
       decision.record.source === "v2"
         ? v2BlockReason(toolName, decision)
         : decision.reason || "ArmorCodex policy denied approval request";
-    await auditToolCall(input, config, { status: "blocked", output: null, error_message: reason }, null, undefined, decision.record);
+    await auditToolCall(input, config, decisionOutcome(localBlockCode(decision), reason), null, envelope, undefined, decision.record);
     return denyPermissionRequest(reason);
   }
 
   return null;
 }
 
-function auditLink(config, sessionId, intentTokenRaw) {
-  let planId;
-  try {
-    planId = JSON.parse(intentTokenRaw).planId;
-  } catch {
-    planId = undefined;
-  }
+function auditLink(config, envelope) {
   return {
-    plan_id: planId,
-    session_id: sessionId,
+    session_id: envelope.sessionId,
     user_id: config.userId,
     agent_id: config.agentId,
     client_id: config.mcpName || config.llmId
   };
 }
 
-const toolStartPath = (config, toolUseId) =>
-  typeof toolUseId === "string" && /^[A-Za-z0-9_-]+$/.test(toolUseId)
-    ? path.join(config.dataDir, "tool-starts", toolUseId)
-    : null;
+const toolStartPath = (config, envelope) =>
+  path.join(config.dataDir, "tool-starts", auditRowId(envelope.sessionId, envelope.toolCallId, "result"));
 
-async function recordToolStart(config, toolUseId) {
-  const startPath = toolStartPath(config, toolUseId);
-  if (startPath && config.auditEnabled && config.apiKey) {
-    await writePrivateFile(startPath, String(Date.now())).catch(() => {});
+async function recordToolStart(config, envelope, stepIndex) {
+  const startPath = toolStartPath(config, envelope);
+  if (config.auditEnabled && config.apiKey) {
+    await writePrivateFile(startPath, JSON.stringify({
+      startedAt: Date.now(),
+      link: envelope.link,
+      resultId: envelope.resultId,
+      stepIndex
+    }));
   }
 }
 
-async function takeToolDuration(config, toolUseId) {
-  const startPath = toolStartPath(config, toolUseId);
-  if (!startPath) return undefined;
-  const started = Number(await readFile(startPath, "utf8").catch(() => ""));
+async function takeToolStart(config, envelope) {
+  const startPath = toolStartPath(config, envelope);
+  const raw = await readFile(startPath, "utf8").catch((error) => {
+    if (error.code === "ENOENT") return "null";
+    throw error;
+  });
   await unlink(startPath).catch(() => {});
-  return started > 0 ? Date.now() - started : undefined;
+  return JSON.parse(raw);
 }
 
-async function buildAuditRow(input, config, outcome, unknownStep, hold, record) {
+async function buildAuditRow(input, config, outcome, unknownStep, envelope, hold, record) {
   const toolName = input.tool_name;
-  const sessionId = typeof input.session_id === "string" ? input.session_id : "";
-  const session = getSession(await loadRuntimeState(config.runtimeFile), sessionId) || {};
   const inputs = sanitizeParams(input.tool_input, config.sanitize);
   const wouldBe = await takeWouldBe(config, input.tool_use_id);
+  const decision = outcome.status === "blocked" || outcome.status === "held";
+  const link = auditLink(config, envelope);
+  const context = { ...envelope.link };
+  const stepIndex = matchedStepIndex(envelope.plan, toolName, inputs) ?? unknownStep;
+  const started = decision ? null : await takeToolStart(config, envelope);
   return fitAuditRow({
-    ...auditLink(config, sessionId, session.intentTokenRaw || ""),
-    step_index: matchedStepIndex(session.plan, toolName, inputs) ?? unknownStep,
+    ...link,
+    ...(started?.link ?? context),
+    client_row_id: decision ? envelope.decisionId : started?.resultId || envelope.resultId,
+    step_index: started?.stepIndex ?? stepIndex,
     action: toolName,
     tool: toolName,
     capability: toolCapability(toolName),
     input: withPolicyRecord(redactSecrets(inputs), record ?? (await takePolicyRecord(config, input.tool_use_id)), hold),
-    executed_at: new Date().toISOString(),
-    duration_ms: await takeToolDuration(config, input.tool_use_id),
+    executed_at: envelope.executedAt,
+    duration_ms: started?.startedAt > 0 ? Date.now() - started.startedAt : undefined,
     ...outcome,
     ...(wouldBe && {
       would_be: wouldBe.action,
@@ -885,42 +908,49 @@ async function buildAuditRow(input, config, outcome, unknownStep, hold, record) 
   });
 }
 
-async function auditToolCall(input, config, outcome, unknownStep = 0, hold = undefined, record = undefined) {
+async function auditToolCall(input, config, outcome, unknownStep = 0, envelope, hold = undefined, record = undefined) {
   if (!config.auditEnabled || !config.apiKey || typeof input.tool_name !== "string" || !input.tool_name) return;
   try {
-    await createIapService(config).enqueueAudit(await buildAuditRow(input, config, outcome, unknownStep, hold, record));
+    await createIapService(config).enqueueAudit(await buildAuditRow(input, config, outcome, unknownStep, envelope, hold, record));
+    if (outcome.status === "blocked" || outcome.status === "held") envelope.decisionRecorded = true;
   } catch (error) {
     process.stderr.write(`[armorcodex] audit row rejected: ${error instanceof Error ? error.message : error}\n`);
   }
 }
 
-export async function handlePostToolUse(input, config) {
+export async function auditFallbackStop(input, config, code, reason, envelope = createAuditEnvelope(input)) {
+  if (envelope.decisionRecorded || envelope.loggedOut) return;
+  if (config.identityUnknown) {
+    await appendNdjsonLine(path.join(config.dataDir, "audit", "capture-failures.jsonl"), {
+      client_row_id: envelope.decisionId,
+      session_id: envelope.sessionId,
+      executed_at: envelope.executedAt,
+      code
+    });
+    return;
+  }
+  await auditToolCall({ ...input, tool_name: "unknown", tool_input: {} }, config,
+    decisionOutcome(code, reason), null, envelope);
+}
+
+export async function handlePostToolUse(input, config, envelope = createAuditEnvelope(input)) {
+  snapshotAuditContext(envelope, await recordHookActivity(input, config));
   const hold = await settleHold(config, input);
-  await auditToolCall(
-    input,
-    config,
-    { status: "success", output: redactSecrets(sanitizeParams(input.tool_response, config.sanitize)) },
-    0,
-    hold
-  );
-  await recordHookActivity(input, config);
+  await auditToolCall(input, config, {
+    status: "success",
+    output: redactSecrets(sanitizeParams(input.tool_response, config.sanitize))
+  }, 0, envelope, hold);
   return null;
 }
 
-export async function handlePostToolUseFailure(input, config) {
+export async function handlePostToolUseFailure(input, config, envelope = createAuditEnvelope(input)) {
+  snapshotAuditContext(envelope, await recordHookActivity(input, config));
   const hold = await settleHold(config, input);
-  await auditToolCall(
-    input,
-    config,
-    {
-      status: "failed",
-      output: null,
-      error_message: typeof input.error === "string" ? redactSecrets(input.error) : "Unknown error"
-    },
-    0,
-    hold
-  );
-  await recordHookActivity(input, config);
+  await auditToolCall(input, config, {
+    status: "failed",
+    output: null,
+    error_message: typeof input.error === "string" ? redactSecrets(input.error) : "Unknown error"
+  }, 0, envelope, hold);
   return null;
 }
 
