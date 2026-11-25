@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { buildAuthHeaders, normalizeToolName, postJson } from "./common.mjs";
 import { readJson, writeJson } from "./fs-store.mjs";
+import { auditLogin, createAuditWal } from "./audit-wal.mjs";
 
 export const BACKEND_UNREACHABLE = "backend_unreachable";
 export const POSTURE_TIMEOUT_MS = 2000;
@@ -74,6 +75,9 @@ export async function probeBackend(config) {
       POSTURE_TIMEOUT_MS
     );
     state = classifyStatus(response.status);
+    if (response.status >= 200 && response.status < 300) {
+      await createAuditWal({ dataDir: config.dataDir, config }).authenticationSucceeded(auditLogin(config));
+    }
   } catch {
     state = "unreachable";
   }

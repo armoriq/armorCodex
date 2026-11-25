@@ -1,12 +1,14 @@
 import {
-  chmodSync, closeSync, existsSync, fchmodSync, fsyncSync, openSync,
-  readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync
+  closeSync, existsSync, fchmodSync, fsyncSync, openSync, fstatSync, readSync,
+  readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync, mkdirSync, rmSync
 } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { ensurePrivateDirSync } from "./fs-store.mjs";
+import { SIZE_LIMITS } from "./audit-contract.mjs";
+import { validHistory } from "./login-ownership.mjs";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -63,7 +65,10 @@ export function auditLogin(config) {
   return {
     backend,
     keyId: hash(config.apiKey),
-    credentialVersion: JSON.stringify([config.loggedInAt || "", config.loginHistory || null])
+    credentialVersion: JSON.stringify([config.loggedInAt || "", config.loginHistory || null]),
+    loggedInAt: config.loggedInAt,
+    loginHistory: config.loginHistory,
+    userId: config.userId
   };
 }
 
@@ -78,18 +83,17 @@ function validateLimits(limits) {
 }
 
 function sharedLimits() {
-  const contract = JSON.parse(readFileSync(new URL("../../tests/fixtures/block-capture-v1.json", import.meta.url), "utf8"));
-  if (contract.version !== 1 || !Array.isArray(contract.sizeLimits?.shrinkOrder)) {
-    throw new Error("Invalid audit outbox contract");
-  }
-  return validateLimits(contract.sizeLimits);
+  return validateLimits(SIZE_LIMITS);
 }
 
-export function fitAuditRow(original, limits = sharedLimits()) {
+function fitAuditRow(original, limits, shrinkError = false) {
   const fitted = copy(original);
   for (const field of limits.shrinkOrder ?? ["input", "output"]) {
     if (bytes(fitted) <= limits.maxRowBytes) return fitted;
     if (Object.hasOwn(fitted, field)) fitted[field] = copy(limits.truncationMarker);
+  }
+  if (shrinkError && bytes(fitted) > limits.maxRowBytes && typeof fitted.error_message === "string") {
+    fitted.error_message = JSON.stringify(limits.truncationMarker);
   }
   return bytes(fitted) <= limits.maxRowBytes ? fitted : null;
 }
@@ -131,50 +135,51 @@ function alive(pid) {
 }
 
 export function createAuditWal(opts) {
-  const dir = path.join(opts.dataDir, "audit");
+  const auditDir = path.join(opts.dataDir, "audit");
+  const dir = path.join(auditDir, "outbox-v1");
+  const archiveDir = path.join(dir, "archive");
+  const receiptsDir = path.join(dir, "receipts");
   const limits = opts.sizeLimits ? validateLimits(opts.sizeLimits) : sharedLimits();
+  const captureLimits = { ...limits, maxRowBytes: Math.min(limits.maxRowBytes, opts.contentLimitBytes ?? limits.maxRowBytes) };
   const clock = opts.clock ?? { now: Date.now, random: Math.random };
-  const timing = { baseMs: 1000, maxMs: 300_000, lockTtlMs: 30_000, ...opts.timing };
+  const timing = { baseMs: 1000, maxMs: 300_000, lockTtlMs: 30_000, authProbeMs: 120_000, ...opts.timing };
   const currentLogin = () => typeof opts.login === "function" ? opts.login() : opts.login ?? auditLogin(opts.config ?? {});
   const fault = (point) => opts.beforeCommit?.(point);
   const failuresPath = path.join(dir, "capture-failures.jsonl");
-  const currentPath = path.join(dir, "current.jsonl");
-  const statePath = (file) => file.replace(/\.jsonl$/, ".state.json");
-  const load = (file) => {
-    const raw = readText(statePath(file));
-    if (!raw) return null;
-    const state = JSON.parse(raw);
+  const statePath = (segment) => path.join(segment, "state.json");
+  const rowsPath = (segment) => path.join(segment, "rows.jsonl");
+  const loginPath = (login) => path.join(dir, "login." + hash(bindingKey(login)) + ".json");
+  const boundLogin = (login) => ({ backend: login.backend, keyId: login.keyId });
+  const receiptPath = (login, id) => path.join(receiptsDir, hash(JSON.stringify([bindingKey(login), id])) + ".json");
+  const load = (segment) => {
+    const state = JSON.parse(readText(statePath(segment)));
     if (state.version !== 1 || !identified(state.login) || !Array.isArray(state.dead) ||
       !Array.isArray(state.settled) || !state.delivery) throw new Error("Invalid audit queue state");
     return state;
   };
-  const save = (file, state, points = [], generation) => replace(statePath(file), JSON.stringify(state), () => {
+  const loadLogin = (login) => {
+    const raw = readText(loginPath(login));
+    return raw ? JSON.parse(raw) : { login: boundLogin(login), active: null, paused: null };
+  };
+  const owns = (state, generation) => state.lease?.generation === generation && state.lease.expiresAt > clock.now();
+  const save = (segment, state, points = [], generation) => replace(statePath(segment), JSON.stringify(state), () => {
     for (const point of Array.isArray(points) ? points : [points]) fault(point);
     return !generation || owns(state, generation);
   });
+  const saveLogin = (login, state) => replace(loginPath(login), JSON.stringify(state));
 
   function ensureDirs() {
-    const newDataDir = !existsSync(opts.dataDir);
-    const newAuditDir = !existsSync(dir);
-    const newArchiveDir = !existsSync(path.join(dir, "archive"));
-    ensurePrivateDirSync(dir);
-    ensurePrivateDirSync(path.join(dir, "archive"));
-    if (newDataDir) syncDir(path.dirname(opts.dataDir));
-    if (newAuditDir) syncDir(opts.dataDir);
-    if (newArchiveDir) syncDir(dir);
-    for (const folder of [dir, path.join(dir, "archive")]) {
-      for (const name of readdirSync(folder)) {
-        const file = path.join(folder, name);
-        const st = statSync(file, { throwIfNoEntry: false });
-        if (st?.isFile() && st.uid === process.getuid?.() && (st.mode & 0o077)) chmodSync(file, 0o600);
-      }
+    for (const folder of [opts.dataDir, auditDir, dir, archiveDir, receiptsDir]) {
+      const fresh = !existsSync(folder);
+      ensurePrivateDirSync(folder);
+      if (fresh) syncDir(path.dirname(folder));
     }
   }
 
   // Unique bakery tickets avoid deleting a replacement owner's lock during stale process recovery.
   async function transaction(update) {
     ensureDirs();
-    const name = `transaction.${process.pid}.${randomUUID()}.json`;
+    const name = "transaction." + process.pid + "." + randomUUID() + ".json";
     const ticketPath = path.join(dir, name);
     const readTickets = () => readdirSync(dir).filter((n) => /^transaction\.\d+\..*\.json$/.test(n)).flatMap((n) => {
       const file = path.join(dir, n);
@@ -201,65 +206,172 @@ export function createAuditWal(opts) {
     } finally { if (existsSync(ticketPath)) unlinkSync(ticketPath); }
   }
 
-  function queueFiles() {
-    const files = new Set(readdirSync(dir).filter((name) => /^(current|queue\.[a-f0-9]+)\.jsonl$/.test(name)));
-    for (const name of readdirSync(dir).filter((name) => /^(current|queue\.[a-f0-9]+)\.state\.json$/.test(name))) {
-      files.add(name.replace(/\.state\.json$/, ".jsonl"));
-    }
-    return [...files].sort().map((name) => path.join(dir, name));
+  function queueFiles(folder = dir) {
+    return readdirSync(folder, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && /^(queue|legacy)\./.test(entry.name))
+      .map((entry) => path.join(folder, entry.name)).sort();
   }
 
-  function records(file) {
-    let raw = readText(file);
-    if (!load(file) && file === currentPath) {
-      const offset = readText(path.join(dir, "shipped.offset")).trim();
-      if (offset && !/^\d+$/.test(offset)) throw new Error("Invalid legacy audit offset");
-      raw = Buffer.from(raw).subarray(Number(offset || 0)).toString("utf8");
-    }
-    return raw.split("\n").filter(Boolean).map((line) => {
-      const { _seq, _enqueuedAt, ...row } = JSON.parse(line);
-      return row;
-    });
+  function records(segment) {
+    const raw = readText(rowsPath(segment));
+    const complete = raw.lastIndexOf("\n") + 1;
+    return raw.slice(0, complete).split("\n").filter(Boolean).map((line) => JSON.parse(line));
   }
 
-  function pending(file, state = load(file)) {
-    const seen = new Set(state?.settled ?? []);
-    return records(file).filter((row) => {
-      if (row.client_row_id && seen.has(row.client_row_id)) return false;
-      if (row.client_row_id) seen.add(row.client_row_id);
+  function pending(segment, state = load(segment)) {
+    const seen = new Set(state.settled);
+    return records(segment).filter((row) => {
+      if (seen.has(row.client_row_id) || existsSync(receiptPath(state.login, row.client_row_id))) return false;
+      seen.add(row.client_row_id);
       return true;
     }).map((row) => ({
-      row, login: state?.login ?? null, attempts: 0, nextAttemptAt: 0,
-      ...state?.delivery[row.client_row_id]
+      row, login: state.login, attempts: 0, retries: 0, nextAttemptAt: 0,
+      ...state.delivery[row.client_row_id]
     }));
   }
 
-  function available(state, login = currentLogin()) {
-    return identified(login) && login.available !== false && bindingKey(login) === bindingKey(state?.login) &&
-      (!state.paused || (login.credentialVersion && login.credentialVersion !== state.paused.credentialVersion));
+  function credentialAvailable(login) {
+    const current = currentLogin();
+    return identified(current) && current.available !== false && bindingKey(current) === bindingKey(login);
+  }
+
+  function available(login) {
+    if (!credentialAvailable(login)) return false;
+    const paused = loadLogin(login).paused;
+    return !paused || (currentLogin().credentialVersion &&
+      currentLogin().credentialVersion !== paused.credentialVersion);
+  }
+
+  function createSegment(name, login, rows = [], dead = []) {
+    const segment = path.join(dir, name);
+    const temporary = path.join(dir, "creating." + process.pid + "." + randomUUID());
+    mkdirSync(temporary, { mode: 0o700 });
+    try {
+      replace(rowsPath(temporary), rows.map((row) => JSON.stringify(row) + "\n").join(""));
+      save(temporary, {
+        version: 1, login: boundLogin(login), delivery: {},
+        settled: dead.map(({ row }) => row.client_row_id), dead, lease: null
+      });
+      syncDir(temporary);
+      renameSync(temporary, segment);
+      syncDir(dir);
+      return segment;
+    } finally {
+      if (existsSync(temporary)) rmSync(temporary, { recursive: true });
+    }
+  }
+
+  function archive(segment) {
+    const state = load(segment);
+    if (state.lease || pending(segment, state).length) return;
+    for (const id of state.settled) {
+      const receipt = receiptPath(state.login, id);
+      if (!existsSync(receipt)) replace(receipt, JSON.stringify({ segment: path.basename(segment) }));
+    }
+    renameSync(segment, path.join(archiveDir, path.basename(segment)));
+    syncDir(archiveDir);
+    syncDir(dir);
   }
 
   function queueFor(login) {
-    let file = queueFiles().find((candidate) => bindingKey(load(candidate)?.login) === bindingKey(login));
-    if (file) return file;
-    file = !existsSync(currentPath) && !existsSync(statePath(currentPath)) ? currentPath
-      : path.join(dir, `queue.${hash(bindingKey(login))}.jsonl`);
-    save(file, {
-      version: 1, login: { backend: login.backend, keyId: login.keyId },
-      delivery: {}, settled: [], dead: [], lease: null, paused: null
-    });
-    return file;
+    const meta = loadLogin(login);
+    const active = meta.active && path.join(dir, meta.active);
+    if (active && existsSync(active)) {
+      const fd = openSync(rowsPath(active), "r");
+      try {
+        const size = fstatSync(fd).size;
+        const last = Buffer.alloc(1);
+        if (size) readSync(fd, last, 0, 1, size - 1);
+        if ((!size || last[0] === 0x0a) && size < Math.min(1024 * 1024, limits.maxRowBytes * limits.maxBatchRows)) return active;
+      } finally { closeSync(fd); }
+    }
+    const name = "queue." + hash(bindingKey(login)) + "." + randomUUID();
+    const segment = createSegment(name, login);
+    meta.active = name;
+    saveLogin(login, meta);
+    return segment;
+  }
+
+  function append(file, value, point) {
+    if (point) fault(point);
+    const fresh = !existsSync(file);
+    const fd = openSync(file, "a", 0o600);
+    try {
+      fchmodSync(fd, 0o600);
+      writeFileSync(fd, JSON.stringify(value) + "\n");
+      fsyncSync(fd);
+    } finally { closeSync(fd); }
+    if (fresh) syncDir(path.dirname(file));
   }
 
   function captureFailure(row = {}) {
-    replace(failuresPath, readText(failuresPath) + JSON.stringify({
-      client_row_id: row.client_row_id, session_id: row.session_id, executed_at: row.executed_at,
-      code: row.code
-    }) + "\n");
+    append(failuresPath, {
+      client_row_id: row.client_row_id, session_id: row.session_id,
+      executed_at: row.executed_at, code: row.code
+    });
   }
 
-  async function appendLine(original, { fallback = false, loggedOut = false } = {}) {
-    if (loggedOut) return;
+  function proveLegacyLogin(rows) {
+    const login = currentLogin();
+    if (!identified(login) || !validHistory(login.loginHistory)) return null;
+    const loggedInAt = Date.parse(login.loggedInAt);
+    const events = login.loginHistory.events;
+    if (!Number.isFinite(loggedInAt) || events.at(-1).at !== login.loggedInAt ||
+      !login.userId || events.at(-1).userId !== login.userId) return null;
+    if (rows.some((row) => row.user_id && row.user_id !== login.userId)) return null;
+    const times = rows.map((row) => {
+      const executed = Date.parse(row.executed_at);
+      return Number.isFinite(executed) ? executed : row._enqueuedAt;
+    });
+    if (times.some((at) => !Number.isFinite(at))) return null;
+    const oldest = Math.min(...times);
+    return loggedInAt <= oldest && events.every((event) => Date.parse(event.at) <= oldest) ? login : null;
+  }
+
+  function importLegacy() {
+    const currentPath = path.join(auditDir, "current.jsonl");
+    const releasedArchive = path.join(auditDir, "archive");
+    const files = [currentPath];
+    if (existsSync(releasedArchive)) {
+      files.push(...readdirSync(releasedArchive).filter((name) => name.endsWith(".jsonl"))
+        .map((name) => path.join(releasedArchive, name)));
+    }
+    const unknown = [];
+    for (const file of files) {
+      let fd;
+      try { fd = openSync(file, "r"); } catch (error) {
+        if (error.code === "ENOENT") continue;
+        throw error;
+      }
+      let raw;
+      try {
+        const st = fstatSync(fd);
+        const offsetPath = path.join(auditDir, "shipped.offset");
+        const offset = file === currentPath ? readText(offsetPath).trim() : "";
+        if (offset && !/^\d+$/.test(offset)) throw new Error("Invalid legacy audit offset");
+        const data = readFileSync(fd);
+        const sameFile = statSync(file, { throwIfNoEntry: false });
+        const offsetAfter = file === currentPath ? readText(offsetPath).trim() : "";
+        const stable = sameFile?.ino === st.ino && offset === offsetAfter;
+        const start = stable && Number(offset || 0) <= data.length ? Number(offset || 0) : 0;
+        const complete = data.lastIndexOf(0x0a) + 1;
+        raw = data.subarray(start, complete).toString("utf8");
+      } finally { closeSync(fd); }
+      const sourceRows = raw.split("\n").filter(Boolean).map((line) => JSON.parse(line));
+      const login = proveLegacyLogin(sourceRows);
+      for (const original of sourceRows) {
+        const { _seq, _enqueuedAt, ...row } = original;
+        row.client_row_id ||= auditRowId("legacy", hash(JSON.stringify(original)), "result");
+        const name = "legacy." + hash(row.client_row_id);
+        if (existsSync(path.join(dir, name)) || existsSync(path.join(archiveDir, name))) continue;
+        if (login) createSegment(name, login, [row]);
+        else unknown.push({ row, login: null, attempts: 0, nextAttemptAt: 0 });
+      }
+    }
+    return unknown;
+  }
+
+  async function appendLine(original, { fallback = false } = {}) {
     const login = copy(currentLogin() ?? null);
     let row = copy(original);
     if (fallback) {
@@ -273,19 +385,17 @@ export function createAuditWal(opts) {
     row.client_row_id = typeof row.client_row_id === "string" && UUID.test(row.client_row_id) ? row.client_row_id : randomUUID();
     return transaction(() => {
       if (!identified(login)) { captureFailure(row); return; }
-      const file = queueFor(login);
-      const state = load(file);
-      const fitted = fitAuditRow(row, limits);
+      if (existsSync(receiptPath(login, row.client_row_id))) return;
+      const fitted = fitAuditRow(row, captureLimits, opts.contentLimitBytes !== undefined);
       try {
         if (!fitted) {
-          if (!state.settled.includes(row.client_row_id)) {
-            state.dead.push({ row, attempts: 0, reason: "oversize" });
-            state.settled.push(row.client_row_id);
-            save(file, state, "deadLetter");
-          }
+          fault("deadLetter");
+          const name = "queue." + hash(bindingKey(login)) + ".oversize." + row.client_row_id;
+          const segment = existsSync(path.join(dir, name)) ? path.join(dir, name) : createSegment(name, login, [],
+            [{ row, attempts: 0, reason: "oversize" }]);
+          archive(segment);
         } else {
-          const raw = readText(file);
-          replace(file, raw + JSON.stringify(fitted) + "\n", () => fault("append"));
+          append(rowsPath(queueFor(login)), fitted, "append");
         }
       } catch (error) {
         try { captureFailure(row); } catch { /* Preserve the original storage error when diagnostics cannot be saved. */ }
@@ -320,8 +430,8 @@ export function createAuditWal(opts) {
     return results;
   }
 
-  function retryDelay(attempts, header) {
-    const ceiling = Math.min(timing.maxMs, timing.baseMs * 2 ** (attempts - 1));
+  function retryDelay(retries, header) {
+    const ceiling = Math.min(timing.maxMs, timing.baseMs * 2 ** Math.min(retries - 1, 30));
     let retryAfter = 0;
     if (typeof header === "string" && header.trim()) {
       retryAfter = Number.isFinite(Number(header)) ? Number(header) * 1000 : Date.parse(header) - clock.now();
@@ -329,12 +439,23 @@ export function createAuditWal(opts) {
     return Math.max(ceiling / 2 + clock.random() * ceiling / 2, Number.isFinite(retryAfter) ? retryAfter : 0);
   }
 
-  const owns = (state, generation) => state.lease?.generation === generation && state.lease.expiresAt > clock.now();
+  function authenticationSucceeded(login) {
+    if (!identified(login) || login.available === false) return;
+    const meta = loadLogin(login);
+    if (meta.paused) {
+      meta.paused = null;
+      saveLogin(login, meta);
+    }
+  }
 
-  async function deliver(file, batch, send, generation) {
+  async function deliver(segment, batch, send, generation) {
     const permitted = await transaction(() => {
-      const state = load(file);
-      return owns(state, generation) && available(state) ? copy(currentLogin()) : null;
+      if (!existsSync(segment)) return null;
+      const state = load(segment);
+      if (!owns(state, generation) || !available(state.login)) return null;
+      state.lease.expiresAt = clock.now() + timing.lockTtlMs;
+      save(segment, state, [], generation);
+      return copy(currentLogin());
     });
     if (!permitted) return;
     let reply;
@@ -344,20 +465,23 @@ export function createAuditWal(opts) {
     const hasResults = reply?.body !== null && typeof reply?.body === "object" && Object.hasOwn(reply.body, "results");
     const results = hasResults || (reply?.status >= 200 && reply?.status < 300) ? parseResults(reply.body, batch) : null;
     const authorized = await transaction(() => {
-      const state = load(file);
+      if (!existsSync(segment)) return false;
+      const state = load(segment);
       if (!owns(state, generation)) return false;
       if (reply?.status === 401 || (reply?.status === 403 && !(hasResults && results))) {
-        state.paused = { credentialVersion: permitted.credentialVersion ?? null };
-        save(file, state, [], generation);
+        const meta = loadLogin(state.login);
+        meta.paused = { credentialVersion: permitted.credentialVersion ?? null, nextProbeAt: clock.now() + timing.authProbeMs };
+        saveLogin(state.login, meta);
         return false;
       }
+      if (reply?.status >= 200 && reply?.status < 300) authenticationSucceeded(state.login);
       return true;
     });
     if (!authorized) return;
     if (!hasResults && [400, 422].includes(reply?.status) && batch.length > 1) {
       const middle = Math.floor(batch.length / 2);
-      await deliver(file, batch.slice(0, middle), send, generation);
-      await deliver(file, batch.slice(middle), send, generation);
+      await deliver(segment, batch.slice(0, middle), send, generation);
+      await deliver(segment, batch.slice(middle), send, generation);
       return;
     }
     const split = results && batch.length > 1 ? batch.filter(({ row }) => {
@@ -365,49 +489,82 @@ export function createAuditWal(opts) {
       return result?.outcome === "retryable" && result.error === "batch_oversize";
     }) : [];
     await transaction(() => {
-      const state = load(file);
+      if (!existsSync(segment)) return;
+      const state = load(segment);
       if (!owns(state, generation)) return;
+      const settled = new Set(state.settled);
       const decisions = new Map();
       for (const sent of batch) {
         const id = sent.row.client_row_id;
-        if (state.settled.includes(id) || split.includes(sent)) continue;
-        const attempts = (state.delivery[id]?.attempts ?? 0) + 1;
+        if (settled.has(id) || split.includes(sent)) continue;
         const result = results?.get(id);
-        const reason = result?.error || networkError || (result ? result.outcome : `HTTP ${reply?.status ?? 0}: unreadable or missing outcome`);
-        state.delivery[id] = { attempts, lastError: reason, nextAttemptAt: 0 };
+        const isolated = !hasResults && batch.length === 1 && [400, 422].includes(reply?.status);
+        const nonTransient = !hasResults && reply?.status >= 400 && reply.status < 500 &&
+          ![401, 403, 408, 429].includes(reply.status) &&
+          !(reply.status === 409 && reply.body?.error === "request_in_progress");
+        const charged = result?.outcome === "rejected" || isolated || (!result && nonTransient);
+        const attempts = (state.delivery[id]?.attempts ?? 0) + (charged ? 1 : 0);
+        const retries = (state.delivery[id]?.retries ?? 0) + 1;
+        const reason = result?.error || networkError || (result ? result.outcome : "HTTP " + (reply?.status ?? 0) + ": unreadable or missing outcome");
+        state.delivery[id] = { attempts, retries, lastError: reason, nextAttemptAt: 0 };
         if (["accepted", "duplicate"].includes(result?.outcome)) decisions.set(id, "ack");
-        else if (result?.outcome === "rejected" || attempts >= 10 ||
-          (!hasResults && batch.length === 1 && [400, 422].includes(reply?.status))) decisions.set(id, "deadLetter");
-        else state.delivery[id].nextAttemptAt = clock.now() + retryDelay(attempts, reply?.headers?.["retry-after"]);
+        else if (result?.outcome === "rejected" || isolated || attempts >= 10) decisions.set(id, "deadLetter");
+        else state.delivery[id].nextAttemptAt = clock.now() + retryDelay(retries, reply?.headers?.["retry-after"]);
       }
-      if (!save(file, state, [], generation)) return;
+      if (!save(segment, state, [], generation)) return;
       for (const [id, decision] of decisions) {
         if (decision === "deadLetter") state.dead.push({
           row: batch.find(({ row }) => row.client_row_id === id).row,
           attempts: state.delivery[id].attempts, reason: state.delivery[id].lastError
         });
         state.settled.push(id);
+        delete state.delivery[id];
       }
-      save(file, state, [...new Set(decisions.values())], generation);
+      save(segment, state, [...new Set(decisions.values())], generation);
     });
     if (split.length) {
       const middle = Math.ceil(split.length / 2);
-      await deliver(file, split.slice(0, middle), send, generation);
-      if (middle < split.length) await deliver(file, split.slice(middle), send, generation);
+      await deliver(segment, split.slice(0, middle), send, generation);
+      if (middle < split.length) await deliver(segment, split.slice(middle), send, generation);
     }
   }
 
-  async function drain(send) {
-    const selected = await transaction(() => queueFiles().filter((file) => available(load(file))));
-    for (const file of selected) {
+  async function probePaused(probe) {
+    if (!probe) return;
+    const login = currentLogin();
+    if (!credentialAvailable(login)) return;
+    const selected = await transaction(() => {
+      const meta = loadLogin(login);
+      if (!meta.paused || meta.paused.nextProbeAt > clock.now()) return false;
+      meta.paused.nextProbeAt = clock.now() + timing.authProbeMs;
+      saveLogin(login, meta);
+      return true;
+    });
+    if (!selected) return;
+    try {
+      const response = await probe({ login: boundLogin(login) });
+      if (response?.status >= 200 && response.status < 300) {
+        await transaction(() => authenticationSucceeded(login));
+        return true;
+      }
+    } catch { /* Failed authentication probes keep the durable pause and spend no row attempts. */ }
+  }
+
+  async function drain(send, { probe, allowDelivery = true } = {}) {
+    await transaction(() => importLegacy());
+    const authenticated = await probePaused(probe);
+    if (!allowDelivery && !authenticated) return;
+    const selected = await transaction(() => queueFiles().filter((segment) => available(load(segment).login)));
+    for (const segment of selected) {
       const generation = randomUUID();
       const entries = await transaction(() => {
-        const state = load(file);
-        if (!available(state) || state.lease?.expiresAt > clock.now()) return null;
+        if (!existsSync(segment)) return null;
+        const state = load(segment);
+        if (!available(state.login) || state.lease?.expiresAt > clock.now()) return null;
+        authenticationSucceeded(state.login);
         state.lease = { generation, expiresAt: clock.now() + timing.lockTtlMs };
-        state.paused = null;
-        save(file, state);
-        return pending(file, state).filter((entry) => entry.nextAttemptAt <= clock.now());
+        save(segment, state);
+        return pending(segment, state).filter((entry) => entry.nextAttemptAt <= clock.now());
       });
       if (!entries) continue;
       try {
@@ -415,30 +572,35 @@ export function createAuditWal(opts) {
         for (const entry of entries) {
           if (entry.attempts >= 10) {
             await transaction(() => {
-              const state = load(file);
+              if (!existsSync(segment)) return;
+              const state = load(segment);
               if (!owns(state, generation) || state.settled.includes(entry.row.client_row_id)) return;
               state.dead.push({ row: entry.row, attempts: entry.attempts, reason: entry.lastError });
               state.settled.push(entry.row.client_row_id);
-              save(file, state, "deadLetter", generation);
+              delete state.delivery[entry.row.client_row_id];
+              save(segment, state, "deadLetter", generation);
             });
             continue;
           }
           const next = [...batch, entry];
           if (next.length > limits.maxBatchRows || bytes({ rows: next.map(({ row }) => row) }) > limits.maxBatchBytes) {
             if (!batch.length) throw new Error("Audit row cannot fit the configured batch cap");
-            await deliver(file, batch, send, generation);
+            await deliver(segment, batch, send, generation);
             batch = [];
           }
-          if (bytes({ rows: [entry.row] }) > limits.maxBatchBytes) {
-            throw new Error("Audit row cannot fit the configured batch cap");
-          }
+          if (bytes({ rows: [entry.row] }) > limits.maxBatchBytes) throw new Error("Audit row cannot fit the configured batch cap");
           batch.push(entry);
         }
-        if (batch.length) await deliver(file, batch, send, generation);
+        if (batch.length) await deliver(segment, batch, send, generation);
       } finally {
         await transaction(() => {
-          const state = load(file);
-          if (state.lease?.generation === generation) { state.lease = null; save(file, state); }
+          if (!existsSync(segment)) return;
+          const state = load(segment);
+          if (state.lease?.generation === generation) {
+            state.lease = null;
+            save(segment, state);
+            archive(segment);
+          }
         });
       }
     }
@@ -446,28 +608,23 @@ export function createAuditWal(opts) {
 
   return {
     appendLine, drain,
-    readPending: () => transaction(() => queueFiles().flatMap((file) => pending(file))),
-    readDeadLetters: () => transaction(() => queueFiles().flatMap((file) => load(file)?.dead ?? [])),
-    recordCaptureFailure: (row) => transaction(() => captureFailure(row)),
-    restoreLogin: () => transaction(() => {
-      for (const file of queueFiles()) {
-        const state = load(file);
-        const login = currentLogin();
-        if (state && identified(login) && login.available !== false && bindingKey(state.login) === bindingKey(login)) {
-          state.paused = null;
-          save(file, state);
-        }
-      }
+    readPending: () => transaction(() => {
+      const unknown = importLegacy();
+      return [...queueFiles().flatMap((segment) => pending(segment)), ...unknown];
     }),
+    readDeadLetters: () => transaction(() => [...queueFiles(), ...queueFiles(archiveDir)].flatMap((segment) => load(segment).dead)),
+    recordCaptureFailure: (row) => transaction(() => captureFailure(row)),
+    authenticationSucceeded: (login) => identified(login) && existsSync(loginPath(login))
+      ? transaction(() => authenticationSucceeded(login)) : Promise.resolve(),
     status: () => transaction(() => {
-      const files = queueFiles();
+      const unknown = importLegacy();
+      const entries = queueFiles().flatMap((segment) => pending(segment));
       return {
-        queuedRows: files.reduce((count, file) => count + pending(file).length, 0),
-        undeliverable: files.reduce((count, file) => count + (available(load(file)) ? 0 : pending(file).length), 0),
-        deadLetters: files.reduce((count, file) => count + (load(file)?.dead.length ?? 0), 0),
+        queuedRows: entries.length + unknown.length,
+        undeliverable: unknown.length + entries.filter(({ login }) => !available(login)).length,
+        deadLetters: [...queueFiles(), ...queueFiles(archiveDir)].reduce((count, segment) => count + load(segment).dead.length, 0),
         captureFailures: readText(failuresPath).split("\n").filter(Boolean).length
       };
-    }),
-    _paths: { currentPath, statePath: statePath(currentPath), archiveDir: path.join(dir, "archive") }
+    })
   };
 }

@@ -1,3 +1,4 @@
+import { auditRows } from "./helpers/audit-rows.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
@@ -227,7 +228,7 @@ test("a held call files one approval request, and its retry runs once the worksp
   const first = await handlePreToolUse(heldBash("s-hold"), cfg);
   assert.equal(first.hookSpecificOutput.permissionDecision, "deny");
   assert.match(first.hookSpecificOutput.permissionDecisionReason, /"codex-floor" holds Bash for approval.*Approval request d-1 is waiting/);
-  const wal = (await readFile(path.join(cfg.dataDir, "audit", "current.jsonl"), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
+  const wal = auditRows(cfg.dataDir);
   assert.deepEqual(wal.map((r) => r.status), ["held"], "a held row keeps the plan open on the backend");
   const enforce = calls.find((c) => c.route === "/iap/sdk/enforce").body;
   assert.equal(enforce.agent_id, "codex-minted", "the agent the token was minted for, not the configured one");
@@ -329,7 +330,7 @@ test("in monitor mode a v2 block or hold runs, and its row records the verdict a
     assert.equal(await handlePreToolUse({ ...call, hook_event_name: "PreToolUse" }, cfg), null);
     await handlePostToolUse({ ...call, hook_event_name: "PostToolUse", tool_response: "ok" }, cfg);
   }
-  const rows = (await readFile(path.join(cfg.dataDir, "audit", "current.jsonl"), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
+  const rows = auditRows(cfg.dataDir);
   assert.deepEqual(
     rows.map((r) => [r.tool, r.status, r.input.armoriq_policy.policy_name, r.input.armoriq_policy.verdict, r.input.armoriq_policy.enforced]),
     [

@@ -1,11 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { signIn } from "./helpers/login.mjs";
+import { auditRows } from "./helpers/audit-rows.mjs";
 
 const HOOK_ROUTER = path.join(path.dirname(fileURLToPath(import.meta.url)), "../plugins/armorcodex/scripts/hook-router.mjs");
 
@@ -51,6 +52,6 @@ test("PreToolUse signed in loads neither the SDK root nor axios", () => runCold(
 
 test("PostToolUse signed in writes its audit row without the SDK root or axios", async () => {
   const dataDir = await runCold(PAYLOADS[1], { signedIn: true });
-  const rows = (await readFile(path.join(dataDir, "audit", "current.jsonl"), "utf8")).split("\n").filter(Boolean);
+  const rows = auditRows(dataDir);
   assert.equal(rows.length, 1);
 });

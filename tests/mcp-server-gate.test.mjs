@@ -1,3 +1,4 @@
+import { auditRows } from "./helpers/audit-rows.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -107,10 +108,7 @@ test("a blocked audit row redacts secrets in the backend's deny reason", async (
   await recordBackendOutcome(config, "ok");
   const decision = await preToolUse(config, "Bash");
   assert.equal(decision?.hookSpecificOutput?.permissionDecision, "deny");
-  const rows = (await readFile(path.join(dataDir, "audit", "current.jsonl"), "utf8"))
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => JSON.parse(line));
+  const rows = auditRows(dataDir);
   assert.equal(rows.length, 1);
   assert.match(rows[0].error_message, /token=<redacted>/);
   assert.doesNotMatch(rows[0].error_message, /sk_live_0123456789abcdef/);

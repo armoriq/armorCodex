@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { auditRows } from "./helpers/audit-rows.mjs";
 import {
   handleSessionStart,
   handleSessionEnd,
@@ -123,13 +124,7 @@ test("handlePostToolUse returns null when audit disabled", async () => {
 });
 
 async function readWalRows(dataDir) {
-  const { readFile } = await import("node:fs/promises");
-  const walPath = path.join(dataDir, "audit", "current.jsonl");
-  const raw = await readFile(walPath, "utf8");
-  return raw
-    .split("\n")
-    .filter((line) => line.length > 0)
-    .map((line) => JSON.parse(line));
+  return auditRows(dataDir);
 }
 
 test("handlePostToolUse enqueues audit row to WAL when enabled", async () => {
@@ -150,7 +145,6 @@ test("handlePostToolUse enqueues audit row to WAL when enabled", async () => {
     },
     config
   );
-  await new Promise((resolve) => setTimeout(resolve, 50));
 
   assert.equal(output, null);
   const rows = await readWalRows(config.dataDir);
@@ -177,7 +171,6 @@ test("handlePostToolUseFailure enqueues failed-status row to WAL", async () => {
     },
     config
   );
-  await new Promise((resolve) => setTimeout(resolve, 50));
 
   const rows = await readWalRows(config.dataDir);
   assert.equal(rows.length, 1);

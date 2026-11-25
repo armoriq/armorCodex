@@ -242,7 +242,11 @@ async function monitorInstead(input, config, action, reason, code = null) {
 
 async function denyAndAudit(input, config, reason, code, envelope) {
   if (config.orgMonitor) return monitorInstead(input, config, "block", reason, code);
-  await auditToolCall(input, config, decisionOutcome(code, redactSecrets(reason)), null, envelope);
+  try {
+    await auditToolCall(input, config, decisionOutcome(code, redactSecrets(reason)), null, envelope);
+  } catch (error) {
+    if (shouldDeny(config)) throw error;
+  }
   return input.hook_event_name === "PermissionRequest" ? denyPermissionRequest(reason) : denyPreTool(reason);
 }
 
@@ -821,8 +825,7 @@ export async function handlePermissionRequest(input, config, envelope = createAu
   const toolInput = sanitizeParams(input.tool_input, config.sanitize);
   if (config.orgMonitor) return null;
   if (!toolName) {
-    if (shouldDeny(config)) await auditFallbackStop(input, config, "missing_tool_name", "ArmorCodex: missing tool_name on PermissionRequest", envelope);
-    return shouldDeny(config) ? denyPermissionRequest("ArmorCodex: missing tool_name on PermissionRequest") : null;
+    return null;
   }
 
   const { decision } = await decidePolicy(input, config, toolName, toolInput, { logShadows: false });
@@ -855,7 +858,7 @@ function auditLink(config, envelope) {
 }
 
 const toolStartPath = (config, envelope) =>
-  path.join(config.dataDir, "tool-starts", auditRowId(envelope.sessionId, envelope.toolCallId, "result"));
+  path.join(config.dataDir, "tool-starts-v1", auditRowId(envelope.sessionId, envelope.toolCallId, "result"));
 
 async function recordToolStart(config, envelope, stepIndex) {
   const startPath = toolStartPath(config, envelope);
@@ -870,13 +873,14 @@ async function recordToolStart(config, envelope, stepIndex) {
 }
 
 async function takeToolStart(config, envelope) {
-  const startPath = toolStartPath(config, envelope);
-  const raw = await readFile(startPath, "utf8").catch((error) => {
-    if (error.code === "ENOENT") return "null";
-    throw error;
-  });
-  await unlink(startPath).catch(() => {});
-  return JSON.parse(raw);
+  try {
+    return JSON.parse(await readFile(toolStartPath(config, envelope), "utf8"));
+  } catch {
+    if (!/^[A-Za-z0-9_-]+$/.test(envelope.toolCallId)) return null;
+    const raw = await readFile(path.join(config.dataDir, "tool-starts", envelope.toolCallId), "utf8").catch(() => "");
+    const startedAt = Number(raw);
+    return Number.isFinite(startedAt) && startedAt > 0 ? { startedAt } : null;
+  }
 }
 
 async function buildAuditRow(input, config, outcome, unknownStep, envelope, hold, record) {
@@ -913,6 +917,7 @@ async function auditToolCall(input, config, outcome, unknownStep = 0, envelope, 
   try {
     await createIapService(config).enqueueAudit(await buildAuditRow(input, config, outcome, unknownStep, envelope, hold, record));
     if (outcome.status === "blocked" || outcome.status === "held") envelope.decisionRecorded = true;
+    else await unlink(toolStartPath(config, envelope)).catch(() => {});
   } catch (error) {
     process.stderr.write(`[armorcodex] audit row rejected: ${error instanceof Error ? error.message : error}\n`);
     throw error;

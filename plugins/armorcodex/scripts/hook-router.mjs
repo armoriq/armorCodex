@@ -128,17 +128,17 @@ main().catch(async (error) => {
   if (debug) {
     process.stderr.write(`[armorcodex] error=${message}\n`);
   }
-  if (mode === "enforce") {
+  if (mode === "enforce" && (currentEvent === "PreToolUse" || currentEvent === "")) {
     try {
       const config = currentConfig || { dataDir: dataDirectory(), identityUnknown: true };
       await auditFallbackStop(currentInput, config, "internal_error", "ArmorCodex internal hook error", currentEnvelope);
     } catch {
       process.stderr.write("[armorcodex] audit capture failed: internal_error\n");
     }
-    if (currentEvent === "PermissionRequest") {
-      emitJson(denyPermissionRequest(`ArmorCodex internal error: ${message}`));
-    } else {
-      emitJson(denyPreTool(`ArmorCodex internal error: ${message}`));
-    }
+    emitJson(denyPreTool(`ArmorCodex internal error: ${message}`));
+  } else if (mode === "enforce" && currentEvent === "PermissionRequest") {
+    emitJson(denyPermissionRequest(`ArmorCodex internal error: ${message}`));
+  } else {
+    process.stderr.write(`[armorcodex] hook failed: ${currentEvent || "unknown"}\n`);
   }
 });

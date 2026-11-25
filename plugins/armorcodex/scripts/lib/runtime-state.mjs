@@ -118,9 +118,17 @@ export function getSession(runtimeState, sessionId) {
 
 export function upsertSession(runtimeState, sessionId, patch) {
   const prev = getSession(runtimeState, sessionId) || {};
+  let legacyPlanId;
+  if (!Object.hasOwn(prev, "countedPlanId") && !Object.hasOwn(prev, "tokenPlanId") && prev.intentTokenRaw) {
+    try {
+      const token = JSON.parse(prev.intentTokenRaw);
+      legacyPlanId = token.planId || token.plan_id || token.rawToken?.plan_id;
+    } catch { /* An unreadable token cannot establish the old session's plan context. */ }
+  }
   runtimeState.sessions[sessionId] = {
     ...SESSION_DEFAULTS,
     ...prev,
+    ...(legacyPlanId ? { tokenPlanId: legacyPlanId } : {}),
     ...patch,
     updatedAt: nowEpochSeconds()
   };

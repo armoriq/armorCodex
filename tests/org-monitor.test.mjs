@@ -6,6 +6,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { auditRows } from "./helpers/audit-rows.mjs";
 import { signIn } from "./helpers/login.mjs";
 
 const HOOK_ROUTER = fileURLToPath(new URL("../plugins/armorcodex/scripts/hook-router.mjs", import.meta.url));
@@ -75,9 +76,7 @@ async function hook(env, payload) {
 }
 
 function walRows(dataDir) {
-  const file = path.join(dataDir, "audit", "current.jsonl");
-  if (!fs.existsSync(file)) return [];
-  return fs.readFileSync(file, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  return auditRows(dataDir);
 }
 
 const bash = { tool_name: "Bash", tool_input: { command: "ls" }, tool_use_id: "call_bash_1" };
