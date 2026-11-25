@@ -198,22 +198,59 @@ test("the shared capability rules govern attempts before monitor and optional in
   });
 });
 
-for (const enabled of ["true", "false"]) {
-  // regression: #0013
-  test(`tools/list advertises usable plan arguments with run reporting ${enabled}`, async (t) => {
+// regression: #0013
+test("run reporting preserves the published plan schema and invalid argument replies", async (t) => {
+  const observations = [];
+  for (const enabled of ["false", "true"]) {
     const h = await setup(t, { ARMORCODEX_RUN_REPORTING_ENABLED: enabled });
     const mcp = await h.connect();
     const tool = (await mcp.listTools()).tools.find(({ name }) => name === "register_intent_plan");
     assert.deepEqual(Object.keys(tool.inputSchema.properties).sort(), ["goal", "plan", "steps"]);
-    const steps = tool.inputSchema.properties.steps;
-    assert.ok(JSON.stringify(steps).includes('"action"'));
+    assert.ok(JSON.stringify(tool.inputSchema.properties.steps).includes('"action"'));
     await h.prompt();
-    assert.equal((await mcp.register({ goal: "bad", steps: [] })).isError, true);
+    const replies = [];
+    for (const args of [{ goal: 5 }, { goal: "bad", steps: [] }, { steps: 5 }, { plan: 5 }, {}]) {
+      const reply = await mcp.register(args);
+      assert.equal(reply.isError, true);
+      replies.push(reply);
+    }
+    observations.push({ schema: tool.inputSchema, replies });
     await h.tool("Bash", "schema-deny");
     await h.hook("Stop");
     if (enabled === "true") assert.equal((await h.reports()).at(-1).no_plan_reason, "plan_rejected");
-  });
-}
+  }
+  assert.deepEqual(observations[1], observations[0]);
+});
+
+// regression: #0013
+test("a different root session leaves prompt directives, identity and lifecycle unchanged", async (t) => {
+  const outputs = [];
+  for (const enabled of ["false", "true"]) {
+    const h = await setup(t, { ARMORCODEX_RUN_REPORTING_ENABLED: enabled });
+    const fields = { session_id: "child", root_session_id: "root" };
+    outputs.push(await h.hook("SessionStart", fields));
+    assert.equal(typeof (await h.runtime()).sessions.child.startedAt, "number");
+    const prompt = await h.prompt("write a file", fields);
+    assert.match(prompt?.hookSpecificOutput?.additionalContext ?? "", /register_intent_plan/);
+    outputs.push(prompt);
+    const session = (await h.runtime()).sessions.child;
+    assert.match(session.promptId, /^[0-9a-f-]{36}$/);
+    assert.equal(typeof session.promptOpenSince, "number");
+    const denied = await h.tool("Bash", "root-gate", fields);
+    assert.match(denied.hookSpecificOutput.permissionDecisionReason, /intent plan missing/);
+    await h.hook("Stop", fields);
+    const stopped = (await h.runtime()).sessions.child;
+    assert.equal(stopped.promptId, session.promptId);
+    assert.equal(stopped.promptOpenSince, null);
+    await h.hook("SessionEnd", fields);
+    assert.equal((await h.runtime()).sessions.child, undefined);
+    assert.deepEqual(await h.reports(), []);
+    for (const subagent of [{ parent_session_id: "root" }, { is_subagent: true }]) {
+      assert.equal(await h.prompt("subagent wake up", { session_id: "subagent", ...subagent }), null);
+    }
+  }
+  assert.deepEqual(outputs.slice(2), outputs.slice(0, 2));
+});
 
 for (const [reason, options, tool, registration, detail = ""] of [
   ["monitor_mode", { ARMORCODEX_MODE: "monitor" }, "Bash"],
@@ -235,8 +272,8 @@ for (const [reason, options, tool, registration, detail = ""] of [
     await h.prompt();
     if (registration) {
       const mcp = await h.connect();
-      if (registration === "mixed") await mcp.register({ goal: "bad plan", steps: [] });
-      const result = await mcp.register(registration === "local" ? { goal: "bad plan", steps: [] } : undefined);
+      if (registration === "mixed") await mcp.register({ goal: "bad plan", steps: "[]" });
+      const result = await mcp.register(registration === "local" ? { goal: "bad plan", steps: "[]" } : undefined);
       assert.equal(result.isError, true);
     }
     if (tool) await h.tool(tool, "attempt");
@@ -807,13 +844,81 @@ test("prompt identity commits before run storage is locked and a later hook repa
   const session = (await h.runtime()).sessions.root;
   assert.equal(session.runId, session.promptId);
   await rm(path.join(h.dataDir, "run-state-v1.json"), { recursive: true });
-  await h.tool("Read", undefined);
+  await h.tool("Read", "repaired");
   const run = (await h.state()).runs[session.promptId];
   assert.equal(run.tool_calls, 1);
   assert.equal((await h.runState()).runReports.some(({ report }) => report.run_id === session.promptId), true);
   assert.equal((await h.reports()).some(({ run_id }) => run_id === session.promptId), false);
   await h.hook("Stop");
   assert.equal((await h.reports()).some(({ run_id, tool_calls }) => run_id === session.promptId && tool_calls === 1), true);
+});
+
+// regression: #0013
+test("a missing journal does not prevent another run's tool metadata from committing", async (t) => {
+  const h = await setup(t);
+  await h.prompt("missing journal");
+  const directory = path.join(h.dataDir, "run-tools-v1");
+  const [journal] = await readdir(directory);
+  await rm(path.join(directory, journal));
+  await h.prompt("other run", { session_id: "other" });
+  h.env.RUN_TEST_POSTURE = "503";
+  const denied = await h.tool("Bash", "metadata-change", { session_id: "other" });
+  assert.match(denied.hookSpecificOutput.permissionDecisionReason, /backend_unreachable/);
+  const runId = (await h.runtime()).sessions.other.runId;
+  const state = JSON.parse(await readFile(path.join(h.dataDir, "run-state-v1.json"), "utf8"));
+  assert.equal(state.runs[runId].backendUnreachable, true);
+  assert.equal(state.runs[runId].tool_calls, 1);
+  await h.hook("Stop", { session_id: "other" });
+  await h.hook("Stop");
+  assert.deepEqual((await h.reports()).filter(({ ended_at }) => ended_at).map(({ tool_calls }) => tool_calls).sort(), [0, 1]);
+});
+
+// regression: #0013
+test("thousands of attempts checkpoint a bounded journal tail and retain deduplication", async (t) => {
+  const h = await setup(t);
+  await h.prompt();
+  const config = { ...loadSettings(h.env), auditEnabled: false };
+  const runId = (await h.runtime()).sessions.root.runId;
+  const file = path.join(h.dataDir, "run-state-v1.json");
+  const directory = path.join(h.dataDir, "run-tools-v1");
+  const [name] = await readdir(directory);
+  const journal = path.join(directory, name);
+  for (let n = 0; n < 3000; n++) {
+    await withRunState(config, () => {}, { tool: { runId, input: { session_id: "root", tool_name: "Bash", tool_use_id: `call-${n}` } } });
+  }
+  const snapshot = JSON.parse(await readFile(file, "utf8")).runs[runId];
+  const size = (await stat(journal)).size;
+  assert.ok(snapshot.toolOffset > 0, "long runs must checkpoint their replay offset");
+  assert.ok(size - snapshot.toolOffset <= 64 * 1024, "only a bounded tail remains to replay");
+  const descriptors = new Map();
+  let bytesRead = 0;
+  const open = fs.openSync;
+  const close = fs.closeSync;
+  const read = fs.readSync;
+  const readFileSync = fs.readFileSync;
+  const mocked = [
+    t.mock.method(fs, "openSync", (target, ...args) => { const fd = open(target, ...args); descriptors.set(fd, target); return fd; }),
+    t.mock.method(fs, "closeSync", (fd) => { descriptors.delete(fd); return close(fd); }),
+    t.mock.method(fs, "readSync", (fd, ...args) => { const count = read(fd, ...args); if (descriptors.get(fd) === journal) bytesRead += count; return count; }),
+    t.mock.method(fs, "readFileSync", (target, ...args) => {
+      const data = readFileSync(target, ...args);
+      if (target === journal || descriptors.get(target) === journal) bytesRead += Buffer.byteLength(data);
+      return data;
+    })
+  ];
+  syncBuiltinESMExports();
+  const restore = () => { for (const method of mocked) method.mock.restore(); syncBuiltinESMExports(); };
+  t.after(restore);
+  await withRunState(config, () => {}, { tool: { runId, input: { session_id: "root", tool_name: "Bash", tool_use_id: "call-0" } } });
+  restore();
+  assert.ok(bytesRead <= 64 * 1024, `replayed ${bytesRead} journal bytes`);
+  const state = await h.runState();
+  assert.equal(state.runs[runId].tool_calls, 3000);
+  assert.equal(state.runs[runId].gated_tool_calls, 3000);
+  await appendFile(journal, JSON.stringify({ runId, id: "torn", gated: true, at: START }));
+  await h.hook("Stop");
+  assert.equal((await h.reports()).at(-1).tool_calls, 3000);
+  assert.equal((await readdir(path.join(directory, "quarantine"))).length, 1);
 });
 
 // regression: #0013

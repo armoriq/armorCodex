@@ -251,7 +251,6 @@ async function registerPlanRequest(currentConfig, sessionId, expected, plan, goa
 async function run() {
   let stopping;
   const settings = loadSettings();
-  const planArgument = (schema) => settings.runReportingEnabled ? z.union([schema, z.unknown()]) : schema;
   const currentConfig = () => withLogin(settings);
   const loadStateAndConfig = async () => {
     const config = currentConfig();
@@ -389,16 +388,16 @@ async function run() {
         "Declare the tools you intend to use for this task. " +
         "Register before the first tool that needs a plan in this prompt. " +
         "Chat only prompts need no plan.",
-      // MCP validates before the handler; retain invalid input so local refusals reach run accounting.
+      // MCP validates before the handler, so schema refusals cannot be counted as handler rejections.
       inputSchema: {
-        goal: planArgument(z.string().min(1)).optional()
+        goal: z.string().min(1).optional()
           .describe("One-line summary of what the plan accomplishes"),
-        steps: planArgument(z.union([
+        steps: z.union([
           z.array(PLAN_STEP_SCHEMA).min(1),
           z.string().min(1)
-        ])).optional()
+        ]).optional()
           .describe("Ordered list of tool calls (array, or JSON-stringified array)"),
-        plan: planArgument(z.union([INTENT_PLAN_ZOD, z.string().min(1)])).optional()
+        plan: z.union([INTENT_PLAN_ZOD, z.string().min(1)]).optional()
           .describe("Alternative: pass the whole plan as an object or JSON string")
       },
       annotations: {

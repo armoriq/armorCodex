@@ -1,6 +1,6 @@
 import { normalizeToolName } from "./common.mjs";
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, existsSync, fsyncSync, openSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, fsyncSync, openSync, readFileSync, readSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { auditLogin, createAuditWal } from "./audit-wal.mjs";
 import { ensurePrivateDirSync } from "./fs-store.mjs";
@@ -54,24 +54,32 @@ function quarantineLine(config, journal, offset, line) {
   if (!existsSync(file)) storeArchive(file, line);
 }
 
-function readJournal(journal, durable = false) {
+function readJournal(journal, durable = false, offset = 0) {
   try {
-    if (!durable) return readFileSync(journal);
     const fd = openSync(journal, "r");
     try {
       // Sync before committing a replay offset, or a crash can lose already-counted calls.
-      fsyncSync(fd);
-      return readFileSync(fd);
+      if (durable) fsyncSync(fd);
+      const size = fstatSync(fd).size;
+      if (offset > size) offset = 0;
+      const raw = Buffer.alloc(size - offset);
+      let read = 0;
+      while (read < raw.length) {
+        const count = readSync(fd, raw, read, raw.length - read, offset + read);
+        if (!count) break;
+        read += count;
+      }
+      return { raw: raw.subarray(0, read), offset };
     } finally { closeSync(fd); }
   }
-  catch (error) { if (error.code === "ENOENT") return Buffer.alloc(0); throw error; }
+  catch (error) { if (error.code === "ENOENT") return { raw: Buffer.alloc(0), offset: 0 }; throw error; }
 }
 
-function cleanJournalTail(config, journal, raw) {
+function cleanJournalTail(config, journal, raw, from) {
   if (!raw.length || raw.at(-1) === 0x0a) return raw;
   const offset = raw.lastIndexOf(0x0a) + 1;
   // Keep the bytes before sealing the tail, or a crash can turn a torn record into a counted call.
-  quarantineLine(config, journal, offset, raw.subarray(offset));
+  quarantineLine(config, journal, from + offset, raw.subarray(offset));
   const fd = openSync(journal, "a", 0o600);
   try { writeFileSync(fd, "\n"); fsyncSync(fd); } finally { closeSync(fd); }
   return Buffer.concat([raw, Buffer.from("\n")]);
@@ -89,16 +97,17 @@ export function runJournalWarnings(config) {
 
 function replayTools(config, run, durable) {
   const journal = toolsFile(config, run.run_id);
-  const raw = cleanJournalTail(config, journal, readJournal(journal, durable));
+  const tail = readJournal(journal, durable, run.toolOffset ?? 0);
+  const raw = cleanJournalTail(config, journal, tail.raw, tail.offset);
   const seen = new Set(run.toolIds);
   const toolIds = [...run.toolIds];
   let toolCalls = run.tool_calls;
   let gatedToolCalls = run.gated_tool_calls;
   let lastActivityAt = run.lastActivityAt ?? 0;
-  for (let offset = run.toolOffset ?? 0; offset < raw.length;) {
+  for (let offset = 0; offset < raw.length;) {
     const end = raw.indexOf(0x0a, offset);
     const line = raw.subarray(offset, end);
-    const start = offset;
+    const start = tail.offset + offset;
     offset = end + 1;
     if (!line.length || existsSync(quarantineFile(config, journal, start, line))) continue;
     let event;
@@ -117,7 +126,7 @@ function replayTools(config, run, durable) {
     lastActivityAt = Math.max(lastActivityAt, event.at);
   }
   Object.assign(run, { tool_calls: toolCalls, gated_tool_calls: gatedToolCalls, toolIds, lastActivityAt });
-  run.toolOffset = raw.length;
+  run.toolOffset = tail.offset + raw.length;
 }
 
 function replayRunTools(config, run, durable = true) {
@@ -145,6 +154,7 @@ export async function withRunState(config, update, { tool } = {}) {
       } else if (error.code !== "ENOENT") throw error;
       state = { runs: {}, runReports: [] };
     }
+    const savedOffsets = new Map(Object.values(state.runs).map((run) => [run.run_id, run.toolOffset ?? 0]));
     for (const run of Object.values(state.runs)) replayRunTools(config, run, !tool);
     const before = JSON.stringify(state);
     // Archive only settled entries from the committed snapshot, so a crash cannot hide an uncommitted close.
@@ -174,14 +184,19 @@ export async function withRunState(config, update, { tool } = {}) {
         const directory = openSync(config.dataDir, "r");
         try { fsyncSync(directory); } finally { closeSync(directory); }
       }
-      if (changed) state.runs[event.runId].toolOffset += Buffer.byteLength(line);
+      state.runs[event.runId].toolOffset += Buffer.byteLength(line);
     }
-    if (!changed) return event ?? result;
+    const checkpoint = Object.values(state.runs).some((run) => run.toolOffset - (savedOffsets.get(run.run_id) ?? 0) >= 64 * 1024);
+    if (!changed && !checkpoint) return event ?? result;
     if (tool) {
       // Every active offset enters this snapshot, so syncing only this tool's journal can lose another run's counts.
       for (const run of Object.values(state.runs)) {
-        const fd = openSync(toolsFile(config, run.run_id), "r");
-        try { fsyncSync(fd); } finally { closeSync(fd); }
+        let fd;
+        try {
+          fd = openSync(toolsFile(config, run.run_id), "r");
+          fsyncSync(fd);
+        } catch (error) { if (error.code !== "ENOENT") throw error; }
+        finally { if (fd !== undefined) closeSync(fd); }
       }
     }
     ensurePrivateDirSync(config.dataDir);

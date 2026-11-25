@@ -287,11 +287,9 @@ export function loadSettings(env = process.env) {
 
     // Audit logging
     auditEnabled: parseBoolean(env.ARMORCODEX_AUDIT_ENABLED, null),
-    runReportingEnabled: parseBoolean(
-      (pluginOpt(env, "RUN_REPORTING_ENABLED", "ARMORCODEX_RUN_REPORTING_ENABLED") ||
-        env.ARMORIQ_RUN_REPORTING_ENABLED?.trim()) || undefined,
-      false
-    ),
+    runReportingEnabled: (env.CODEX_PLUGIN_OPTION_RUN_REPORTING_ENABLED ??
+      env.CLAUDE_PLUGIN_OPTION_RUN_REPORTING_ENABLED ??
+      env.ARMORCODEX_RUN_REPORTING_ENABLED ?? env.ARMORIQ_RUN_REPORTING_ENABLED) === "true",
 
     // Plan directive injection (tells Codex to register a plan via MCP tool)
     planningEnabled: parseBoolean(env.ARMORCODEX_PLANNING_ENABLED, true),

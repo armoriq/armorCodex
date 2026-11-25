@@ -723,12 +723,23 @@ export function createAuditWal(opts) {
       for (const { login, segments, reason } of groups.values()) {
         const meta = loadLogin(login);
         if (reason && clock.now() - (meta.lastStallAt ?? -Infinity) >= 3_600_000) {
-          const entries = segments.flatMap(({ file, state }) => pending(file, state));
-          if (entries.length) {
-            stageHealth(meta, "queue_stalled", entries.length, reason, {
-              oldest_pending_seconds: Math.max(0, Math.floor((clock.now() - entries.reduce((oldest, entry) => Math.min(oldest, entry.enqueuedAt), clock.now())) / 1000))
-            });
-            meta.lastStallAt = clock.now();
+          const revision = JSON.stringify(segments.map(({ file }) => {
+            const rows = statSync(rowsPath(file), { bigint: true });
+            const state = statSync(statePath(file), { bigint: true });
+            return [path.basename(file), rows.ino, rows.size, rows.mtimeNs, state.ino, state.mtimeNs].map(String);
+          }));
+          if (meta.stallCheck?.revision !== revision || meta.stallCheck.nextAt <= clock.now()) {
+            const pendingEntries = segments.flatMap(({ file, state }) => pending(file, state));
+            const entries = pendingEntries.filter(({ nextAttemptAt }) => nextAttemptAt <= clock.now());
+            if (entries.length) {
+              stageHealth(meta, "queue_stalled", entries.length, reason, {
+                oldest_pending_seconds: Math.max(0, Math.floor((clock.now() - entries.reduce((oldest, entry) => Math.min(oldest, entry.enqueuedAt), clock.now())) / 1000))
+              });
+              meta.lastStallAt = clock.now();
+              delete meta.stallCheck;
+            } else {
+              meta.stallCheck = { revision, nextAt: pendingEntries.reduce((next, entry) => Math.min(next, entry.nextAttemptAt), Number.MAX_SAFE_INTEGER) };
+            }
             saveLogin(login, meta);
           }
         }
