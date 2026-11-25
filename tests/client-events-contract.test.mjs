@@ -13,6 +13,7 @@ test("the client event values match the backend's shared contract", () => {
   assert.deepEqual(CLIENT_EVENTS.reasons, contract.reasonCodes);
   assert.equal(CLIENT_EVENTS.maxBatchEvents, contract.limits.maxEventsPerRequest);
   assert.equal(CLIENT_EVENTS.maxCount, contract.limits.maxCount);
+  assert.deepEqual([...CLIENT_EVENTS.outcomes].sort(), Object.keys(contract.outcomes).sort());
 });
 
 for (const { name, event, outcome } of contract.examples) {

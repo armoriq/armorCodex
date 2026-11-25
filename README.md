@@ -93,6 +93,7 @@ Core environment variables:
 | `ARMORCODEX_VALIDITY_SECONDS` | `3600` | Intent token lifetime when `ARMORIQ_INTENT_VALIDITY_SECONDS` is unset. Accepts 180 to 3600 seconds. An invalid value stops startup and names the variable |
 | `ARMORCODEX_DEBUG` | `false` | Debug logs on stderr |
 | `ARMORCODEX_AUDIT_ENABLED` | true when API key exists | Send audit logs |
+| `ARMORCODEX_RUN_REPORTING_ENABLED` | `false` | Report prompt runs through the durable outbox. Enable only after every serving backend revision supports prompt ids. Also accepts the `RUN_REPORTING_ENABLED` plugin option and `ARMORIQ_RUN_REPORTING_ENABLED`, the name the other Armor plugins use |
 | `ARMORCODEX_CRYPTO_POLICY_ENABLED` | `false` | Enable Merkle policy binding |
 | `ARMORCODEX_OBSERVABILITY_DISABLED` | `false` | Stop sending execution traces; also stops the token usage sync. Same as the `disable_observability` plugin option |
 | `ARMORCODEX_USAGE_SYNC_DISABLED` | `false` | Stop the token usage sync and keep traces. Applies only while observability is on. Same as the `disable_usage_sync` plugin option |
