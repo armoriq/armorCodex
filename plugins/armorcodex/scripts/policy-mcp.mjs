@@ -142,7 +142,7 @@ const registerRunOutcome = (config, runId, key, status, details) =>
   accountForRun(config, (state) => recordRunRegistration(state, runId, key, status, details));
 
 async function registerPlanRequest(currentConfig, sessionId, expected, plan, goal, deadlineAt, callKey) {
-  let config = currentConfig();
+  const config = currentConfig();
   const pendingPath = path.join(config.dataDir, `pending-plan.${sessionId}.json`);
   const update = (change) => withRuntimeState(config.runtimeFile, async (state) => {
     if (!matchesSessionGeneration(getSession(state, sessionId), expected)) throw new Error("the prompt or login changed while the plan was registering");
@@ -152,14 +152,12 @@ async function registerPlanRequest(currentConfig, sessionId, expected, plan, goa
   });
   let descriptor;
   try {
-    const prepared = await update(async (session, state) => {
-      config = { ...config, mode: session.mode ?? config.mode };
+    const prepared = await update(async (session) => {
       if (session.backendEndpoint && session.backendEndpoint !== config.backendEndpoint) {
         throw new Error("the MCP backend differs from the hook backend; restart Codex with matching settings");
       }
       const posture = await cachedPosture(config);
       const reason = !config.apiKey || posture?.state === "signed_out" ? "logged_out"
-        : config.mode === "monitor" ? "monitor_mode"
         : !config.useSdkIntent && !config.intentEndpoint ? "no_transport" : null;
       if (reason) {
         if (session.countedPlanId || session.pendingRequest) retireSessionPlan(session);

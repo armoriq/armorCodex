@@ -543,7 +543,7 @@ export async function requestIntent(config, payload, descriptor, { timeoutMs = c
   if (!isPlainObject(payload.plan)) {
     throw new Error("ArmorCodex requests an intent token only for a registered plan");
   }
-  if (!config.apiKey || config.mode === "monitor") return { skipped: true };
+  if (!config.apiKey) return { skipped: true };
   if (config.intentEndpoint) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);

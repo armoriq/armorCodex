@@ -78,9 +78,11 @@ async function setup(t, { remaining = 60, validity = 180, backendEndpoint, trans
   };
 }
 
-for (const [validity, remaining, transport] of [[180, 60, "custom"], [3600, 120, "custom"], [180, 60, "sdk"]]) {
-  test(`the 15 second refresh loop uses the ${transport} transport and the ${validity} second validity threshold`, async (t) => {
+for (const [validity, remaining, transport, mode = "enforce"] of [[180, 60, "custom"], [3600, 120, "custom"], [180, 60, "sdk"], [180, 60, "custom", "monitor"]]) {
+  test(`the 15 second refresh loop uses the ${transport} transport and the ${validity} second validity threshold in ${mode} mode`, async (t) => {
     const h = await setup(t, { validity, remaining: remaining + 16, transport });
+    h.config.mode = mode;
+    await h.update((session) => { session.mode = mode; });
     const before = await h.state();
     const loop = await h.start();
     t.mock.timers.tick(15000);
@@ -114,7 +116,7 @@ for (const [validity, remaining, transport] of [[180, 60, "custom"], [3600, 120,
   });
 }
 
-for (const condition of ["closed", "idle", "retired", "logged out", "monitor", "signed out", "hook monitor", "no transport"]) {
+for (const condition of ["closed", "idle", "retired", "logged out", "signed out", "no transport"]) {
   // regression: #0007
   test(`the refresh loop sends nothing for a ${condition} prompt`, async (t) => {
     const h = await setup(t, { backendEndpoint: condition === "signed out" ? "https://refresh.test" : undefined });
@@ -122,11 +124,9 @@ for (const condition of ["closed", "idle", "retired", "logged out", "monitor", "
     if (condition === "idle") t.mock.timers.tick(1800000);
     if (condition === "retired") await h.update(retireSessionPlan);
     if (condition === "logged out") h.config.apiKey = "";
-    if (condition === "monitor") h.config.mode = "monitor";
     if (condition === "signed out") {
       await recordBackendOutcome(h.config, "signed_out");
     }
-    if (condition === "hook monitor") await h.update((session) => { session.mode = "monitor"; });
     if (condition === "no transport") {
       h.config.useSdkIntent = false;
       h.config.intentEndpoint = "";
@@ -182,9 +182,10 @@ for (const change of ["prompt", "auth", "stop"]) {
   });
 }
 
-for (const condition of ["success", "failure", "closed", "idle"]) {
-  test(`the pre tool guard handles an expired token with refresh ${condition}`, async (t) => {
+for (const [condition, mode = "enforce"] of [["success"], ["failure"], ["closed"], ["idle"], ["failure", "monitor"]]) {
+  test(`the pre tool guard handles an expired token with refresh ${condition} in ${mode} mode`, async (t) => {
     const h = await setup(t, { remaining: -1 });
+    h.config.mode = mode;
     if (condition === "failure") h.respond(() => new Response(JSON.stringify({ message: "refused" }), { status: 422 }));
     if (condition === "closed") await handleStop({ session_id: SESSION }, h.config);
     if (condition === "idle") t.mock.timers.tick(1800000);
@@ -197,7 +198,8 @@ for (const condition of ["success", "failure", "closed", "idle"]) {
       assert.equal(await handlePreToolUse(input, h.config), null);
       assert.equal(h.requests.length, 1);
     } else {
-      assert.match(JSON.stringify(result), /expired/i);
+      if (mode === "monitor") assert.equal(result, null);
+      else assert.match(JSON.stringify(result), /expired/i);
       assert.equal((await h.state()).tokenPlanId, PARENT);
     }
   });

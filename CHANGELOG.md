@@ -5,9 +5,10 @@ All notable changes to ArmorCodex are recorded here. Format follows [Keep a Chan
 ## [Unreleased]
 
 ### Added
-- Workspace Monitor. Signed in, ArmorCodex reads the mode set on the Tools Monitor page at session start and keeps it in `org-mode.json`. Quiet (the default) shows nothing in the session, asks for no plan, and lets a call the policy, plan check or outage check would stop run, recording on its audit row what Block would have done (`would_be`, `would_be_code`, `would_be_reason`). Show in chat also shows the user one line per such call. Block enforces as before. `ARMORIQ_ORG_MODE=enforce` forces Block on one machine. Requests send `X-ArmorIQ-Monitor-Aware: 1`.
+- Workspace Monitor. Signed in, ArmorCodex reads the mode set on the Tools Monitor page at session start and keeps it in `org-mode.json`. Quiet (the default) shows no banner or notices in the session and lets a call the policy, plan check or outage check would stop run, recording on its audit row what Block would have done (`would_be`, `would_be_code`, `would_be_reason`) and, under a live plan, the plan's `plan_id` and `prompt_id`. Monitor, from the workspace or `ARMORCODEX_MODE=monitor`, asks the model for a plan and registers, refreshes and retires it as Block does; a failed plan request is recorded and never stops a call. Show in chat also shows the user one line per such call. Block enforces as before. `ARMORIQ_ORG_MODE=enforce` forces Block on one machine. Requests send `X-ArmorIQ-Monitor-Aware: 1`.
 - Each model prompt has its own registered plan. Open prompts refresh confirmed tokens every 15 seconds when expiry is near. Chat only prompts send no plan request.
 - `ARMORIQ_INTENT_VALIDITY_SECONDS` sets token validity from 180 to 3600 seconds, taking precedence over `ARMORCODEX_VALIDITY_SECONDS`.
+- Run reporting, on by default. Each prompt run is reported through the durable outbox with its plan ids or the reason it has none. `ARMORCODEX_RUN_REPORTING_ENABLED=false`, `ARMORIQ_RUN_REPORTING_ENABLED=false` or the `RUN_REPORTING_ENABLED` plugin option set to `false` turns it off, as does any value other than exactly `true`. A backend without the runs endpoint pauses the stream and keeps the reports locally.
 
 ### Changed
 

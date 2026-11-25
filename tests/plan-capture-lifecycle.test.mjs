@@ -178,16 +178,15 @@ test("hook mode survives repeated MCP registration with a different environment"
   await h.prompt("first");
   const before = (await h.state()).sessions["session-A"];
   const result = await h.registerResult();
-  assert.equal(result.content[0].text, "Plan recorded locally, not registered (monitor_mode).");
+  assert.match(result.content[0].text, /^Intent registered: plan 11111111-1111-4111-8111-111111111111 \(new\)/);
   for (let i = 0; i < 3; i++) {
     assert.equal(await h.tool(), null);
     assert.equal((await h.registerResult()).content[0].text, result.content[0].text);
     const after = (await h.state()).sessions["session-A"];
     assert.equal(after.authGeneration, before.authGeneration);
-    assert.equal(after.unregisteredLocalPlan.reason, "monitor_mode");
+    assert.equal(after.countedPlanId, "11111111-1111-4111-8111-111111111111");
+    assert.equal(after.unregisteredLocalPlan, null);
   }
-  const requests = await readFile(path.join(h.home, "requests.jsonl"), "utf8").catch(() => "");
-  assert.doesNotMatch(requests, /\/iap\/sdk\/token|lifecycle.test\/intent/);
 });
 
 for (const enabled of ["true", "false"]) {

@@ -124,7 +124,7 @@ export function withLogin(settings, env = process.env) {
   const orgMonitor = Boolean(apiKey) && orgMonitorFor(settings.dataDir, env);
   return {
     ...settings,
-    ...(orgMonitor && { intentRequired: false, planningEnabled: false, contextHintsEnabled: false }),
+    ...(orgMonitor && { intentRequired: false, contextHintsEnabled: false }),
     orgMonitor,
     orgMonitorNotices: orgMonitor && orgMonitorNoticesFor(settings.dataDir, env),
     apiKey,
@@ -277,9 +277,9 @@ export function loadSettings(env = process.env) {
 
     // Audit logging
     auditEnabled: parseBoolean(env.ARMORCODEX_AUDIT_ENABLED, null),
-    runReportingEnabled: (env.CODEX_PLUGIN_OPTION_RUN_REPORTING_ENABLED ??
+    runReportingEnabled: ["true", undefined].includes(env.CODEX_PLUGIN_OPTION_RUN_REPORTING_ENABLED ??
       env.CLAUDE_PLUGIN_OPTION_RUN_REPORTING_ENABLED ??
-      env.ARMORCODEX_RUN_REPORTING_ENABLED ?? env.ARMORIQ_RUN_REPORTING_ENABLED) === "true",
+      env.ARMORCODEX_RUN_REPORTING_ENABLED ?? env.ARMORIQ_RUN_REPORTING_ENABLED),
 
     // Plan directive injection (tells Codex to register a plan via MCP tool)
     planningEnabled: parseBoolean(env.ARMORCODEX_PLANNING_ENABLED, true),
