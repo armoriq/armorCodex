@@ -8,7 +8,7 @@ import { cachedPosture } from "./backend-posture.mjs";
 import { getSession, isPromptOpen, loadRuntimeState, matchesSessionGeneration, syncSessionAuth, withRuntimeState } from "./runtime-state.mjs";
 
 export async function refreshSession(currentConfig, sessionId, { expiredOnly = false, expected } = {}) {
-  let config = currentConfig();
+  const config = currentConfig();
   if (!sessionId || !config.apiKey || (!config.useSdkIntent && !config.intentEndpoint) ||
       (await cachedPosture(config))?.state === "signed_out") return null;
   return withPlanRequest(config.runtimeFile, sessionId, async (deadlineAt) => {
@@ -19,8 +19,7 @@ export async function refreshSession(currentConfig, sessionId, { expiredOnly = f
     const update = (change) => withRuntimeState(config.runtimeFile, (state) => {
       if (!getSession(state, sessionId)) return null;
       let session = getSession(state, sessionId);
-      config = { ...config, mode: session.mode ?? config.mode };
-      if (config.mode === "monitor" || (session.backendEndpoint && session.backendEndpoint !== config.backendEndpoint)) return null;
+      if (session.backendEndpoint && session.backendEndpoint !== config.backendEndpoint) return null;
       session = syncSessionAuth(state, sessionId, currentConfig(), { retireOnChange: false });
       if (!session) return null;
       if (!isPromptOpen(session) || (expected && !matchesSessionGeneration(session, expected))) return null;

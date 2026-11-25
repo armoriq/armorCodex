@@ -174,8 +174,8 @@ for (const retirement of ["session retirement", "local registration"]) {
   });
 }
 
-test("new, identical and revised registrations persist the outbound descriptor before sending", async (t) => {
-  const h = await setup(t);
+for (const mode of ["enforce", "monitor"]) test(`${mode}: new, identical and revised registrations persist the outbound descriptor before sending`, async (t) => {
+  const h = await setup(t, { env: { ARMORCODEX_MODE: mode } });
   const first = await h.register();
   assert.equal(first.isError ?? false, false);
   assert.equal(message(first), `Intent registered: plan 11111111-1111-4111-8111-000000000001 (new), 1 steps. Token valid until ${new Date(EXPIRES * 1000).toISOString()}.`);
@@ -241,10 +241,10 @@ for (const [failure, row, env] of [
   });
 }
 
-for (const [condition, reason] of [["logged_out", "logged_out"], ["monitor_mode", "monitor_mode"], ["signed_out", "logged_out"], ["no_transport", "no_transport"]]) {
+for (const [condition, reason] of [["logged_out", "logged_out"], ["signed_out", "logged_out"], ["no_transport", "no_transport"]]) {
   // regression: #0007
   test(`${condition} records an explicit unregistered plan and sends nothing`, async (t) => {
-    const h = await setup(t, { loggedOut: condition === "logged_out", env: { ARMORCODEX_MODE: reason === "monitor_mode" ? "monitor" : "enforce", ARMORCODEX_USE_SDK_INTENT: condition === "no_transport" ? "false" : "true", ARMORCODEX_INTENT_URL: condition === "no_transport" ? "" : "https://contract.test/intent" } });
+    const h = await setup(t, { loggedOut: condition === "logged_out", env: { ARMORCODEX_USE_SDK_INTENT: condition === "no_transport" ? "false" : "true", ARMORCODEX_INTENT_URL: condition === "no_transport" ? "" : "https://contract.test/intent" } });
     if (condition === "signed_out") await recordBackendOutcome(h.config(), "signed_out");
     const result = await h.register();
     assert.equal(message(result), `Plan recorded locally, not registered (${reason}).`);

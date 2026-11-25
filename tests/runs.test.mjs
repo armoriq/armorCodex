@@ -440,12 +440,7 @@ test("local status shows pending reports and an endpoint pause", async (t) => {
 });
 
 // regression: #0013
-test("reporting defaults off and never captures logged out runs", async (t) => {
-  assert.equal(loadSettings({}).runReportingEnabled, false);
-  for (const [env, enabled] of [
-    [{ ARMORIQ_RUN_REPORTING_ENABLED: "true" }, true],
-    [{ ARMORCODEX_RUN_REPORTING_ENABLED: "false", ARMORIQ_RUN_REPORTING_ENABLED: "true" }, false]
-  ]) assert.equal(loadSettings(env).runReportingEnabled, enabled);
+test("reporting switched off with false, and every logged out run, report nothing", async (t) => {
   for (const [options, loggedIn] of [[{ ARMORCODEX_RUN_REPORTING_ENABLED: "false" }, true], [{}, false]]) {
     const h = await setup(t, options, loggedIn);
     const output = await h.prompt();

@@ -93,7 +93,7 @@ Core environment variables:
 | `ARMORCODEX_VALIDITY_SECONDS` | `3600` | Intent token lifetime when `ARMORIQ_INTENT_VALIDITY_SECONDS` is unset. Accepts 180 to 3600 seconds. An invalid value stops startup and names the variable |
 | `ARMORCODEX_DEBUG` | `false` | Debug logs on stderr |
 | `ARMORCODEX_AUDIT_ENABLED` | true when API key exists | Send audit logs |
-| `ARMORCODEX_RUN_REPORTING_ENABLED` | `false` | Report prompt runs through the durable outbox. Enable only after every serving backend revision supports prompt ids. Also accepts the `RUN_REPORTING_ENABLED` plugin option and `ARMORIQ_RUN_REPORTING_ENABLED`, the name the other Armor plugins use |
+| `ARMORCODEX_RUN_REPORTING_ENABLED` | `true` | Report prompt runs through the durable outbox. Unset means on; `false`, or any value other than exactly `true`, turns it off. A backend without the runs endpoint pauses the stream and keeps the reports locally. Also accepts the `RUN_REPORTING_ENABLED` plugin option and `ARMORIQ_RUN_REPORTING_ENABLED`, the name the other Armor plugins use |
 | `ARMORCODEX_CRYPTO_POLICY_ENABLED` | `false` | Enable Merkle policy binding |
 | `ARMORCODEX_OBSERVABILITY_DISABLED` | `false` | Stop sending execution traces; also stops the token usage sync. Same as the `disable_observability` plugin option |
 | `ARMORCODEX_USAGE_SYNC_DISABLED` | `false` | Stop the token usage sync and keep traces. Applies only while observability is on. Same as the `disable_usage_sync` plugin option |
@@ -104,11 +104,13 @@ Signed in, ArmorCodex follows the mode your workspace picks under **Tool calls i
 
 | Mode | A call your policy or plan check would stop | What Codex shows |
 |---|---|---|
-| Quiet (the default) | Runs, and is listed under Would have blocked on the Monitor page | Nothing from ArmorCodex, no session banner and no plan prompt |
+| Quiet (the default) | Runs, and is listed under Would have blocked on the Monitor page | No session banner and no notices. The model is still asked to register a plan |
 | Show in chat | Runs, and is listed on the Monitor page | One line per call: `ArmorIQ would block this call in Enforce (<reason>). Monitor let it run.` |
 | Block | Is blocked, and a held shell command goes to Codex's approval prompt | The block reason |
 
 In Quiet and Show in chat no intent plan is required, no hold is routed to an approval, an unreachable backend blocks nothing, and Codex's own approval prompts still apply. The audit row of each such call carries `would_be`, `would_be_code` and `would_be_reason`.
+
+Plans work in Monitor as in Block, whether the workspace picks Monitor or `ARMORCODEX_MODE=monitor` sets it: the model is asked to register a plan before the first tool that needs one, the plan is sent to ArmorIQ, refreshed while the prompt is open and retired at the next prompt, and the reply says when it is registered. A failed plan request is recorded and never stops a call. Under a live plan, an audit row with `would_be` also carries the plan's `plan_id` and `prompt_id`. Signed out, a plan is recorded locally and nothing is sent.
 
 ### Token usage sync
 

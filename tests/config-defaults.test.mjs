@@ -31,13 +31,14 @@ const LOCAL = {
 const BY_ENV = { production: PRODUCTION, staging: STAGING, local: LOCAL };
 
 // regression: #0013
-test("run reporting enables only for the exact true value under either name", () => {
-  assert.equal(loadSettings({}).runReportingEnabled, false);
+test("run reporting is on when unset and stays on only for the exact true value under either name", () => {
+  assert.equal(loadSettings({}).runReportingEnabled, true);
   for (const name of ["ARMORIQ_RUN_REPORTING_ENABLED", "ARMORCODEX_RUN_REPORTING_ENABLED", "CODEX_PLUGIN_OPTION_RUN_REPORTING_ENABLED", "CLAUDE_PLUGIN_OPTION_RUN_REPORTING_ENABLED"]) {
     for (const value of ["true", "false", "1", "yes", "TRUE", " true ", ""]) {
       assert.equal(loadSettings({ [name]: value }).runReportingEnabled, value === "true", `${name}=${JSON.stringify(value)}`);
     }
   }
+  assert.equal(loadSettings({ ARMORCODEX_RUN_REPORTING_ENABLED: "false", ARMORIQ_RUN_REPORTING_ENABLED: "true" }).runReportingEnabled, false);
 });
 
 function endpoints(config) {

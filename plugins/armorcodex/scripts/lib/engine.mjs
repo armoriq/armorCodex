@@ -606,7 +606,7 @@ export async function handlePreToolUse(input, config, envelope = createAuditEnve
   });
   if (!session) return denyOrAllow(input, config, "ArmorCodex intent plan missing for this session: call register_intent_plan first, then retry the tool", "intent_plan_missing", envelope);
   snapshotAuditContext(envelope, session);
-  if (config.apiKey && config.mode !== "monitor" && isPromptOpen(session) && Date.parse(session.tokenExpiresAt) <= Date.now()) {
+  if (config.apiKey && isPromptOpen(session) && Date.parse(session.tokenExpiresAt) <= Date.now()) {
     try {
       const refreshed = await refreshSession(() => config.readCurrentAuth ? config.readCurrentAuth() : config, sessionId, { expiredOnly: true, expected: session });
       if (refreshed) {
