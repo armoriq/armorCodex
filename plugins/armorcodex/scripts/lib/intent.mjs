@@ -1,10 +1,10 @@
+import { csrgIntentPolicy } from "./plan-request.mjs";
 import {
   buildAuthHeaders,
   isPlainObject,
   isSubsetValue,
   normalizeToolName,
   parseStepIndex,
-  postJson,
   readString,
   sha256Hex
 } from "./common.mjs";
@@ -22,7 +22,8 @@ function buildSdkClientKey(config) {
     config.contextId,
     config.iapEndpoint,
     config.proxyEndpoint,
-    config.backendEndpoint
+    config.backendEndpoint,
+    config.maxRetries
   ].join("|");
 }
 
@@ -481,30 +482,66 @@ export function validateCsrgProofHeaders(proofs, required) {
   return null;
 }
 
-/**
- * The policy CSRG signs into the token. CSRG reads it as an allow/deny list and
- * refuses every plan step when it has no allow list, so a held call could never
- * pass the backend's step check. Local rules are already enforced in PreToolUse.
- */
-function csrgIntentPolicy(policyHash) {
-  return { allow: ["*"], deny: [], metadata: { source: "codex", policyHash: policyHash ?? "" } };
+function isNetworkError(error) {
+  if (error.name === "AbortError" || error.name === "TimeoutError") return true;
+  const code = error.code ?? error.cause?.code;
+  if (typeof code === "string") {
+    return /^(ECONNRESET|ECONNREFUSED|ECONNABORTED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|EPIPE|ENETUNREACH|EHOSTUNREACH|ERR_NETWORK|UND_ERR_(CONNECT_TIMEOUT|HEADERS_TIMEOUT|BODY_TIMEOUT|SOCKET))$/.test(code);
+  }
+  return error instanceof TypeError;
 }
 
-export async function requestIntent(config, payload) {
+function requestError(response, fallback) {
+  const data = response?.data;
+  const reason = Array.isArray(data?.message) ? data.message.join("; ") : data?.message || data?.error || fallback;
+  const status = response?.status;
+  return Object.assign(new Error(String(reason)), {
+    retryable: status === 429 || (status >= 500 && status < 600) || (status === 409 && data?.error === "request_in_progress"),
+    retryAfter: response?.headers?.get?.("retry-after") ?? response?.headers?.["retry-after"]
+  });
+}
+
+let legacyBackendLogged = false;
+
+function tokenResult(data, tokenRaw, plan, source) {
+  if (data.kind === undefined && !legacyBackendLogged) {
+    legacyBackendLogged = true;
+    process.stderr.write("[armorcodex-policy] backend replied without kind; plan capture replay support is unconfirmed\n");
+  }
+  const parsed = tokenRaw ? extractPlanFromIntentToken(tokenRaw) : null;
+  return {
+    skipped: false, source, tokenRaw, plan: parsed?.plan || plan,
+    planId: data.planId ?? data.plan_id ?? data.rawToken?.plan_id,
+    kind: data.kind,
+    expiresAt: Number.isFinite(data.expiresAt) ? data.expiresAt : data.expires_at ?? parsed?.expiresAt,
+    planCheck: data.planCheck
+  };
+}
+
+export async function requestIntent(config, payload, descriptor, { timeoutMs = config.timeoutMs } = {}) {
   if (!isPlainObject(payload.plan)) {
     throw new Error("ArmorCodex requests an intent token only for a registered plan");
   }
+  if (!config.apiKey || config.mode === "monitor") return { skipped: true };
   if (config.intentEndpoint) {
-    const response = await postJson(
-      config.intentEndpoint,
-      payload,
-      buildAuthHeaders(config),
-      config.timeoutMs
-    );
-    if (!response.ok) {
-      throw new Error(response.text || `Intent request failed: ${response.status}`);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let response;
+    let data;
+    try {
+      response = await fetch(config.intentEndpoint, {
+        method: "POST", body: JSON.stringify(descriptor?.body || payload),
+        headers: { ...buildAuthHeaders(config), ...descriptor?.headers }, signal: controller.signal
+      });
+      const text = await response.text();
+      try { data = JSON.parse(text); } catch { data = { message: text }; }
+    } catch (error) {
+      error.retryable = isNetworkError(error);
+      throw error;
+    } finally {
+      clearTimeout(timer);
     }
-    const data = isPlainObject(response.data) ? response.data : {};
+    if (!response.ok) throw requestError({ status: response.status, data, headers: response.headers }, `Intent request failed: ${response.status}`);
     const tokenRaw =
       typeof data.intentTokenRaw === "string"
         ? data.intentTokenRaw
@@ -513,28 +550,18 @@ export async function requestIntent(config, payload) {
           : isPlainObject(data.token)
             ? JSON.stringify(data.token)
             : undefined;
-    const parsedFromToken = tokenRaw ? extractPlanFromIntentToken(tokenRaw) : null;
-    const plan = isPlainObject(data.plan) ? data.plan : parsedFromToken?.plan;
-    const expiresAt =
-      Number.isFinite(data.expiresAt)
-        ? data.expiresAt
-        : Number.isFinite(data.expires_at)
-          ? data.expires_at
-          : parsedFromToken?.expiresAt;
-    return {
-      skipped: false,
-      source: "custom-endpoint",
-      tokenRaw,
-      plan,
-      expiresAt
-    };
+    return tokenResult(data, tokenRaw, payload.plan, "custom-endpoint");
   }
 
   if (!config.useSdkIntent || !config.apiKey) {
     return { skipped: true };
   }
-  const client = getSdkClient(config);
-  const plan = payload.plan;
+  const body = descriptor?.body;
+  const client = getSdkClient({
+    ...config, maxRetries: 0,
+    ...(body ? { userId: body.user_id, agentId: body.agent_id, contextId: body.context_id } : {})
+  });
+  const plan = body?.plan || payload.plan;
   const metadata = {
     source: "codex",
     session_id: payload.session_id,
@@ -542,19 +569,34 @@ export async function requestIntent(config, payload) {
     ...payload.metadata
   };
   const capture = client.capturePlan(config.llmId, payload.prompt || "", plan, metadata);
-  const token = await client.getIntentToken(capture, csrgIntentPolicy(payload.policy_hash), payload.validitySeconds, {
-    contextId: payload.session_id
+  let outcome;
+  const matches = (request) => descriptor && request?.headers?.["Idempotency-Key"] === descriptor.key;
+  // The SDK wraps errors without HTTP status or Retry-After. Capture them before
+  // that wrapper or a refusal could be retried as a network failure.
+  const interceptor = client.httpClient.interceptors.response.use((response) => {
+    if (matches(response.config)) outcome = { response };
+    return response;
+  }, (error) => {
+    if (matches(error.config)) outcome = { response: error.response, error };
+    throw error;
   });
-  const tokenRaw = JSON.stringify(token);
-  const parsedFromToken = extractPlanFromIntentToken(tokenRaw);
-  return {
-    skipped: false,
-    source: "armoriq-sdk",
-    tokenRaw,
-    plan: parsedFromToken?.plan || plan,
-    expiresAt: Number.isFinite(token.expiresAt) ? token.expiresAt : parsedFromToken?.expiresAt,
-    planCheck: token.planCheck
-  };
+  try {
+    const token = await client.getIntentToken(capture, body ? body.policy : csrgIntentPolicy(payload.policy_hash), body ? body.expires_in : payload.validitySeconds, {
+      contextId: body?.context_id || payload.session_id,
+      idempotencyKey: descriptor?.key,
+      planKind: descriptor?.headers["X-ArmorIQ-Plan-Kind"],
+      parentPlanId: descriptor?.headers["X-ArmorIQ-Parent-Plan-Id"],
+      promptId: descriptor?.headers["X-ArmorIQ-Prompt-Id"],
+      timeoutMs
+    });
+    return tokenResult(token, JSON.stringify(token), plan, "armoriq-sdk");
+  } catch (error) {
+    if (outcome?.response) throw requestError(outcome.response, error.message);
+    if (outcome?.error) throw Object.assign(outcome.error, { retryable: isNetworkError(outcome.error) });
+    throw error;
+  } finally {
+    client.httpClient.interceptors.response.eject(interceptor);
+  }
 }
 
 export function getSessionTokenUsedStepIndices(session, intentTokenRaw) {

@@ -50,7 +50,7 @@ async function withServer(fn) {
 
 test("a plan registered in one Codex session is enforced only in that session", async () => {
   await withServer(async ({ register, preToolUse }) => {
-    assert.match(await register({ sessionId: "sess-A", threadId: "sess-A" }), /Intent registered/);
+    assert.match(await register({ sessionId: "sess-A", threadId: "sess-A" }), /Plan recorded locally, not registered \(logged_out\)\./);
     const other = await preToolUse("sess-B");
     assert.equal(other?.hookSpecificOutput?.permissionDecision, "deny");
     assert.match(other.hookSpecificOutput.permissionDecisionReason, /intent plan missing/);
@@ -60,7 +60,7 @@ test("a plan registered in one Codex session is enforced only in that session", 
 
 test("a registration without Codex's session id is rejected and stores nothing", async () => {
   await withServer(async ({ register, dataDir }) => {
-    assert.match(await register(null), /Plan rejected: .*session id/);
+    assert.match(await register(null), /Plan not registered: .*session id/);
     const files = fs.existsSync(dataDir) ? fs.readdirSync(dataDir) : [];
     assert.deepEqual(files.filter((name) => name.startsWith("pending-plan")), []);
   });

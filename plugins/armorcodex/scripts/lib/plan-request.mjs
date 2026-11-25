@@ -44,13 +44,22 @@ export function createPlanRequest(config, payload, session, kind = session.count
   };
   const body = config.intentEndpoint ? payload : {
     user_id: config.userId, agent_id: config.agentId, context_id: payload.session_id,
-    plan: payload.plan, policy: payload.policy, expires_in: payload.validitySeconds
+    plan: payload.plan, policy: csrgIntentPolicy(payload.policy_hash), expires_in: payload.validitySeconds
   };
   return JSON.parse(JSON.stringify({
     key, headers, body, planHash: requestHash, kind,
     transport: config.intentEndpoint ? "custom" : "sdk",
     promptId: session.promptId, promptGeneration: session.promptGeneration, authGeneration: session.authGeneration
   }));
+}
+
+/**
+ * The policy CSRG signs into the token. CSRG reads it as an allow/deny list and
+ * refuses every plan step when it has no allow list, so a held call could never
+ * pass the backend's step check. Local rules are already enforced in PreToolUse.
+ */
+export function csrgIntentPolicy(policyHash) {
+  return { allow: ["*"], deny: [], metadata: { source: "codex", policyHash: policyHash ?? "" } };
 }
 
 function unconfirmed(reason) {

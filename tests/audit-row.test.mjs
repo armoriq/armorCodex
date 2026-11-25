@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import fs, { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { handlePostToolUse, handlePostToolUseFailure, handlePreToolUse } from "../plugins/armorcodex/scripts/lib/engine.mjs";
@@ -67,7 +68,8 @@ const post = (config, extra) =>
     config
   );
 
-test("audit rows reference the plan by id and carry no token, so a 16 KB token still ships", async () => {
+// regression: #0007
+test("audit rows reference the plan by id and carry no token, so a 16 KB token still ships", async (t) => {
   const config = await setup();
   assert.ok(JSON.stringify(sdkIntentToken()).length > 16_000);
   await post(config);
@@ -86,6 +88,26 @@ test("audit rows reference the plan by id and carry no token, so a 16 KB token s
     assert.equal(row.client_id, "codex");
     assert.ok(Buffer.byteLength(JSON.stringify(row)) <= WAL_LINE_CAP);
   }
+  const originalOpen = fs.open;
+  const originalWrite = fs.writeFile;
+  const failLock = (original) => (file, ...args) => {
+    if (file === `${config.runtimeFile}.lock`) return Promise.reject(new Error("runtime lock unavailable"));
+    return original(file, ...args);
+  };
+  const opening = t.mock.method(fs, "open", failLock(originalOpen));
+  const writing = t.mock.method(fs, "writeFile", failLock(originalWrite));
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(post(config), /runtime lock unavailable/);
+    await assert.rejects(handlePostToolUseFailure(
+      { session_id: SESSION, tool_name: "Read", tool_input: {}, error: "missing" }, config
+    ), /runtime lock unavailable/);
+    assert.deepEqual((await walRows(config)).map((row) => row.status), ["success", "failed", "success", "failed"]);
+  } finally {
+    opening.mock.restore();
+    writing.mock.restore();
+    syncBuiltinESMExports();
+  }
 });
 
 test("an oversized tool output is cut to fit and marked truncated", async () => {
@@ -99,17 +121,18 @@ test("an oversized tool output is cut to fit and marked truncated", async () => 
   assert.ok(Buffer.byteLength(JSON.stringify(row)) <= WAL_LINE_CAP);
 });
 
-test("duration_ms carries the time between PreToolUse and PostToolUse for the same call", async () => {
+test("duration_ms carries the time between PreToolUse and PostToolUse for the same call", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
   const config = await setup();
   const toolUseId = "call_duration_1";
   await handlePreToolUse(
     { hook_event_name: "PreToolUse", session_id: SESSION, tool_name: "Bash", tool_use_id: toolUseId, tool_input: { command: "ls" } },
     config
   );
-  await new Promise((resolve) => setTimeout(resolve, 150));
+  t.mock.timers.tick(150);
   await post(config, { tool_use_id: toolUseId });
   const [row] = await walRows(config);
-  assert.ok(row.duration_ms >= 140 && row.duration_ms < 5000, `duration_ms ${row.duration_ms}`);
+  assert.equal(row.duration_ms, 150);
 });
 
 test("a row that cannot fit even after cutting is reported on stderr, not dropped silently", async () => {

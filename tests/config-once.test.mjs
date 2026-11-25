@@ -7,6 +7,7 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "../plugins/armorcodex/scripts/lib/config.mjs";
 import { getSdkClient } from "../plugins/armorcodex/scripts/lib/intent.mjs";
+import { beginPrompt, syncSessionAuth, withRuntimeState } from "../plugins/armorcodex/scripts/lib/runtime-state.mjs";
 import { signIn, withHome } from "./helpers/login.mjs";
 
 const requirePlugin = createRequire(new URL("../plugins/armorcodex/package.json", import.meta.url));
@@ -43,11 +44,6 @@ test("building the SDK client leaves ARMORIQ_ENV and the saved login in place", 
   }
 });
 
-async function waitFor(check, ms = 5000) {
-  const until = Date.now() + ms;
-  while (!check() && Date.now() < until) await new Promise((r) => setTimeout(r, 25));
-}
-
 async function startServer(home) {
   const transport = new StdioClientTransport({
     command: process.execPath,
@@ -65,6 +61,8 @@ async function startServer(home) {
   transport.stderr.on("data", (chunk) => (stderr += chunk));
   await client.connect(transport).catch((error) => assert.fail(`${error.message}\n${stderr}`));
   const register = async (goal, sessionId = "config-once") => {
+    const config = withHome(home, () => loadConfig({ ARMORCODEX_DATA_DIR: path.join(home, "data") }));
+    await withRuntimeState(config.runtimeFile, (state) => beginPrompt(syncSessionAuth(state, sessionId, config), goal));
     const result = await client.callTool({
       name: "register_intent_plan",
       arguments: { goal, steps: [{ action: "Bash" }] },
@@ -87,9 +85,8 @@ test("the MCP server requests a token for every registration in one process", as
   const { client, register } = await startServer(home);
   try {
     for (const goal of ["first-goal", "second-goal"]) {
-      assert.match(await register(goal), /the ArmorIQ token request failed/, goal);
+      assert.match(await register(goal), /Plan not registered: sandbox\./, goal);
     }
-    await waitFor(() => tokenRequests(home).length >= 2);
     const goals = tokenRequests(home).map((request) => (request.body.includes("second-goal") ? "second" : "first"));
     assert.deepEqual(goals.sort(), ["first", "second"]);
   } finally {
@@ -102,9 +99,9 @@ test("the MCP server picks up a login made after it started", async () => {
   const home = tempHome();
   const { client, register } = await startServer(home);
   try {
-    assert.match(await register("before-login"), /no ArmorIQ backend configured/);
+    assert.match(await register("before-login"), /Plan recorded locally, not registered \(logged_out\)\./);
     signIn(home, { backend: DEFAULT_BACKEND, apiKey: KEY });
-    assert.match(await register("after-login"), /the ArmorIQ token request failed/);
+    assert.match(await register("after-login"), /Plan not registered: sandbox\./);
   } finally {
     await client.close();
     fs.rmSync(home, { recursive: true, force: true });
@@ -116,8 +113,7 @@ test("the token request carries the Codex session id as the plan's context id", 
   const { client, register } = await startServer(home);
   try {
     const sessionId = "019a2c1e-5b7d-7c11-9e3f-0a1b2c3d4e5f";
-    assert.match(await register("context-goal", sessionId), /the ArmorIQ token request failed/);
-    await waitFor(() => tokenRequests(home).length >= 1);
+    assert.match(await register("context-goal", sessionId), /Plan not registered: sandbox\./);
     assert.equal(JSON.parse(tokenRequests(home)[0].body).context_id, sessionId);
   } finally {
     await client.close();
