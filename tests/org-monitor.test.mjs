@@ -133,3 +133,16 @@ test("a key the backend rejects is signed out, so a Quiet workspace no longer tu
   const { pre } = await session(env);
   assert.equal(pre?.hookSpecificOutput?.permissionDecision, "deny");
 });
+
+test("a key the backend rejects gets the local intent setting back, not the Monitor override", async (t) => {
+  const { env } = await setup(t, { enforcementMode: "shadow", monitorNotices: false }, {}, 401);
+  await hook(env, { hook_event_name: "SessionStart", source: "startup" });
+  const pre = await hook(env, {
+    hook_event_name: "PreToolUse",
+    tool_name: "apply_patch",
+    tool_input: { input: "*** Begin Patch\n*** Add File: a.txt\n+hi\n*** End Patch" },
+    tool_use_id: "call_patch_1"
+  });
+  assert.equal(pre?.hookSpecificOutput?.permissionDecision, "deny");
+  assert.match(pre.hookSpecificOutput.permissionDecisionReason, /plan|intent/i);
+});

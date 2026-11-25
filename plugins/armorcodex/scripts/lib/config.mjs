@@ -124,7 +124,17 @@ export function withLogin(settings, env = process.env) {
   const orgMonitor = Boolean(apiKey) && orgMonitorFor(settings.dataDir, env);
   return {
     ...settings,
-    ...(orgMonitor && { intentRequired: false, planningEnabled: false, contextHintsEnabled: false }),
+    ...(orgMonitor && {
+      intentRequired: false,
+      planningEnabled: false,
+      contextHintsEnabled: false,
+      // localOnly() puts these back if the backend rejects the key.
+      beforeOrgMonitor: {
+        intentRequired: settings.intentRequired,
+        planningEnabled: settings.planningEnabled,
+        contextHintsEnabled: settings.contextHintsEnabled
+      }
+    }),
     orgMonitor,
     orgMonitorNotices: orgMonitor && orgMonitorNoticesFor(settings.dataDir, env),
     apiKey,
